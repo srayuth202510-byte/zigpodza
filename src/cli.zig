@@ -52,6 +52,7 @@ pub const usage =
     \\  stats [--no-stream] [-a] [CONTAINER...]  Display CPU, memory, and PIDs metrics
     \\  volume ls|create|rm|inspect [NAME]       Manage named volumes
     \\  network ls|inspect [NAME]      List or inspect container networks
+    \\  system ping|df|prune [-f]      Check daemon health, disk usage, or prune unused resources
     \\  audit [--json] [FILE]          Verify SHA-256 hash chain of audit.log (--json: structured output)
     \\  demo                           Run 14-case fail-closed ALLOW/DENY self-test suite
     \\  version                        Show client and server versions
@@ -193,6 +194,17 @@ pub const NetworkOpts = struct {
     name: ?[]const u8 = null,
 };
 
+pub const SystemAction = enum {
+    ping,
+    df,
+    prune,
+};
+
+pub const SystemOpts = struct {
+    action: SystemAction,
+    force: bool = false,
+};
+
 pub const Command = union(enum) {
     help,
     client_version,
@@ -219,6 +231,7 @@ pub const Command = union(enum) {
     stats: StatsOpts,
     volume: VolumeOpts,
     network: NetworkOpts,
+    system: SystemOpts,
 };
 
 pub const Parsed = struct {
@@ -344,6 +357,8 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
         try parseVolume(rest)
     else if (eql(name, "network"))
         try parseNetwork(rest)
+    else if (eql(name, "system"))
+        try parseSystem(rest)
     else if (eql(name, "audit"))
         try parseAudit(rest)
     else if (eql(name, "demo"))
@@ -926,6 +941,36 @@ fn parseRmi(args: []const []const u8) ParseError!Command {
         .image = image orelse return error.MissingArgument,
         .force = force,
     } };
+}
+
+/// Parses `system ping|df|prune [-f|--force]`.
+fn parseSystem(args: []const []const u8) ParseError!Command {
+    if (args.len == 0) return error.MissingArgument;
+    const sub = args[0];
+    const rest = args[1..];
+    if (eql(sub, "ping")) {
+        if (rest.len > 0) return if (isFlag(rest[0])) error.UnknownFlag else error.TooManyArguments;
+        return .{ .system = .{ .action = .ping } };
+    } else if (eql(sub, "df")) {
+        if (rest.len > 0) return if (isFlag(rest[0])) error.UnknownFlag else error.TooManyArguments;
+        return .{ .system = .{ .action = .df } };
+    } else if (eql(sub, "prune")) {
+        var force = false;
+        for (rest) |a| {
+            if (eql(a, "-f") or eql(a, "--force")) {
+                force = true;
+            } else if (isFlag(a)) {
+                return error.UnknownFlag;
+            } else {
+                return error.TooManyArguments;
+            }
+        }
+        return .{ .system = .{ .action = .prune, .force = force } };
+    } else if (isFlag(sub)) {
+        return error.UnknownFlag;
+    } else {
+        return error.UnknownCommand;
+    }
 }
 
 // ---------------------------------------------------------------- tests
@@ -1545,4 +1590,17 @@ test "parse start, restart, pause, unpause, rename, and rmi subcommands" {
     defer p_rmi.deinit(alloc);
     try std.testing.expectEqualStrings("alpine:3.20", p_rmi.command.rmi.image);
     try std.testing.expect(p_rmi.command.rmi.force);
+
+    const p_sys_ping = try parse(alloc, &.{ "system", "ping" });
+    defer p_sys_ping.deinit(alloc);
+    try std.testing.expectEqual(SystemAction.ping, p_sys_ping.command.system.action);
+
+    const p_sys_df = try parse(alloc, &.{ "system", "df" });
+    defer p_sys_df.deinit(alloc);
+    try std.testing.expectEqual(SystemAction.df, p_sys_df.command.system.action);
+
+    const p_sys_prune = try parse(alloc, &.{ "system", "prune", "-f" });
+    defer p_sys_prune.deinit(alloc);
+    try std.testing.expectEqual(SystemAction.prune, p_sys_prune.command.system.action);
+    try std.testing.expect(p_sys_prune.command.system.force);
 }

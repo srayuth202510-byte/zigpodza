@@ -144,13 +144,16 @@ zigpod stats --no-stream demo-alpine
 zigpod top demo-alpine
 zigpod kill -s SIGTERM demo-alpine
 
-# Manage named volumes and inspect container networks
+# Manage named volumes, inspect container networks, and check daemon/disk status
 zigpod volume ls
 zigpod volume create app-data
 zigpod volume inspect app-data
 zigpod volume rm app-data
 zigpod network ls
 zigpod network inspect podman
+zigpod system ping
+zigpod system df
+zigpod system prune -f
 
 # Inspect a container or image (state, IP, mounts, hardening limits)
 zigpod inspect demo-alpine

@@ -32,6 +32,10 @@ pub const VolumeCreateRequest = types.VolumeCreateRequest;
 pub const VolumeInfo = types.VolumeInfo;
 pub const VolumeListResponse = types.VolumeListResponse;
 pub const NetworkInfo = types.NetworkInfo;
+pub const SystemDfResponse = types.SystemDfResponse;
+pub const ContainerPruneResponse = types.ContainerPruneResponse;
+pub const ImagePruneItem = types.ImagePruneItem;
+pub const ImagePruneResponse = types.ImagePruneResponse;
 const PullStatusLine = types.PullStatusLine;
 
 /// Validates a container ID or name to prevent path traversal, query injection,
@@ -700,6 +704,139 @@ pub fn inspectNetwork(client: *const http.Client, logger: *log.Logger, name: []c
     if (net.Scope.len > 0) try writer.print("{s:<15}{s}\n", .{ "Scope:", net.Scope });
     try writer.print("{s:<15}{s}\n", .{ "Internal:", if (net.Internal) "true" else "false" });
     logger.info("inspected network {s}", .{name});
+}
+
+/// Pings the Podman/Docker daemon (`GET /_ping`).
+pub fn systemPing(client: *const http.Client, logger: *log.Logger, writer: anytype) !void {
+    const path = api_prefix ++ "/_ping";
+
+    logger.debug("GET {s}", .{path});
+    const resp = try client.request("GET", path, null);
+    defer resp.deinit();
+
+    if (!resp.ok()) return logApiFailure(logger, "GET", path, resp);
+
+    const body = std.mem.trim(u8, resp.body, " \t\r\n");
+    try writer.print("{s}\n", .{if (body.len > 0) body else "OK"});
+    logger.info("system ping succeeded", .{});
+}
+
+/// Displays disk usage summary for images, containers, and local volumes (`GET /system/df`).
+pub fn systemDf(client: *const http.Client, logger: *log.Logger, writer: anytype) !void {
+    const path = api_prefix ++ "/system/df";
+
+    logger.debug("GET {s}", .{path});
+    const resp = try client.request("GET", path, null);
+    defer resp.deinit();
+
+    if (!resp.ok()) return logApiFailure(logger, "GET", path, resp);
+
+    const parsed = try std.json.parseFromSlice(SystemDfResponse, client.allocator, resp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const df = parsed.value;
+    const imgs = df.Images orelse &[_]ImageSummary{};
+    var img_bytes: i64 = if (df.LayersSize > 0) df.LayersSize else 0;
+    if (img_bytes == 0) {
+        for (imgs) |img| {
+            if (img.Size > 0) img_bytes +|= img.Size;
+        }
+    }
+
+    const ctrs = df.Containers orelse &[_]SystemDfResponse.DfContainer{};
+    var active_ctrs: usize = 0;
+    var ctr_bytes: i64 = 0;
+    for (ctrs) |c| {
+        if (std.mem.eql(u8, c.State, "running")) active_ctrs += 1;
+        if (c.SizeRw > 0) ctr_bytes +|= c.SizeRw;
+    }
+
+    const vols = df.Volumes orelse &[_]SystemDfResponse.DfVolume{};
+    var active_vols: usize = 0;
+    var vol_bytes: i64 = 0;
+    for (vols) |v| {
+        if (v.UsageData) |u| {
+            if (u.RefCount > 0) active_vols += 1;
+            if (u.Size > 0) vol_bytes +|= u.Size;
+        }
+    }
+
+    var img_buf: [32]u8 = undefined;
+    var ctr_buf: [32]u8 = undefined;
+    var vol_buf: [32]u8 = undefined;
+
+    try writer.print("{s:<18} {s:<10} {s:<10} {s}\n", .{ "TYPE", "TOTAL", "ACTIVE", "SIZE" });
+    try writer.print("{s:<18} {d:<10} {d:<10} {s}\n", .{
+        "Images",
+        imgs.len,
+        imgs.len,
+        utils.formatSize(&img_buf, img_bytes),
+    });
+    try writer.print("{s:<18} {d:<10} {d:<10} {s}\n", .{
+        "Containers",
+        ctrs.len,
+        active_ctrs,
+        utils.formatSize(&ctr_buf, ctr_bytes),
+    });
+    try writer.print("{s:<18} {d:<10} {d:<10} {s}\n", .{
+        "Local Volumes",
+        vols.len,
+        active_vols,
+        utils.formatSize(&vol_buf, vol_bytes),
+    });
+    logger.info("fetched system disk usage (images={d}, containers={d}, volumes={d})", .{
+        imgs.len, ctrs.len, vols.len,
+    });
+}
+
+/// Prunes stopped containers (`POST /containers/prune`) and dangling images (`POST /images/prune`).
+pub fn systemPrune(client: *const http.Client, logger: *log.Logger, writer: anytype) !void {
+    const c_path = api_prefix ++ "/containers/prune";
+    logger.debug("POST {s}", .{c_path});
+    const c_resp = try client.request("POST", c_path, null);
+    defer c_resp.deinit();
+    if (!c_resp.ok()) return logApiFailure(logger, "POST", c_path, c_resp);
+
+    const c_parsed = try std.json.parseFromSlice(ContainerPruneResponse, client.allocator, c_resp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer c_parsed.deinit();
+
+    const i_path = api_prefix ++ "/images/prune";
+    logger.debug("POST {s}", .{i_path});
+    const i_resp = try client.request("POST", i_path, null);
+    defer i_resp.deinit();
+    if (!i_resp.ok()) return logApiFailure(logger, "POST", i_path, i_resp);
+
+    const i_parsed = try std.json.parseFromSlice(ImagePruneResponse, client.allocator, i_resp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer i_parsed.deinit();
+
+    var deleted_ctrs: usize = 0;
+    if (c_parsed.value.ContainersDeleted) |ids| {
+        deleted_ctrs = ids.len;
+        if (ids.len > 0) {
+            try writer.writeAll("Deleted Containers:\n");
+            for (ids) |id| {
+                try writer.print("  {s}\n", .{utils.shortId(id)});
+            }
+        }
+    }
+
+    var deleted_imgs: usize = 0;
+    if (i_parsed.value.ImagesDeleted) |items| {
+        deleted_imgs = items.len;
+    }
+
+    const reclaimed = c_parsed.value.SpaceReclaimed +| i_parsed.value.SpaceReclaimed;
+    var size_buf: [32]u8 = undefined;
+    try writer.print("Total reclaimed space: {s}\n", .{formatSizeU64(&size_buf, reclaimed)});
+    logger.info("pruned {d} container(s) and {d} image(s) (reclaimed={d} bytes)", .{
+        deleted_ctrs, deleted_imgs, reclaimed,
+    });
 }
 
 pub fn removeContainer(client: *const http.Client, logger: *log.Logger, id: []const u8, force: bool) !void {
@@ -3158,6 +3295,81 @@ test "restart, pause, unpause, rename, and removeImage endpoints + validation" {
     try renameContainer(&client, &logger, "web", "web2");
     try removeImage(&client, &logger, "alpine:3.20", true, out.writer());
     try std.testing.expectEqualStrings("Removed alpine:3.20\n", out.items);
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
+}
+
+test "systemPing, systemDf, and systemPrune endpoints" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-system-api-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const df_json =
+        "{\"LayersSize\":8388608," ++
+        "\"Images\":[{\"Id\":\"sha256:1111\",\"Size\":8388608}]," ++
+        "\"Containers\":[{\"Id\":\"c1\",\"State\":\"running\",\"SizeRw\":4096}]," ++
+        "\"Volumes\":[{\"Name\":\"v1\",\"UsageData\":{\"Size\":67108864,\"RefCount\":1}}]}";
+    const c_prune_json = "{\"ContainersDeleted\":[\"deadbeef12345678\"],\"SpaceReclaimed\":1048576}";
+    const i_prune_json = "{\"ImagesDeleted\":[{\"Deleted\":\"sha256:2222\"}],\"SpaceReclaimed\":3145728}";
+
+    const replies = [_]ScriptedReply{
+        .{
+            .expected_prefix = "GET /v1.40/_ping HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK",
+        },
+        .{
+            .expected_prefix = "GET /v1.40/system/df HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ df_json.len, df_json }),
+        },
+        .{
+            .expected_prefix = "POST /v1.40/containers/prune HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ c_prune_json.len, c_prune_json }),
+        },
+        .{
+            .expected_prefix = "POST /v1.40/images/prune HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ i_prune_json.len, i_prune_json }),
+        },
+    };
+
+    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{
+        .allocator = alloc,
+        .socket_path = sock_path,
+    };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    try systemPing(&client, &logger, out.writer());
+    try std.testing.expectEqualStrings("OK\n", out.items);
+
+    out.clearRetainingCapacity();
+    try systemDf(&client, &logger, out.writer());
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "Images") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "8.0 MB") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "64.0 MB") != null);
+
+    out.clearRetainingCapacity();
+    try systemPrune(&client, &logger, out.writer());
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "deadbeef1234") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "Total reclaimed space: 4.0 MB") != null);
 
     thread.join();
     joined = true;

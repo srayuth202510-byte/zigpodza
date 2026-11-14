@@ -316,3 +316,45 @@ pub const NetworkInfo = struct {
     Scope: []const u8 = "local",
     Internal: bool = false,
 };
+
+/// Response from `GET /system/df`.
+pub const SystemDfResponse = struct {
+    LayersSize: i64 = 0,
+    Images: ?[]const ImageSummary = null,
+    Containers: ?[]const DfContainer = null,
+    Volumes: ?[]const DfVolume = null,
+
+    pub const DfContainer = struct {
+        Id: []const u8 = "",
+        State: []const u8 = "",
+        SizeRw: i64 = 0,
+        SizeRootFs: i64 = 0,
+    };
+
+    pub const DfVolume = struct {
+        Name: []const u8 = "",
+        UsageData: ?UsageData = null,
+    };
+
+    pub const UsageData = struct {
+        Size: i64 = 0,
+        RefCount: i64 = 0,
+    };
+};
+
+/// Response from `POST /containers/prune`.
+pub const ContainerPruneResponse = struct {
+    ContainersDeleted: ?[]const []const u8 = null,
+    SpaceReclaimed: u64 = 0,
+};
+
+pub const ImagePruneItem = struct {
+    Untagged: ?[]const u8 = null,
+    Deleted: ?[]const u8 = null,
+};
+
+/// Response from `POST /images/prune`.
+pub const ImagePruneResponse = struct {
+    ImagesDeleted: ?[]const ImagePruneItem = null,
+    SpaceReclaimed: u64 = 0,
+};

@@ -163,6 +163,11 @@ fn dispatch(
             .ls => try pod.listNetworks(client, logger, stdout),
             .inspect => try pod.inspectNetwork(client, logger, n.name.?, stdout),
         },
+        .system => |s| switch (s.action) {
+            .ping => try pod.systemPing(client, logger, stdout),
+            .df => try pod.systemDf(client, logger, stdout),
+            .prune => try pod.systemPrune(client, logger, stdout),
+        },
         .stats => |opts| {
             if (!opts.no_stream and opts.containers.len == 1) {
                 try pod.streamContainerStats(client, logger, opts.containers[0], stdout);
