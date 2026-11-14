@@ -29,6 +29,7 @@ pub const SystemAction = types.SystemAction;
 pub const SystemOpts = types.SystemOpts;
 pub const PortOpts = types.PortOpts;
 pub const EventsOpts = types.EventsOpts;
+pub const Shell = types.Shell;
 pub const Command = types.Command;
 pub const Parsed = types.Parsed;
 pub const ParseError = types.ParseError;
@@ -124,6 +125,8 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
         .{ .diff = try single(rest) }
     else if (eql(name, "events"))
         try parseEvents(rest)
+    else if (eql(name, "completion"))
+        try parseCompletion(rest)
     else if (eql(name, "audit"))
         try parseAudit(rest)
     else if (eql(name, "demo"))
@@ -630,6 +633,20 @@ fn parseEvents(args: []const []const u8) ParseError!Command {
         }
     }
     return .{ .events = opts };
+}
+
+/// Parses `completion <bash|zsh|fish>`.
+fn parseCompletion(args: []const []const u8) ParseError!Command {
+    const raw = try single(args);
+    const shell: Shell = if (eql(raw, "bash"))
+        .bash
+    else if (eql(raw, "zsh"))
+        .zsh
+    else if (eql(raw, "fish"))
+        .fish
+    else
+        return error.InvalidValue;
+    return .{ .completion = shell };
 }
 
 // ---------------------------------------------------------------- tests
@@ -1305,4 +1322,24 @@ test "parse port, wait, diff, and events observation subcommands" {
     try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "events", "--until" }));
     try std.testing.expectError(error.UnknownFlag, parse(alloc, &.{ "events", "--bogus" }));
     try std.testing.expectError(error.TooManyArguments, parse(alloc, &.{ "events", "extra" }));
+}
+
+test "parse completion subcommand for bash, zsh, fish, and error paths" {
+    const alloc = std.testing.allocator;
+    const p1 = try parse(alloc, &.{ "completion", "bash" });
+    defer p1.deinit(alloc);
+    try std.testing.expectEqual(Shell.bash, p1.command.completion);
+
+    const p2 = try parse(alloc, &.{ "completion", "zsh" });
+    defer p2.deinit(alloc);
+    try std.testing.expectEqual(Shell.zsh, p2.command.completion);
+
+    const p3 = try parse(alloc, &.{ "completion", "fish" });
+    defer p3.deinit(alloc);
+    try std.testing.expectEqual(Shell.fish, p3.command.completion);
+
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{"completion"}));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "completion", "powershell" }));
+    try std.testing.expectError(error.UnknownFlag, parse(alloc, &.{ "completion", "--bogus" }));
+    try std.testing.expectError(error.TooManyArguments, parse(alloc, &.{ "completion", "bash", "extra" }));
 }

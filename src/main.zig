@@ -1,6 +1,7 @@
 //! zigpod CLI entry point.
 const std = @import("std");
 const cli = @import("cli.zig");
+const completion = @import("completion.zig");
 const config = @import("config.zig");
 const demo = @import("demo.zig");
 const http = @import("http.zig");
@@ -59,6 +60,13 @@ fn run(gpa_allocator: std.mem.Allocator) u8 {
         .demo => {
             demo.runSelfTest(gpa_allocator, stdout) catch |e| {
                 stderr.print("zigpod: demo failed: {s}\n", .{@errorName(e)}) catch {};
+                return 1;
+            };
+            return 0;
+        },
+        .completion => |shell| {
+            completion.writeCompletion(shell, stdout) catch |e| {
+                stderr.print("zigpod: completion failed: {s}\n", .{@errorName(e)}) catch {};
                 return 1;
             };
             return 0;
@@ -137,7 +145,7 @@ fn dispatch(
     stdout: anytype,
 ) !u8 {
     switch (cmd) {
-        .help, .client_version, .demo, .audit => return 0,
+        .help, .client_version, .demo, .audit, .completion => return 0,
         .ps => |opts| if (opts.json)
             try pod.listContainersJson(client, logger, opts.all, stdout)
         else
@@ -434,6 +442,7 @@ fn reportFailure(logger: *log.Logger, cmd: cli.Command, socket_path: []const u8,
 
 test {
     _ = cli;
+    _ = completion;
     _ = config;
     _ = demo;
     _ = http;

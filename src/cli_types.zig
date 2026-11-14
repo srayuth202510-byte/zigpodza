@@ -57,6 +57,7 @@ pub const usage =
     \\  wait CONTAINER                 Block until a container stops and print its exit code
     \\  diff CONTAINER                 Inspect changes on a container's filesystem
     \\  events [--since TS] [--until TS] [--json]  Stream or query daemon events
+    \\  completion bash|zsh|fish       Generate shell tab-completion script
     \\  audit [--json] [FILE]          Verify SHA-256 hash chain of audit.log (--json: structured output)
     \\  demo                           Run 14-case fail-closed ALLOW/DENY self-test suite
     \\  version                        Show client and server versions
@@ -235,6 +236,12 @@ pub const EventsOpts = struct {
     json: bool = false,
 };
 
+pub const Shell = enum {
+    bash,
+    zsh,
+    fish,
+};
+
 pub const Command = union(enum) {
     help,
     client_version,
@@ -266,6 +273,7 @@ pub const Command = union(enum) {
     wait: []const u8,
     diff: []const u8,
     events: EventsOpts,
+    completion: Shell,
 };
 
 pub const Parsed = struct {
