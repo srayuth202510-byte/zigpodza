@@ -1,0 +1,19 @@
+# ZigPod runtime reference configuration
+# Note: zigpod currently reads these values from CLI flags and environment
+# variables (see `src/config.zig`), with the defaults documented below.
+
+[socket]
+# Override order:
+#   1. --socket PATH
+#   2. $ZIGPOD_SOCKET
+#   3. $CONTAINER_HOST or $DOCKER_HOST (unix://...)
+#   4. $XDG_RUNTIME_DIR/podman/podman.sock
+#   5. /run/podman/podman.sock
+default_path = "/run/podman/podman.sock"
+
+[logging]
+# Override via $ZIGPOD_LOG_DIR (defaults to current working directory ".")
+log_dir = "."
+system_log = "system.log"
+error_log = "error.log"
+verbose = false

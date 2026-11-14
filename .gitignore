@@ -1,0 +1,12 @@
+# Zig build artifacts
+zig-out/
+.zig-cache/
+zig-cache/
+dist/
+
+# Compiled objects / Windows binaries
+*.o
+*.exe
+
+# OS files
+.DS_Store
