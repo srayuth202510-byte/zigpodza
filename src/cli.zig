@@ -1292,4 +1292,17 @@ test "parse port, wait, diff, and events observation subcommands" {
     try std.testing.expectEqualStrings("100", p4.command.events.since.?);
     try std.testing.expectEqualStrings("200", p4.command.events.until.?);
     try std.testing.expect(p4.command.events.json);
+
+    // Error & boundary paths
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{"port"}));
+    try std.testing.expectError(error.TooManyArguments, parse(alloc, &.{ "port", "web", "80", "extra" }));
+    try std.testing.expectError(error.UnknownFlag, parse(alloc, &.{ "port", "--bogus", "web" }));
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{"wait"}));
+    try std.testing.expectError(error.TooManyArguments, parse(alloc, &.{ "wait", "web", "extra" }));
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{"diff"}));
+    try std.testing.expectError(error.TooManyArguments, parse(alloc, &.{ "diff", "web", "extra" }));
+    try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "events", "--since" }));
+    try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "events", "--until" }));
+    try std.testing.expectError(error.UnknownFlag, parse(alloc, &.{ "events", "--bogus" }));
+    try std.testing.expectError(error.TooManyArguments, parse(alloc, &.{ "events", "extra" }));
 }

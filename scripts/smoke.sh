@@ -246,4 +246,24 @@ if "$BIN" audit "$TAMPERED" >/dev/null 2>&1; then
     exit 1
 fi
 
+# Exercise Phase 6A Balor offline audit pipeline (attack-surface + purple-team + secret hygiene).
+SAMPLE_INSP="$TMPDIR/inspect.json"
+cat >"$SAMPLE_INSP" <<'JSON'
+{
+  "Id": "smoke1234567890",
+  "Config": {"Env": ["API_TOKEN=ghp_1234567890abcdefghij123456"]},
+  "HostConfig": {
+    "ReadonlyRootfs": false,
+    "CapDrop": [],
+    "PidsLimit": 0,
+    "PortBindings": {"80/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8080"}]}
+  },
+  "NetworkSettings": {"IPAddress": "10.88.0.2"}
+}
+JSON
+BALOR_JSON=$("$ROOT_DIR/scripts/balor-security-audit.sh" --offline --inspect-json "$SAMPLE_INSP" --json)
+echo "$BALOR_JSON" | grep -q '"github-token"'
+echo "$BALOR_JSON" | grep -q '"purple-team"'
+echo "$BALOR_JSON" | grep -q '"attack-surface"'
+
 echo "[PASS] Compiled binary E2E, mock Podman hardening, and audit tampering detection passed."

@@ -956,3 +956,80 @@ test "portContainer, diffContainer, and fetchEvents endpoints + validation" {
     try std.testing.expectEqual(replies.len, ctx.matched);
 }
 
+test "portContainer, diffContainer, and fetchEvents edge, json, and error paths" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-observe-edge-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const insp_json =
+        "{\"Id\":\"web1234567890\",\"NetworkSettings\":{\"Ports\":{\"80/tcp\":[{\"HostIp\":\"\",\"HostPort\":\"8080\"}]}}}";
+    const ev_stream =
+        "not-json-line\n" ++
+        "{\"Type\":\"container\",\"Action\":\"die\",\"time\":1700000001,\"Actor\":{\"ID\":\"web1234567890abcd\"}}\n";
+
+    const replies = [_]ScriptedReply{
+        .{
+            .expected_prefix = "GET /v1.40/containers/web/json HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ insp_json.len, insp_json }),
+        },
+        .{
+            .expected_prefix = "GET /v1.40/containers/web/changes HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nnull",
+        },
+        .{
+            .expected_prefix = "GET /v1.40/containers/missing/changes HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nnot found",
+        },
+        .{
+            .expected_prefix = "GET /v1.40/events HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ ev_stream.len, ev_stream }),
+        },
+    };
+
+    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{
+        .allocator = alloc,
+        .socket_path = sock_path,
+    };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    // filter_port == null should list all ports and default empty HostIp to 0.0.0.0
+    try portContainer(&client, &logger, "web", null, out.writer());
+    try std.testing.expectEqualStrings("80/tcp -> 0.0.0.0:8080\n", out.items);
+
+    // null changes response should succeed with empty output
+    out.clearRetainingCapacity();
+    try diffContainer(&client, &logger, "web", out.writer());
+    try std.testing.expectEqual(@as(usize, 0), out.items.len);
+
+    // 404 from daemon should return PodmanApiError
+    try std.testing.expectError(ApiError.PodmanApiError, diffContainer(&client, &logger, "missing", out.writer()));
+
+    // json_mode skips malformed lines and emits valid JSON lines
+    out.clearRetainingCapacity();
+    try fetchEvents(&client, &logger, null, null, true, out.writer());
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"Action\":\"die\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "not-json-line") == null);
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
+}
+
