@@ -158,10 +158,11 @@ fn dispatch(
             .inspect => try pod.inspectNetwork(client, logger, n.name.?, stdout),
         },
         .stats => |opts| {
-            if (!opts.no_stream) {
-                logger.info("stats live streaming not yet implemented; using --no-stream snapshot", .{});
+            if (!opts.no_stream and opts.containers.len == 1) {
+                try pod.streamContainerStats(client, logger, opts.containers[0], stdout);
+            } else {
+                try pod.statsContainers(client, logger, opts.containers, opts.all, stdout);
             }
-            try pod.statsContainers(client, logger, opts.containers, opts.all, stdout);
         },
         .exec => |opts| {
             const req = pod.ExecCreateRequest{

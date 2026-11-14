@@ -1463,6 +1463,101 @@ pub fn statsContainers(
     logger.info("fetched stats for {d} container(s)", .{list_parsed.value.len});
 }
 
+fn StatsStreamCtx(comptime WriterType: type) type {
+    return struct {
+        allocator: std.mem.Allocator,
+        id: []const u8,
+        writer: WriterType,
+        line_buf: std.ArrayListUnmanaged(u8) = .{},
+        frames: usize = 0,
+
+        fn deinit(self: *@This()) void {
+            self.line_buf.deinit(self.allocator);
+        }
+
+        fn onChunk(self: *@This(), chunk: []const u8) !void {
+            const projected = std.math.add(usize, self.line_buf.items.len, chunk.len) catch return http.Error.InvalidResponse;
+            if (projected > 1024 * 1024) return http.Error.InvalidResponse;
+            try self.line_buf.appendSlice(self.allocator, chunk);
+
+            var start: usize = 0;
+            while (std.mem.indexOfScalarPos(u8, self.line_buf.items, start, '\n')) |nl| {
+                const line = std.mem.trim(u8, self.line_buf.items[start..nl], " \r\t");
+                if (line.len > 0) try self.handleLine(line);
+                start = nl + 1;
+            }
+            if (start > 0) {
+                const rem = self.line_buf.items.len - start;
+                if (rem > 0) std.mem.copyForwards(u8, self.line_buf.items[0..rem], self.line_buf.items[start..]);
+                self.line_buf.items.len = rem;
+            }
+        }
+
+        fn flush(self: *@This()) !void {
+            const line = std.mem.trim(u8, self.line_buf.items, " \r\t");
+            if (line.len > 0) try self.handleLine(line);
+            self.line_buf.items.len = 0;
+        }
+
+        fn handleLine(self: *@This(), line: []const u8) !void {
+            const parsed = try std.json.parseFromSlice(ContainerStats, self.allocator, line, .{
+                .ignore_unknown_fields = true,
+            });
+            defer parsed.deinit();
+            try formatStatsRow(self.writer, self.id, parsed.value);
+            self.frames += 1;
+        }
+    };
+}
+
+/// Streams live CPU, memory, and PIDs metrics (`GET /containers/{id}/stats?stream=true`)
+/// via incremental HTTP/1.1 chunked/body streaming until the stream ends.
+pub fn streamContainerStats(
+    client: *const http.Client,
+    logger: *log.Logger,
+    id: []const u8,
+    writer: anytype,
+) !void {
+    try validateIdentifier(id);
+
+    const path = try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/stats?stream=true", .{ api_prefix, id });
+    defer client.allocator.free(path);
+
+    try writer.print("{s:<14} {s:<20} {s:<9} {s:<24} {s:<9} {s}\n", .{
+        "CONTAINER ID", "NAME", "CPU %", "MEM USAGE / LIMIT", "MEM %", "PIDS",
+    });
+
+    logger.debug("STREAM GET {s}", .{path});
+    const WriterType = @TypeOf(writer);
+    var ctx = StatsStreamCtx(WriterType){
+        .allocator = client.allocator,
+        .id = id,
+        .writer = writer,
+    };
+    defer ctx.deinit();
+
+    const resp = try client.streamRequest(
+        "GET",
+        path,
+        null,
+        http.blocking_timeout_ms,
+        &ctx,
+        StatsStreamCtx(WriterType).onChunk,
+    );
+    defer resp.deinit();
+
+    if (!resp.ok()) {
+        const err_resp = http.Response{
+            .status = resp.status,
+            .body = resp.error_body,
+            .allocator = client.allocator,
+        };
+        return logApiFailure(logger, "GET", path, err_resp);
+    }
+    try ctx.flush();
+    logger.info("streamed {d} stats frame(s) for container {s}", .{ ctx.frames, utils.shortId(id) });
+}
+
 /// Demultiplexes Docker/Podman attached log frames ([stream_type, 0, 0, 0, size_be32][payload...]).
 /// Falls back to writing `raw` verbatim when the payload is plain text (e.g., TTY containers).
 pub fn demuxLogs(raw: []const u8, writer: anytype) !void {
@@ -2823,4 +2918,74 @@ test "kill, top, volume, and network endpoints + signal/name validation" {
     thread.join();
     joined = true;
     try std.testing.expectEqual(replies.len, ctx.matched);
+}
+
+fn runStreamStatsMockServer(server: *std.net.Server) void {
+    const frame1 =
+        "{\"id\":\"abcdef1234567890\",\"name\":\"/web\"," ++
+        "\"cpu_stats\":{\"cpu_usage\":{\"total_usage\":200000000},\"system_cpu_usage\":2000000000,\"online_cpus\":2}," ++
+        "\"precpu_stats\":{\"cpu_usage\":{\"total_usage\":100000000},\"system_cpu_usage\":1000000000}," ++
+        "\"memory_stats\":{\"usage\":33554432,\"limit\":268435456}," ++
+        "\"pids_stats\":{\"current\":5}}\n";
+    const frame2 =
+        "{\"id\":\"abcdef1234567890\",\"name\":\"/web\"," ++
+        "\"cpu_stats\":{\"cpu_usage\":{\"total_usage\":350000000},\"system_cpu_usage\":2500000000,\"online_cpus\":2}," ++
+        "\"precpu_stats\":{\"cpu_usage\":{\"total_usage\":200000000},\"system_cpu_usage\":2000000000}," ++
+        "\"memory_stats\":{\"usage\":67108864,\"limit\":268435456}," ++
+        "\"pids_stats\":{\"current\":9}}\n";
+    const raw = std.fmt.comptimePrint(
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{x}\r\n{s}\r\n{x}\r\n{s}\r\n0\r\n\r\n",
+        .{ frame1.len, frame1, frame2.len, frame2 },
+    );
+    if (server.accept()) |conn| {
+        defer conn.stream.close();
+        var req_buf: [512]u8 = undefined;
+        _ = conn.stream.read(&req_buf) catch {};
+        conn.stream.writeAll(raw) catch {};
+    } else |_| {}
+}
+
+test "streamContainerStats streams live chunked JSON metrics (stream=true)" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-stream-stats-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const thread = try std.Thread.spawn(.{}, runStreamStatsMockServer, .{&server});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{
+        .allocator = alloc,
+        .socket_path = sock_path,
+    };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    // Reject path traversal identifier before any socket traffic.
+    try std.testing.expectError(
+        ApiError.InvalidIdentifier,
+        streamContainerStats(&client, &logger, "../bad", out.writer()),
+    );
+
+    try streamContainerStats(&client, &logger, "web", out.writer());
+    thread.join();
+    joined = true;
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "CONTAINER ID") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "20.00%") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "32.0 MB / 256.0 MB") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "60.00%") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "64.0 MB / 256.0 MB") != null);
 }

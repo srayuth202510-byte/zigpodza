@@ -21,7 +21,7 @@ status: active
 | :--- | :--- |
 | Tracked Bug Patterns | **20** (20 Guarded) |
 | Zig Source Modules | **10** |
-| Unit & Integration Tests | **84** |
+| Unit & Integration Tests | **85** |
 | Static Security & Memory Gates | **9/9 PASS** |
 
 ## Guard Coverage Map
@@ -113,8 +113,8 @@ flowchart LR
 | [demo.zig](../../src/demo.zig) | 379 | 1 | 1 | `std.testing.allocator` |
 | [http.zig](../../src/http.zig) | 997 | 25 | 13 | `std.testing.allocator` |
 | [log.zig](../../src/log.zig) | 711 | 20 | 9 | `std.testing.allocator` |
-| [main.zig](../../src/main.zig) | 632 | 2 | 2 | `gpa.deinit() != .leak` |
-| [podman_api.zig](../../src/podman_api.zig) | 2826 | 74 | 29 | `std.testing.allocator` |
+| [main.zig](../../src/main.zig) | 633 | 2 | 2 | `gpa.deinit() != .leak` |
+| [podman_api.zig](../../src/podman_api.zig) | 2991 | 75 | 30 | `std.testing.allocator` |
 | [podman_types.zig](../../src/podman_types.zig) | 318 | 39 | 0 | `MISSING` |
 | [policy.zig](../../src/policy.zig) | 199 | 13 | 3 | `std.testing.allocator` |
 | [utils.zig](../../src/utils.zig) | 42 | 3 | 2 | `stack-only (no heap)` |
