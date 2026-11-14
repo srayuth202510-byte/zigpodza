@@ -261,6 +261,12 @@ pub fn parseMemoryBytes(s: []const u8) ParseError!i64 {
     return std.math.mul(i64, base, mult) catch error.InvalidValue;
 }
 
+fn parsePidsLimit(s: []const u8) ParseError!i64 {
+    const limit = std.fmt.parseInt(i64, s, 10) catch return error.InvalidValue;
+    if (limit <= 0) return error.InvalidValue;
+    return limit;
+}
+
 fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!RunOpts {
     var opts = RunOpts{ .image = "" };
     var env = std.ArrayList([]const u8).init(allocator);
@@ -279,10 +285,12 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
             opts.no_new_privileges = true;
         } else if (eql(a, "-m") or eql(a, "--memory")) {
             opts.memory = try parseMemoryBytes(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--memory=")) {
+            opts.memory = try parseMemoryBytes(a["--memory=".len..]);
         } else if (eql(a, "--pids-limit")) {
-            const limit = std.fmt.parseInt(i64, try takeValue(args, &i), 10) catch return error.InvalidValue;
-            if (limit <= 0) return error.InvalidValue;
-            opts.pids_limit = limit;
+            opts.pids_limit = try parsePidsLimit(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--pids-limit=")) {
+            opts.pids_limit = try parsePidsLimit(a["--pids-limit=".len..]);
         } else if (eql(a, "--name")) {
             opts.name = try takeValue(args, &i);
         } else if (eql(a, "-e") or eql(a, "--env")) {
@@ -437,12 +445,14 @@ test "parse rejects invalid hardening values" {
     try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--memory", "-1m", "alpine" }));
     try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--memory", "abc", "alpine" }));
     try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--memory", "99999999999999999g", "alpine" }));
-    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "run", "-m" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--memory=", "alpine" }));
+    try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "run", "-m" }));
 
     try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--pids-limit", "0", "alpine" }));
     try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--pids-limit", "-5", "alpine" }));
     try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--pids-limit", "nope", "alpine" }));
-    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "run", "--pids-limit" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--pids-limit=", "alpine" }));
+    try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "run", "--pids-limit" }));
 }
 
 test "parse demo and audit subcommands" {

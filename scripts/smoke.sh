@@ -98,6 +98,7 @@ with open(req_path, "wb") as out:
         try:
             req = read_req(conn)
             out.write(req + b"\n---REQ---\n")
+            out.flush()
             if b"/containers/create" in req:
                 reply(conn, "201 Created", b'{"Id":"smoke1234567890ab"}')
             elif b"/start " in req:
