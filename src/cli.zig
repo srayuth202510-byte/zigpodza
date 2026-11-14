@@ -10,6 +10,8 @@ pub const usage =
     \\Commands:
     \\  run [OPTIONS] IMAGE [CMD...]   Create and start a container
     \\      -d, --detach               Run in background and print the container ID
+    \\      -i, --interactive          Keep STDIN open
+    \\      -t, --tty                  Allocate a pseudo-TTY
     \\      --rm                       Remove the container when it exits
     \\      --name NAME                Assign a name to the container
     \\      -e, --env KEY=VALUE        Set an environment variable (repeatable)
@@ -29,8 +31,10 @@ pub const usage =
     \\  pull IMAGE                     Pull an image from a registry
     \\  stop CONTAINER                 Stop a running container
     \\  rm [-f] CONTAINER              Remove a container (-f: force)
-    \\  logs CONTAINER                 Print a container's logs
+    \\  logs [-f] CONTAINER            Print a container's logs (-f: follow live output)
     \\  exec [OPTIONS] CONTAINER CMD...  Run a command in a running container
+    \\      -i, --interactive          Keep STDIN open
+    \\      -t, --tty                  Allocate a pseudo-TTY
     \\      -e, --env KEY=VALUE        Set an environment variable (repeatable)
     \\      -u, --user USER[:GROUP]    Run as user (and optional group)
     \\      -w, --workdir PATH         Working directory inside the container
@@ -87,6 +91,8 @@ pub const RunOpts = struct {
     workdir: ?[]const u8 = null,
     user: ?[]const u8 = null,
     detach: bool = false,
+    interactive: bool = false,
+    tty: bool = false,
     remove: bool = false,
     read_only: bool = false,
     no_new_privileges: bool = false,
@@ -99,12 +105,19 @@ pub const RmOpts = struct {
     force: bool = false,
 };
 
+pub const LogsOpts = struct {
+    container: []const u8,
+    follow: bool = false,
+};
+
 pub const ExecOpts = struct {
     container: []const u8,
     cmd: []const []const u8 = &.{},
     env: []const []const u8 = &.{},
     user: ?[]const u8 = null,
     workdir: ?[]const u8 = null,
+    interactive: bool = false,
+    tty: bool = false,
 };
 
 pub const StatsOpts = struct {
@@ -125,7 +138,7 @@ pub const Command = union(enum) {
     run: RunOpts,
     stop: []const u8,
     rm: RmOpts,
-    logs: []const u8,
+    logs: LogsOpts,
     inspect: []const u8,
     exec: ExecOpts,
     stats: StatsOpts,
@@ -227,7 +240,7 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
     else if (eql(name, "rm"))
         try parseRm(rest)
     else if (eql(name, "logs"))
-        .{ .logs = try single(rest) }
+        try parseLogs(rest)
     else if (eql(name, "inspect"))
         .{ .inspect = try single(rest) }
     else if (eql(name, "exec"))
@@ -288,6 +301,21 @@ fn parseRm(args: []const []const u8) ParseError!Command {
     }
     if (opts.container.len == 0) return error.MissingArgument;
     return .{ .rm = opts };
+}
+
+fn parseLogs(args: []const []const u8) ParseError!Command {
+    var opts = LogsOpts{ .container = "" };
+    for (args) |a| {
+        if (eql(a, "-f") or eql(a, "--follow")) {
+            opts.follow = true;
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else if (opts.container.len == 0) {
+            opts.container = a;
+        } else return error.TooManyArguments;
+    }
+    if (opts.container.len == 0) return error.MissingArgument;
+    return .{ .logs = opts };
 }
 
 pub fn parseMemoryBytes(s: []const u8) ParseError!i64 {
@@ -514,6 +542,13 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
             try cap_add.append(try parseCapName(try takeValue(args, &i)));
         } else if (std.mem.startsWith(u8, a, "--cap-add=")) {
             try cap_add.append(try parseCapName(a["--cap-add=".len..]));
+        } else if (eql(a, "-i") or eql(a, "--interactive")) {
+            opts.interactive = true;
+        } else if (eql(a, "-t") or eql(a, "--tty")) {
+            opts.tty = true;
+        } else if (eql(a, "-it") or eql(a, "-ti")) {
+            opts.interactive = true;
+            opts.tty = true;
         } else if (isFlag(a)) {
             return error.UnknownFlag;
         } else break; // first positional = IMAGE; everything after is the command
@@ -555,6 +590,13 @@ fn parseExec(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
             opts.workdir = try parseWorkdir(try takeValue(args, &i));
         } else if (std.mem.startsWith(u8, a, "--workdir=")) {
             opts.workdir = try parseWorkdir(a["--workdir=".len..]);
+        } else if (eql(a, "-i") or eql(a, "--interactive")) {
+            opts.interactive = true;
+        } else if (eql(a, "-t") or eql(a, "--tty")) {
+            opts.tty = true;
+        } else if (eql(a, "-it") or eql(a, "-ti")) {
+            opts.interactive = true;
+            opts.tty = true;
         } else if (isFlag(a)) {
             return error.UnknownFlag;
         } else break;
@@ -642,7 +684,9 @@ test "simple commands" {
     try std.testing.expect((try testParse(&.{ "ps", "--all" })).command.ps.all);
     try std.testing.expectEqualStrings("alpine", (try testParse(&.{ "pull", "alpine" })).command.pull);
     try std.testing.expectEqualStrings("web", (try testParse(&.{ "stop", "web" })).command.stop);
-    try std.testing.expectEqualStrings("web", (try testParse(&.{ "logs", "web" })).command.logs);
+    try std.testing.expectEqualStrings("web", (try testParse(&.{ "logs", "web" })).command.logs.container);
+    try std.testing.expect(!(try testParse(&.{ "logs", "web" })).command.logs.follow);
+    try std.testing.expect((try testParse(&.{ "logs", "-f", "web" })).command.logs.follow);
     try std.testing.expectEqualStrings("alpine:3.20", (try testParse(&.{ "inspect", "alpine:3.20" })).command.inspect);
     const rm_plain = (try testParse(&.{ "rm", "abc" })).command.rm;
     try std.testing.expect(!rm_plain.force);
@@ -983,4 +1027,23 @@ test "parse stats subcommand with --no-stream, -a, and containers" {
     try std.testing.expectEqualStrings("web", p3.command.stats.containers[0]);
 
     try std.testing.expectError(error.UnknownFlag, parse(alloc, &.{ "stats", "web", "--bogus" }));
+}
+
+test "parse run -it and exec -it interactive/tty flags" {
+    const alloc = std.testing.allocator;
+
+    var p_run = try parse(alloc, &.{ "run", "-it", "alpine:3.20", "sh" });
+    defer p_run.deinit(alloc);
+    try std.testing.expect(p_run.command.run.interactive);
+    try std.testing.expect(p_run.command.run.tty);
+
+    var p_exec = try parse(alloc, &.{ "exec", "-i", "-t", "web", "sh" });
+    defer p_exec.deinit(alloc);
+    try std.testing.expect(p_exec.command.exec.interactive);
+    try std.testing.expect(p_exec.command.exec.tty);
+
+    var p_logs = try parse(alloc, &.{ "logs", "--follow", "web" });
+    defer p_logs.deinit(alloc);
+    try std.testing.expect(p_logs.command.logs.follow);
+    try std.testing.expectEqualStrings("web", p_logs.command.logs.container);
 }

@@ -303,7 +303,7 @@ fn testHardenedLifecycle(allocator: std.mem.Allocator) !bool {
 
     var logs_out = std.ArrayList(u8).init(allocator);
     defer logs_out.deinit();
-    try pod.fetchLogs(&client, &logger, id, logs_out.writer());
+    try pod.fetchLogs(&client, &logger, id, false, logs_out.writer());
 
     var ps_out = std.ArrayList(u8).init(allocator);
     defer ps_out.deinit();

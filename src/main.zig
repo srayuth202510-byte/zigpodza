@@ -132,7 +132,7 @@ fn dispatch(
         .pull => |image| try pod.pullImage(client, logger, image, stdout),
         .stop => |container| try pod.stopContainer(client, logger, container),
         .rm => |opts| try pod.removeContainer(client, logger, opts.container, opts.force),
-        .logs => |container| try pod.fetchLogs(client, logger, container, stdout),
+        .logs => |opts| try pod.fetchLogs(client, logger, opts.container, opts.follow, stdout),
         .inspect => |target| try pod.inspect(client, logger, target, stdout),
         .stats => |opts| {
             if (!opts.no_stream) {
@@ -142,12 +142,15 @@ fn dispatch(
         },
         .exec => |opts| {
             const req = pod.ExecCreateRequest{
+                .AttachStdin = opts.interactive,
+                .Tty = opts.tty,
                 .Cmd = opts.cmd,
                 .Env = if (opts.env.len > 0) opts.env else null,
                 .User = opts.user,
                 .WorkingDir = opts.workdir,
             };
-            const code = try pod.execCommand(client, logger, opts.container, req, stdout);
+            const stdin_fd: ?std.posix.fd_t = if (opts.interactive or opts.tty) std.io.getStdIn().handle else null;
+            const code = try pod.execCommandWithIo(client, logger, opts.container, req, stdin_fd, stdout);
             return if (code > 0 and code <= 255) @intCast(code) else if (code == 0) 0 else 1;
         },
         .version => try pod.showVersion(client, logger, version, stdout),
@@ -211,6 +214,11 @@ fn dispatch(
                 .ExposedPorts = if (port_buf.items.len > 0) .{ .ports = port_buf.items } else null,
                 .WorkingDir = r.workdir,
                 .User = r.user,
+                .AttachStdin = r.interactive,
+                .OpenStdin = r.interactive,
+                .AttachStdout = !r.detach and (r.interactive or r.tty),
+                .AttachStderr = !r.detach and (r.interactive or r.tty),
+                .Tty = r.tty,
                 .Mounts = if (mount_buf.items.len > 0) mount_buf.items else null,
                 .HostConfig = host_cfg,
             };
@@ -227,17 +235,30 @@ fn dispatch(
                 return 0;
             }
 
+            if (r.interactive or r.tty) {
+                pod.attachContainer(client, logger, id, r.interactive, r.tty, std.io.getStdIn().handle, stdout) catch |e| {
+                    if (r.remove) pod.removeContainer(client, logger, id, true) catch {};
+                    return e;
+                };
+                const status = try pod.waitContainer(client, logger, id);
+                if (r.remove) try pod.removeContainer(client, logger, id, false);
+                if (status != 0) {
+                    return if (status > 0 and status <= 255) @intCast(status) else 1;
+                }
+                return 0;
+            }
+
             const status = try pod.waitContainer(client, logger, id);
             if (r.remove) {
                 // BUG-012: honor --rm even when fetching logs fails; the
                 // container has already exited by the time wait returns.
-                pod.fetchLogs(client, logger, id, stdout) catch |e| {
+                pod.fetchLogs(client, logger, id, false, stdout) catch |e| {
                     pod.removeContainer(client, logger, id, false) catch {};
                     return e;
                 };
                 try pod.removeContainer(client, logger, id, false);
             } else {
-                try pod.fetchLogs(client, logger, id, stdout);
+                try pod.fetchLogs(client, logger, id, false, stdout);
             }
             if (status != 0) {
                 return if (status > 0 and status <= 255) @intCast(status) else 1;

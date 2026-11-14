@@ -390,18 +390,37 @@ pub fn waitContainer(client: *const http.Client, logger: *log.Logger, id: []cons
     return parsed.value.StatusCode;
 }
 
-pub fn fetchLogs(client: *const http.Client, logger: *log.Logger, id: []const u8, writer: anytype) !void {
+pub fn fetchLogs(client: *const http.Client, logger: *log.Logger, id: []const u8, follow: bool, writer: anytype) !void {
     try validateIdentifier(id);
 
-    const path = try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/logs?stdout=1&stderr=1", .{ api_prefix, id });
+    const path = try std.fmt.allocPrint(
+        client.allocator,
+        "{s}/containers/{s}/logs?stdout=1&stderr=1{s}",
+        .{ api_prefix, id, if (follow) "&follow=1" else "" },
+    );
     defer client.allocator.free(path);
 
     logger.debug("GET {s}", .{path});
-    const resp = try client.request("GET", path, null);
+    const timeout = if (follow) http.blocking_timeout_ms else client.timeout_ms;
+    const WriterType = @TypeOf(writer);
+    var demuxer = LogDemuxer(WriterType){
+        .allocator = client.allocator,
+        .writer = writer,
+    };
+    defer demuxer.deinit();
+
+    const resp = try client.streamRequest("GET", path, null, timeout, &demuxer, LogDemuxer(WriterType).push);
     defer resp.deinit();
 
-    if (!resp.ok()) return logApiFailure(logger, "GET", path, resp);
-    try demuxLogs(resp.body, writer);
+    if (!resp.ok()) {
+        const err_resp = http.Response{
+            .status = resp.status,
+            .body = resp.error_body,
+            .allocator = client.allocator,
+        };
+        return logApiFailure(logger, "GET", path, err_resp);
+    }
+    try demuxer.flush();
 }
 
 pub fn listContainers(client: *const http.Client, logger: *log.Logger, all: bool, writer: anytype) !void {
@@ -477,37 +496,101 @@ pub fn pullImage(client: *const http.Client, logger: *log.Logger, image: []const
     try appendQueryEncoded(&path_buf, image);
 
     logger.info("pulling image {s}", .{image});
+    const WriterType = @TypeOf(writer);
+    var pull_ctx = PullStreamCtx(WriterType){
+        .allocator = client.allocator,
+        .logger = logger,
+        .image = image,
+        .writer = writer,
+    };
+    defer pull_ctx.deinit();
+
     // Pulls stream progress for minutes on large layers and may pause while
     // extracting — use the blocking timeout, not the default (BUG-007).
-    const resp = try client.requestWithTimeout("POST", path_buf.items, null, http.blocking_timeout_ms);
+    const resp = try client.streamRequest(
+        "POST",
+        path_buf.items,
+        null,
+        http.blocking_timeout_ms,
+        &pull_ctx,
+        PullStreamCtx(WriterType).onChunk,
+    );
     defer resp.deinit();
 
-    if (!resp.ok()) return logApiFailure(logger, "POST", path_buf.items, resp);
-
-    var lines = std.mem.tokenizeAny(u8, resp.body, "\r\n");
-    while (lines.next()) |line| {
-        const parsed = std.json.parseFromSlice(PullStatusLine, client.allocator, line, .{
-            .ignore_unknown_fields = true,
-        }) catch {
-            try writer.print("{s}\n", .{line});
-            continue;
+    if (!resp.ok()) {
+        const err_resp = http.Response{
+            .status = resp.status,
+            .body = resp.error_body,
+            .allocator = client.allocator,
         };
-        defer parsed.deinit();
-
-        if (parsed.value.@"error") |err_msg| {
-            logger.err("pull {s} failed: {s}", .{ image, err_msg });
-            return ApiError.PodmanApiError;
-        }
-        if (parsed.value.status) |st| {
-            if (parsed.value.id) |id| {
-                try writer.print("{s}: {s}\n", .{ id, st });
-            } else {
-                try writer.print("{s}\n", .{st});
-            }
-        }
+        return logApiFailure(logger, "POST", path_buf.items, err_resp);
     }
+    try pull_ctx.flush();
+    if (pull_ctx.had_error) return ApiError.PodmanApiError;
     try writer.print("Pulled {s}\n", .{image});
     logger.info("pulled image {s}", .{image});
+}
+
+fn PullStreamCtx(comptime WriterType: type) type {
+    return struct {
+        allocator: std.mem.Allocator,
+        logger: *log.Logger,
+        image: []const u8,
+        writer: WriterType,
+        line_buf: std.ArrayListUnmanaged(u8) = .{},
+        had_error: bool = false,
+
+        fn deinit(self: *@This()) void {
+            self.line_buf.deinit(self.allocator);
+        }
+
+        fn onChunk(self: *@This(), chunk: []const u8) !void {
+            const projected = std.math.add(usize, self.line_buf.items.len, chunk.len) catch return http.Error.InvalidResponse;
+            if (projected > 1024 * 1024) return http.Error.InvalidResponse;
+            try self.line_buf.appendSlice(self.allocator, chunk);
+
+            var start: usize = 0;
+            while (std.mem.indexOfScalarPos(u8, self.line_buf.items, start, '\n')) |nl| {
+                const line = std.mem.trim(u8, self.line_buf.items[start..nl], " \r\t");
+                if (line.len > 0) try self.handleLine(line);
+                start = nl + 1;
+            }
+            if (start > 0) {
+                const rem = self.line_buf.items.len - start;
+                if (rem > 0) std.mem.copyForwards(u8, self.line_buf.items[0..rem], self.line_buf.items[start..]);
+                self.line_buf.items.len = rem;
+            }
+        }
+
+        fn flush(self: *@This()) !void {
+            const line = std.mem.trim(u8, self.line_buf.items, " \r\t");
+            if (line.len > 0) try self.handleLine(line);
+            self.line_buf.items.len = 0;
+        }
+
+        fn handleLine(self: *@This(), line: []const u8) !void {
+            const parsed = std.json.parseFromSlice(PullStatusLine, self.allocator, line, .{
+                .ignore_unknown_fields = true,
+            }) catch {
+                try self.writer.print("{s}\n", .{line});
+                return;
+            };
+            defer parsed.deinit();
+
+            if (parsed.value.@"error") |err_msg| {
+                self.logger.err("pull {s} failed: {s}", .{ self.image, err_msg });
+                self.had_error = true;
+                return;
+            }
+            if (parsed.value.status) |st| {
+                if (parsed.value.id) |id| {
+                    try self.writer.print("{s}: {s}\n", .{ id, st });
+                } else {
+                    try self.writer.print("{s}\n", .{st});
+                }
+            }
+        }
+    };
 }
 
 pub fn showVersion(client: *const http.Client, logger: *log.Logger, client_version: []const u8, writer: anytype) !void {
@@ -740,13 +823,237 @@ pub fn execCommand(
     req: ExecCreateRequest,
     writer: anytype,
 ) !i64 {
+    return execCommandWithIo(client, logger, container, req, null, writer);
+}
+
+/// Interactive/TTY-capable variant of `execCommand`. When `req.AttachStdin` or
+/// `req.Tty` is set, upgrades `POST /exec/{id}/start` via HTTP `101 Switching
+/// Protocols`, enters raw terminal mode when `stdin_fd` is a TTY, and pumps I/O.
+pub fn execCommandWithIo(
+    client: *const http.Client,
+    logger: *log.Logger,
+    container: []const u8,
+    req: ExecCreateRequest,
+    stdin_fd: ?std.posix.fd_t,
+    writer: anytype,
+) !i64 {
     const exec_id = try createExec(client, logger, container, req);
     defer client.allocator.free(exec_id);
 
-    try startExec(client, logger, exec_id, writer);
+    if (req.AttachStdin or req.Tty) {
+        try startExecInteractive(client, logger, exec_id, req.Tty, stdin_fd, writer);
+    } else {
+        try startExec(client, logger, exec_id, writer);
+    }
     const result = try inspectExec(client, logger, exec_id);
     logger.info("exec on container {s} finished (exit={d})", .{ container, result.ExitCode });
     return result.ExitCode;
+}
+
+/// Upgrades `POST /exec/{id}/start` (`101 Switching Protocols`) for interactive/TTY exec.
+pub fn startExecInteractive(
+    client: *const http.Client,
+    logger: *log.Logger,
+    exec_id: []const u8,
+    tty: bool,
+    stdin_fd: ?std.posix.fd_t,
+    writer: anytype,
+) !void {
+    try validateIdentifier(exec_id);
+
+    const path = try std.fmt.allocPrint(client.allocator, "{s}/exec/{s}/start", .{ api_prefix, exec_id });
+    defer client.allocator.free(path);
+
+    const body = try std.json.stringifyAlloc(client.allocator, ExecStartRequest{
+        .Detach = false,
+        .Tty = tty,
+    }, .{});
+    defer client.allocator.free(body);
+
+    logger.debug("UPGRADE POST {s} body={s}", .{ path, body });
+    const up = try client.upgrade("POST", path, body, http.blocking_timeout_ms);
+    defer up.deinit();
+
+    if (up.status != 101 and (up.status < 200 or up.status >= 300)) {
+        const err_resp = http.Response{
+            .status = up.status,
+            .body = up.error_body,
+            .allocator = client.allocator,
+        };
+        return logApiFailure(logger, "POST", path, err_resp);
+    }
+
+    var term_guard = if (tty and stdin_fd != null)
+        http.RawTermGuard.enter(stdin_fd.?)
+    else
+        http.RawTermGuard{ .fd = -1, .orig = undefined, .active = false };
+    defer term_guard.restore();
+
+    try pumpBidirectional(client.allocator, up.stream, up.initial_data, stdin_fd, writer, tty);
+}
+
+/// Attaches to a running container via `POST /containers/{id}/attach` (`101 Switching Protocols`).
+pub fn attachContainer(
+    client: *const http.Client,
+    logger: *log.Logger,
+    id: []const u8,
+    interactive: bool,
+    tty: bool,
+    stdin_fd: ?std.posix.fd_t,
+    writer: anytype,
+) !void {
+    try validateIdentifier(id);
+
+    const path = try std.fmt.allocPrint(
+        client.allocator,
+        "{s}/containers/{s}/attach?stream=1&stdin={s}&stdout=1&stderr=1",
+        .{ api_prefix, id, if (interactive) "1" else "0" },
+    );
+    defer client.allocator.free(path);
+
+    logger.debug("UPGRADE POST {s}", .{path});
+    const up = try client.upgrade("POST", path, null, http.blocking_timeout_ms);
+    defer up.deinit();
+
+    if (up.status != 101 and (up.status < 200 or up.status >= 300)) {
+        const err_resp = http.Response{
+            .status = up.status,
+            .body = up.error_body,
+            .allocator = client.allocator,
+        };
+        return logApiFailure(logger, "POST", path, err_resp);
+    }
+
+    var term_guard = if (tty and stdin_fd != null)
+        http.RawTermGuard.enter(stdin_fd.?)
+    else
+        http.RawTermGuard{ .fd = -1, .orig = undefined, .active = false };
+    defer term_guard.restore();
+
+    try pumpBidirectional(client.allocator, up.stream, up.initial_data, if (interactive) stdin_fd else null, writer, tty);
+}
+
+/// Pumps bytes between an upgraded Unix socket `stream` and `stdin_fd` / `writer`.
+fn pumpBidirectional(
+    allocator: std.mem.Allocator,
+    stream: std.net.Stream,
+    initial_data: []const u8,
+    stdin_fd: ?std.posix.fd_t,
+    writer: anytype,
+    tty: bool,
+) !void {
+    const WriterType = @TypeOf(writer);
+    var demuxer = LogDemuxer(WriterType){
+        .allocator = allocator,
+        .writer = writer,
+    };
+    defer demuxer.deinit();
+
+    if (initial_data.len > 0) {
+        if (tty) try writer.writeAll(initial_data) else try demuxer.push(initial_data);
+    }
+
+    var active_stdin = stdin_fd;
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        var fds: [2]std.posix.pollfd = undefined;
+        var nfds: usize = 1;
+        fds[0] = .{
+            .fd = stream.handle,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        };
+        if (active_stdin) |in_fd| {
+            fds[1] = .{
+                .fd = in_fd,
+                .events = std.posix.POLL.IN,
+                .revents = 0,
+            };
+            nfds = 2;
+        }
+
+        _ = try std.posix.poll(fds[0..nfds], http.blocking_timeout_ms);
+
+        if (nfds == 2 and (fds[1].revents & (std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR)) != 0) {
+            const n = std.posix.read(active_stdin.?, &buf) catch 0;
+            if (n == 0) {
+                active_stdin = null;
+            } else {
+                try stream.writeAll(buf[0..n]);
+            }
+        }
+
+        if ((fds[0].revents & std.posix.POLL.IN) != 0) {
+            const n = try stream.read(&buf);
+            if (n == 0) break;
+            if (tty) try writer.writeAll(buf[0..n]) else try demuxer.push(buf[0..n]);
+        } else if ((fds[0].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR)) != 0) {
+            break;
+        }
+    }
+    if (!tty) try demuxer.flush();
+}
+
+/// Incremental Docker multiplexed log frame demuxer ([type,0,0,0,len_be32][payload...]).
+/// Falls back to raw passthrough when the stream does not begin with a valid header.
+pub fn LogDemuxer(comptime WriterType: type) type {
+    return struct {
+        allocator: std.mem.Allocator,
+        writer: WriterType,
+        buf: std.ArrayListUnmanaged(u8) = .{},
+        raw_mode: bool = false,
+        seen_valid_frame: bool = false,
+
+        pub fn deinit(self: *@This()) void {
+            self.buf.deinit(self.allocator);
+        }
+
+        pub fn push(self: *@This(), chunk: []const u8) !void {
+            if (chunk.len == 0) return;
+            if (self.raw_mode) {
+                try self.writer.writeAll(chunk);
+                return;
+            }
+            const projected = std.math.add(usize, self.buf.items.len, chunk.len) catch return http.Error.InvalidResponse;
+            if (projected > http.max_response_bytes) return http.Error.InvalidResponse;
+            try self.buf.appendSlice(self.allocator, chunk);
+
+            var pos: usize = 0;
+            while (self.buf.items.len - pos >= 8) {
+                const hdr = self.buf.items[pos .. pos + 8];
+                const stream_type = hdr[0];
+                const zeros_ok = hdr[1] == 0 and hdr[2] == 0 and hdr[3] == 0;
+                if (stream_type > 2 or !zeros_ok) {
+                    if (!self.seen_valid_frame) {
+                        self.raw_mode = true;
+                        try self.writer.writeAll(self.buf.items[pos..]);
+                        self.buf.items.len = 0;
+                        return;
+                    }
+                    break;
+                }
+                const frame_len: usize = std.mem.readInt(u32, hdr[4..8], .big);
+                const payload_start = std.math.add(usize, pos, 8) catch break;
+                const payload_end = std.math.add(usize, payload_start, frame_len) catch break;
+                if (payload_end > self.buf.items.len) break;
+                self.seen_valid_frame = true;
+                try self.writer.writeAll(self.buf.items[payload_start..payload_end]);
+                pos = payload_end;
+            }
+            if (pos > 0) {
+                const rem = self.buf.items.len - pos;
+                if (rem > 0) std.mem.copyForwards(u8, self.buf.items[0..rem], self.buf.items[pos..]);
+                self.buf.items.len = rem;
+            }
+        }
+
+        pub fn flush(self: *@This()) !void {
+            if (!self.seen_valid_frame and self.buf.items.len > 0) {
+                try self.writer.writeAll(self.buf.items);
+            }
+            self.buf.items.len = 0;
+        }
+    };
 }
 
 /// Computes Docker-compatible CPU percentage from `cpu_stats` and `precpu_stats`.
@@ -1411,7 +1718,7 @@ test "end-to-end container lifecycle over mock Unix socket has zero memory leaks
 
     var logs_out = std.ArrayList(u8).init(std.testing.allocator);
     defer logs_out.deinit();
-    try fetchLogs(&client, &logger, id, logs_out.writer());
+    try fetchLogs(&client, &logger, id, false, logs_out.writer());
     try std.testing.expectEqualStrings("hi\n", logs_out.items);
 
     try removeContainer(&client, &logger, id, false);
@@ -1804,4 +2111,140 @@ test "statsContainers fetches metrics via mock Unix socket and enforces identifi
     thread.join();
     joined = true;
     try std.testing.expectEqual(replies.len, ctx.matched);
+}
+
+test "LogDemuxer handles split frames and raw TTY passthrough" {
+    var out = std.ArrayList(u8).init(std.testing.allocator);
+    defer out.deinit();
+
+    var d = LogDemuxer(@TypeOf(out.writer())){
+        .allocator = std.testing.allocator,
+        .writer = out.writer(),
+    };
+    defer d.deinit();
+
+    // Split an 8-byte header + 5-byte payload across multiple pushes.
+    const frame = "\x01\x00\x00\x00\x00\x00\x00\x05hello\x02\x00\x00\x00\x00\x00\x00\x06 world";
+    try d.push(frame[0..4]);
+    try d.push(frame[4..10]);
+    try d.push(frame[10..]);
+    try d.flush();
+    try std.testing.expectEqualStrings("hello world", out.items);
+
+    // Raw TTY text without multiplexed header.
+    var raw_out = std.ArrayList(u8).init(std.testing.allocator);
+    defer raw_out.deinit();
+    var d_raw = LogDemuxer(@TypeOf(raw_out.writer())){
+        .allocator = std.testing.allocator,
+        .writer = raw_out.writer(),
+    };
+    defer d_raw.deinit();
+    try d_raw.push("plain tty ");
+    try d_raw.push("output\n");
+    try d_raw.flush();
+    try std.testing.expectEqualStrings("plain tty output\n", raw_out.items);
+}
+
+fn runPhase2MockServer(server: *std.net.Server) void {
+    // 1) pullImage streaming chunked JSON lines
+    if (server.accept()) |conn| {
+        defer conn.stream.close();
+        var req_buf: [512]u8 = undefined;
+        _ = conn.stream.read(&req_buf) catch {};
+        conn.stream.writeAll(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" ++
+                "1e\r\n{\"status\":\"Pulling\",\"id\":\"1\"}\n\r\n" ++
+                "18\r\n{\"status\":\"Downloaded\"}\n\r\n0\r\n\r\n",
+        ) catch {};
+    } else |_| {}
+
+    // 2) logs -f (follow=1) chunked multiplexed frames
+    if (server.accept()) |conn| {
+        defer conn.stream.close();
+        var req_buf: [512]u8 = undefined;
+        _ = conn.stream.read(&req_buf) catch {};
+        conn.stream.writeAll(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" ++
+                "d\r\n\x01\x00\x00\x00\x00\x00\x00\x05live\n\r\n0\r\n\r\n",
+        ) catch {};
+    } else |_| {}
+
+    // 3) attachContainer 101 upgrade with stdin -> echo
+    if (server.accept()) |conn| {
+        defer conn.stream.close();
+        var req_buf: [512]u8 = undefined;
+        _ = conn.stream.read(&req_buf) catch {};
+        conn.stream.writeAll("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n$") catch {};
+        var in_buf: [64]u8 = undefined;
+        const n = conn.stream.read(&in_buf) catch 0;
+        if (n > 0) conn.stream.writeAll(in_buf[0..n]) catch {};
+    } else |_| {}
+}
+
+test "pullImage streaming, logs -f, and attachContainer 101 upgrade" {
+    const sock_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "/tmp/zp-phase2-test-{d}.sock",
+        .{std.time.milliTimestamp()},
+    );
+    defer std.testing.allocator.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const thread = try std.Thread.spawn(.{}, runPhase2MockServer, .{&server});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{
+        .allocator = std.testing.allocator,
+        .socket_path = sock_path,
+    };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    // 1) pullImage streaming
+    var pull_out = std.ArrayList(u8).init(std.testing.allocator);
+    defer pull_out.deinit();
+    try pullImage(&client, &logger, "alpine:3.20", pull_out.writer());
+    try std.testing.expect(std.mem.indexOf(u8, pull_out.items, "1: Pulling") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pull_out.items, "Downloaded") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pull_out.items, "Pulled alpine:3.20") != null);
+
+    // 2) logs -f (follow=1)
+    var log_out = std.ArrayList(u8).init(std.testing.allocator);
+    defer log_out.deinit();
+    try fetchLogs(&client, &logger, "web", true, log_out.writer());
+    try std.testing.expectEqualStrings("live\n", log_out.items);
+
+    // 3) attachContainer 101 upgrade with pipe stdin
+    const pipe_fds = try std.posix.pipe();
+    var read_open = true;
+    var write_open = true;
+    defer {
+        if (read_open) std.posix.close(pipe_fds[0]);
+        if (write_open) std.posix.close(pipe_fds[1]);
+    }
+    _ = try std.posix.write(pipe_fds[1], "id\n");
+    std.posix.close(pipe_fds[1]);
+    write_open = false;
+
+    var tty_out = std.ArrayList(u8).init(std.testing.allocator);
+    defer tty_out.deinit();
+    try attachContainer(&client, &logger, "web", true, true, pipe_fds[0], tty_out.writer());
+    std.posix.close(pipe_fds[0]);
+    read_open = false;
+
+    try std.testing.expectEqualStrings("$id\n", tty_out.items);
+
+    // Invalid identifier must still fail before any socket traffic.
+    try std.testing.expectError(
+        ApiError.InvalidIdentifier,
+        attachContainer(&client, &logger, "../bad", true, true, null, tty_out.writer()),
+    );
+
+    thread.join();
+    joined = true;
 }

@@ -298,11 +298,11 @@ flowchart LR
 
 ### Phase 2: Streaming HTTP Client & Interactive TTY
 
-- [ ] **Streaming HTTP Response Reader** (`src/http.zig`):
-  - Separate response header parsing from streaming chunked/body reads so `zigpod pull` prints download progress in real time without the 64 MiB `readAllAlloc` ceiling
-  - Add `zigpod logs -f` (`follow=1`) live log streaming
-- [ ] **Interactive / TTY Support (`-i`, `-t`)**:
-  - Support HTTP `101 Switching Protocols` on Unix sockets and raw terminal handling (`std.posix.tcgetattr` / `tcsetattr`) for `zigpod run -it` and `zigpod exec -it`
+- [x] **Streaming HTTP Response Reader** (`src/http.zig`):
+  - Separate response header parsing from streaming chunked/body reads so `zigpod pull` prints download progress in real time without the 64 MiB `readAllAlloc` ceiling -- DONE (`src/http.zig`, `src/podman_api.zig`)
+  - Add `zigpod logs -f` (`follow=1`) live log streaming -- DONE (`src/cli.zig`, `src/podman_api.zig`, `src/main.zig`)
+- [x] **Interactive / TTY Support (`-i`, `-t`)**:
+  - Support HTTP `101 Switching Protocols` on Unix sockets and raw terminal handling (`std.posix.tcgetattr` / `tcsetattr`) for `zigpod run -it` and `zigpod exec -it` -- DONE (`src/http.zig`, `src/cli.zig`, `src/podman_api.zig`, `src/main.zig`)
 
 ### Phase 3: Fail-Closed Policy Engine & AI Sandbox Guardrails
 
