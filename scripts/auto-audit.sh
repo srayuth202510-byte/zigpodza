@@ -23,22 +23,32 @@ pass() {
     REPORT+="OK: $1"$'\n'
 }
 
+has_match() {
+    local pattern="$1"
+    local target="$2"
+    if command -v rg >/dev/null 2>&1; then
+        rg -q -- "$pattern" "$target"
+    else
+        grep -REq -- "$pattern" "$target"
+    fi
+}
+
 # 1. Forbid page_allocator in src/ (hides leaks in tests/runtime)
-if rg -n "page_allocator" src/ >/dev/null 2>&1; then
+if has_match "page_allocator" "src/"; then
     fail "Found forbidden 'page_allocator' in src/ (see docs/vault/Bug-Playbook.md BUG-002)."
 else
     pass "No 'page_allocator' usage in src/."
 fi
 
 # 2. Forbid ignoring GeneralPurposeAllocator.deinit() leak checks
-if rg -n "defer _ = gpa\.deinit" src/ >/dev/null 2>&1; then
+if has_match "defer _ = gpa\.deinit" "src/"; then
     fail "Found ignored 'gpa.deinit()' in src/main.zig."
 else
     pass "GPA leak check is enforced."
 fi
 
 # 3. Forbid BUG-001 regression (error.AccessDenied on connectUnixSocket)
-if rg -n "error\.AccessDenied" src/http.zig >/dev/null 2>&1; then
+if has_match "error\.AccessDenied" "src/http.zig"; then
     fail "Found 'error.AccessDenied' in src/http.zig (Zig 0.13 connectUnixSocket uses PermissionDenied; see BUG-001)."
 else
     pass "No BUG-001 AccessDenied mismatch in src/http.zig."
@@ -46,7 +56,7 @@ fi
 
 # 4. Require std.testing.allocator in every heap-allocating module
 for mod in src/cli.zig src/config.zig src/http.zig src/podman_api.zig src/log.zig; do
-    if rg -q "std\.testing\.allocator" "$mod"; then
+    if has_match "std\.testing\.allocator" "$mod"; then
         pass "std.testing.allocator present in $mod."
     else
         fail "Missing std.testing.allocator tests in $mod."
@@ -54,27 +64,27 @@ for mod in src/cli.zig src/config.zig src/http.zig src/podman_api.zig src/log.zi
 done
 
 # 5. Require input/protocol validation gates
-if rg -q "try validateRequestTarget\(" src/http.zig; then
+if has_match "try validateRequestTarget\(" "src/http.zig"; then
     pass "validateRequestTarget() enforced in src/http.zig."
 else
     fail "validateRequestTarget() is not called in src/http.zig."
 fi
 
-if rg -q "try validateIdentifier\(" src/podman_api.zig; then
+if has_match "try validateIdentifier\(" "src/podman_api.zig"; then
     pass "validateIdentifier() enforced in src/podman_api.zig."
 else
     fail "validateIdentifier() is not called in src/podman_api.zig."
 fi
 
 # 6. Require checked arithmetic in parsers & decoders
-if rg -q "std\.math\.add" src/http.zig && rg -q "std\.math\.add" src/podman_api.zig && rg -q "std\.math\.mul" src/cli.zig; then
+if has_match "std\.math\.add" "src/http.zig" && has_match "std\.math\.add" "src/podman_api.zig" && has_match "std\.math\.mul" "src/cli.zig"; then
     pass "Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser."
 else
     fail "Missing checked arithmetic in src/http.zig, src/podman_api.zig, or src/cli.zig."
 fi
 
 # 7. Require socket timeout polling, hardening config, audit verification, and 14-case demo
-if rg -q "waitReadable" src/http.zig && rg -q "verifyAuditFile" src/log.zig && rg -q "ReadonlyRootfs" src/podman_api.zig && rg -q "runSelfTest" src/demo.zig && rg -q "std\.testing\.allocator" src/demo.zig; then
+if has_match "waitReadable" "src/http.zig" && has_match "verifyAuditFile" "src/log.zig" && has_match "ReadonlyRootfs" "src/podman_api.zig" && has_match "runSelfTest" "src/demo.zig" && has_match "std\.testing\.allocator" "src/demo.zig"; then
     pass "Timeout poll, HostConfig hardening, audit hash-chain verification, and 14-case demo present."
 else
     fail "Missing timeout, HostConfig hardening, verifyAuditFile, or runSelfTest/testing.allocator in src/demo.zig."

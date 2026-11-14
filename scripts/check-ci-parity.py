@@ -141,7 +141,7 @@ def main() -> int:
             errors.append(f"README.md missing reference '{marker}'")
 
     bug_playbook = (ROOT / "docs/vault/Bug-Playbook.md").read_text(encoding="utf-8")
-    for bug_id in ("BUG-001", "BUG-002", "BUG-003", "BUG-004", "BUG-005"):
+    for bug_id in ("BUG-001", "BUG-002", "BUG-003", "BUG-004", "BUG-005", "BUG-006"):
         if bug_id not in bug_playbook:
             errors.append(f"docs/vault/Bug-Playbook.md missing '{bug_id}'")
 

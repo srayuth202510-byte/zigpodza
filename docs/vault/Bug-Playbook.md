@@ -65,3 +65,14 @@ status: active
   - เพิ่ม `podman_api.validateIdentifier` ใน [src/podman_api.zig](../../src/podman_api.zig)
   - เพิ่ม `http.validateRequestTarget` ใน [src/http.zig](../../src/http.zig)
 - **Prevention Rule**: ทุก endpoint ที่รับ identifier จาก CLI ต้องเรียก `validateIdentifier` และ `Client.request` ต้องเรียก `validateRequestTarget`
+
+---
+
+## BUG-006: Missing `ripgrep` (`rg`) on CI Runners Causing `auto-audit.sh` Failure `#bug-pattern` `#security-gate`
+
+- **Symptom**: บน CI runner (เช่น GitHub Actions `ubuntu-latest`) การรัน `scripts/auto-audit.sh` ล้มเหลวด้วย `./scripts/auto-audit.sh: line 49: rg: command not found` (exit code `1`) แม้ unit test และ build จะผ่านครบ
+- **Root Cause**: `scripts/auto-audit.sh` เรียก `rg` โดยตรงโดยไม่มี fallback เมื่อไม่มี binary `rg` ทำให้เกิด exit code `127`: ตรวจเชิงบวก (`if rg -q ...`) ล้มเหลวทั้งหมด และตรวจเชิงลบ (`if rg -n ... >/dev/null 2>&1`) ซ่อน stderr จนกลายเป็น false-pass
+- **Fix**:
+  - เพิ่ม helper `has_match()` ใน [scripts/auto-audit.sh](../../scripts/auto-audit.sh) ให้ใช้ `rg -q` เป็นหลักและ fallback เป็น `grep -REq` เมื่อไม่มี `rg`
+  - เพิ่ม step ติดตั้ง `ripgrep` ใน [ci.yml](../../.github/workflows/ci.yml)
+- **Prevention Rule**: สคริปต์ตรวจอัตโนมัติที่รันบน CI ต้องตรวจ `command -v <tool>` พร้อม fallback หรือติดตั้ง dependency ใน [ci.yml](../../.github/workflows/ci.yml) ให้ครบ และทดสอบกรณีไม่มีเครื่องมือด้วย
