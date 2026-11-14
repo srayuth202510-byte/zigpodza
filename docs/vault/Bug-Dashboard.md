@@ -19,9 +19,9 @@ status: active
 
 | Metric | Value |
 | :--- | :--- |
-| Tracked Bug Patterns | **19** (19 Guarded) |
+| Tracked Bug Patterns | **20** (20 Guarded) |
 | Zig Source Modules | **10** |
-| Unit & Integration Tests | **75** |
+| Unit & Integration Tests | **82** |
 | Static Security & Memory Gates | **9/9 PASS** |
 
 ## Guard Coverage Map
@@ -75,6 +75,8 @@ flowchart LR
     BUG019["BUG-019"] --> SEC["[[Security-And-Memory-Checklist]]"]
     BUG019 --> src_policy_zig["src/policy.zig"]
     BUG019 --> src_log_zig["src/log.zig"]
+    BUG020["BUG-020"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG020 --> src_main_zig["src/main.zig"]
 ```
 
 ## Bug Pattern Registry
@@ -100,18 +102,19 @@ flowchart LR
 | [BUG-017](../../docs/vault/Bug-Playbook.md#L195) | Inspect Target Not Validated Before URL Path Assembly | `#bug-pattern` `#security-gate` | [podman_api.zig](../../src/podman_api.zig) | **Guarded** |
 | [BUG-018](../../docs/vault/Bug-Playbook.md#L205) | Exec ID from Daemon Response Reused in URL Without Validation | `#bug-pattern` `#security-gate` | [podman_api.zig](../../src/podman_api.zig) | **Guarded** |
 | [BUG-019](../../docs/vault/Bug-Playbook.md#L217) | Sandbox Profile Without Pre-Flight Policy Guardrails & DENY Telemetry | `#bug-pattern` `#security-gate` | [policy.zig](../../src/policy.zig), [log.zig](../../src/log.zig) | **Guarded** |
+| [BUG-020](../../docs/vault/Bug-Playbook.md#L227) | Premature `deinit()` of Parsed Policy Before `TmpfsBounds` Serialization (Use-After-Free) | `#bug-pattern` `#memory-leak` | [main.zig](../../src/main.zig) | **Guarded** |
 
 ## Module Test & Allocator Coverage
 
 | Module | Lines | Public Decls | Unit Tests | Memory Gate |
 | :--- | ---: | ---: | ---: | :--- |
-| [cli.zig](../../src/cli.zig) | 1112 | 18 | 19 | `std.testing.allocator` |
+| [cli.zig](../../src/cli.zig) | 1209 | 18 | 20 | `std.testing.allocator` |
 | [config.zig](../../src/config.zig) | 118 | 4 | 4 | `std.testing.allocator` |
 | [demo.zig](../../src/demo.zig) | 379 | 1 | 1 | `std.testing.allocator` |
-| [http.zig](../../src/http.zig) | 914 | 25 | 12 | `std.testing.allocator` |
-| [log.zig](../../src/log.zig) | 638 | 20 | 8 | `std.testing.allocator` |
-| [main.zig](../../src/main.zig) | 400 | 2 | 0 | `gpa.deinit() != .leak` |
-| [podman_api.zig](../../src/podman_api.zig) | 2251 | 60 | 26 | `std.testing.allocator` |
+| [http.zig](../../src/http.zig) | 997 | 25 | 13 | `std.testing.allocator` |
+| [log.zig](../../src/log.zig) | 711 | 20 | 9 | `std.testing.allocator` |
+| [main.zig](../../src/main.zig) | 616 | 2 | 2 | `gpa.deinit() != .leak` |
+| [podman_api.zig](../../src/podman_api.zig) | 2453 | 60 | 28 | `std.testing.allocator` |
 | [podman_types.zig](../../src/podman_types.zig) | 283 | 34 | 0 | `MISSING` |
 | [policy.zig](../../src/policy.zig) | 199 | 13 | 3 | `std.testing.allocator` |
 | [utils.zig](../../src/utils.zig) | 42 | 3 | 2 | `stack-only (no heap)` |
@@ -264,3 +267,10 @@ flowchart LR
 - **Root Cause**: เดิมไม่มีชั้น Policy Engine ก่อนสร้าง `ContainerCreateRequest` และ `audit` แสดงผลเฉพาะข้อความสรุปธรรมดาโดยไม่แยก `DENY` telemetry
 - **Fix**: เพิ่ม `src/policy.zig` (`applySandboxDefaults`, `loadPolicyFile`, `checkRunPolicy`, `enforceRunPolicy`) และไฟล์นโยบาย `zigpod-policy.json`: บังคับค่าเริ่มต้นแบบ fail-closed (`--read-only`, `--no-new-privileges`, `--cap-drop=ALL`, `--network=none`, `--pids-limit=64`, `--memory=256m`, bounded `/tmp` tmpfs) และตรวจ pre-flight ก่อนเปิด socket; เพิ่ม `Logger.deny()` และ `writeAuditJson()` ใน `src/log.zig` พร้อม `--json` ใน `zigpod audit` เพื่อส่งออก structured JSON (`valid`, `entries`, `deny_events`, `deny_records`); เพิ่มเทส unit สำหรับ `policy.zig` และ `writeAuditJson` พร้อม smoke E2E ทดสอบ `--profile=sandbox -m 512m` และ `audit --json`
 - **Prevention**: โหมด sandbox ต้องบังคับ fail-closed defaults เสมอ, ต้องตรวจเพดานทุกข้อกับ `zigpod-policy.json` แบบ pre-flight ก่อนคุยกับ daemon, และทุกการปฏิเสธด้านความปลอดภัยต้องเรียก `logger.deny(rule, detail)` ลง hash-chained `audit.log`
+
+### BUG-020 — Premature `deinit()` of Parsed Policy Before `TmpfsBounds` Serialization (Use-After-Free)
+- **Source**: [docs/vault/Bug-Playbook.md:227](../../docs/vault/Bug-Playbook.md#L227) · **Status**: `Guarded`
+- **Symptom**: เมื่อรัน `dispatch()` พร้อม `--profile=sandbox` หรือ `--policy` โดยใช้ `std.testing.allocator` (ซึ่ง unmap/poison หน่วยความจำทันทีที่ free) เกิด Segmentation Fault ใน `std.json.stringifyAlloc` ขณะ serialize `HostConfig.Tmpfs` (`tmpfs_bounds.tmp_options`) ใน `podman_api.createContainer` ทั้งที่ตอนรันผ่าน `run()` ปกติไม่พังเพราะ `ArenaAllocator` เลื่อนการคืนหน่วยความจำไปจนจบโปรเซส
+- **Root Cause**: ใน `src/main.zig` ตัวแปร `var loaded_pol: ?std.json.Parsed(policy.Policy) = null;` และ `defer if (loaded_pol) |lp| lp.deinit();` ถูกประกาศอยู่ภายในบล็อกย่อย `if (r.profile == .sandbox or r.policy_path != null) { ... }` ทำให้ `lp.deinit()` ทำงานทันทีที่ออกจากบล็อก `if` ก่อนที่ `tmpfs_bounds.tmp_options` (ซึ่งชี้ไปยัง slice ใน `loaded_pol`) จะถูกอ่านตอนเรียก `pod.createContainer`
+- **Fix**: ย้ายการประกาศ `var loaded_pol` และ `defer if (loaded_pol) |lp| lp.deinit();` ออกมาไว้ที่ scope ของแขนง `.run => |r_orig|` ใน `src/main.zig` คู่กับ `var tmpfs_bounds` เพื่อให้ lifetime ของ `loaded_pol` ครอบคลุมจนจบการเรียก `pod.createContainer`; เพิ่ม unit test เรียก `dispatch()` โดยตรงด้วย `std.testing.allocator` สำหรับ `--profile=sandbox` และเส้นทาง cleanup ของ `BUG-012`
+- **Prevention**: ห้ามเก็บ slice ที่อ้างอิงข้อมูลใน `std.json.Parsed(T)` ข้ามขอบเขตบล็อกที่มี `defer parsed.deinit()` และต้องมี unit test ที่เรียกฟังก์ชัน orchestration (`dispatch`) ด้วย `std.testing.allocator` เสมอเพื่อไม่ให้ `ArenaAllocator` บดบังปัญหา Use-After-Free

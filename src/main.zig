@@ -168,14 +168,13 @@ fn dispatch(
         .run => |r_orig| {
             var r = r_orig;
             var tmpfs_bounds: ?pod.TmpfsBounds = null;
+            var loaded_pol: ?std.json.Parsed(policy.Policy) = null;
+            defer if (loaded_pol) |lp| lp.deinit();
 
             if (r.profile == .sandbox or r.policy_path != null) {
                 if (r.profile == .sandbox) {
                     policy.applySandboxDefaults(&r);
                 }
-
-                var loaded_pol: ?std.json.Parsed(policy.Policy) = null;
-                defer if (loaded_pol) |lp| lp.deinit();
 
                 const active_pol: policy.Policy = if (r.policy_path) |p_path| blk: {
                     loaded_pol = try policy.loadPolicyFile(client.allocator, p_path);
@@ -397,4 +396,221 @@ test {
     _ = policy;
     _ = @import("utils.zig");
     std.testing.refAllDecls(@This());
+}
+
+const DispatchCleanupMockCtx = struct {
+    server: *std.net.Server,
+    saw_force_delete: bool = false,
+    saw_rm_delete: bool = false,
+};
+
+fn runDispatchCleanupMockServer(ctx: *DispatchCleanupMockCtx) void {
+    // Scenario 1: create (201) -> start (500) -> remove force=true (204)
+    // Scenario 2: create (201) -> start (204) -> wait (200) -> logs (500) -> remove force=false (204)
+    const steps = [_]struct {
+        match: []const u8,
+        reply: []const u8,
+        mark_force: bool = false,
+        mark_rm: bool = false,
+    }{
+        .{
+            .match = "POST /v1.40/containers/create",
+            .reply = "HTTP/1.1 201 Created\r\nContent-Length: 19\r\n\r\n{\"Id\":\"orphan1234\"}",
+        },
+        .{
+            .match = "POST /v1.40/containers/orphan1234/start",
+            .reply = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 29\r\n\r\n{\"message\":\"oci start error\"}",
+        },
+        .{
+            .match = "DELETE /v1.40/containers/orphan1234?force=true",
+            .reply = "HTTP/1.1 204 No Content\r\n\r\n",
+            .mark_force = true,
+        },
+        .{
+            .match = "POST /v1.40/containers/create",
+            .reply = "HTTP/1.1 201 Created\r\nContent-Length: 15\r\n\r\n{\"Id\":\"rm1234\"}",
+        },
+        .{
+            .match = "POST /v1.40/containers/rm1234/start",
+            .reply = "HTTP/1.1 204 No Content\r\n\r\n",
+        },
+        .{
+            .match = "POST /v1.40/containers/rm1234/wait",
+            .reply = "HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\n{\"StatusCode\":0}",
+        },
+        .{
+            .match = "GET /v1.40/containers/rm1234/logs?stdout=1&stderr=1",
+            .reply = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 28\r\n\r\n{\"message\":\"log read error\"}",
+        },
+        .{
+            .match = "DELETE /v1.40/containers/rm1234?force=false",
+            .reply = "HTTP/1.1 204 No Content\r\n\r\n",
+            .mark_rm = true,
+        },
+    };
+
+    for (steps) |step| {
+        const conn = ctx.server.accept() catch return;
+        defer conn.stream.close();
+        var req_buf: [1024]u8 = undefined;
+        const n = conn.stream.read(&req_buf) catch 0;
+        if (std.mem.indexOf(u8, req_buf[0..n], step.match) != null) {
+            if (step.mark_force) ctx.saw_force_delete = true;
+            if (step.mark_rm) ctx.saw_rm_delete = true;
+        }
+        conn.stream.writeAll(step.reply) catch return;
+    }
+}
+
+test "dispatch cleans up orphan container when startContainer or fetchLogs fails (BUG-012)" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-dispatch-bug012-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    var ctx = DispatchCleanupMockCtx{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, runDispatchCleanupMockServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{
+        .allocator = alloc,
+        .socket_path = sock_path,
+    };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    // 1) startContainer fails -> dispatch must force-remove orphan1234
+    try std.testing.expectError(
+        pod.ApiError.PodmanApiError,
+        dispatch(&client, &logger, .{ .run = .{ .image = "alpine:3.20", .detach = true } }, out.writer()),
+    );
+    try std.testing.expect(ctx.saw_force_delete);
+
+    // 2) run --rm where fetchLogs fails after waitContainer -> dispatch must remove rm1234
+    try std.testing.expectError(
+        pod.ApiError.PodmanApiError,
+        dispatch(&client, &logger, .{ .run = .{ .image = "alpine:3.20", .remove = true } }, out.writer()),
+    );
+    try std.testing.expect(ctx.saw_rm_delete);
+
+    thread.join();
+    joined = true;
+}
+
+const SandboxMockCtx = struct {
+    server: *std.net.Server,
+    create_req_len: usize = 0,
+    create_req_buf: [2048]u8 = undefined,
+};
+
+fn runSandboxDispatchMockServer(ctx: *SandboxMockCtx) void {
+    // 1) POST /v1.40/containers/create
+    if (ctx.server.accept()) |conn| {
+        defer conn.stream.close();
+        ctx.create_req_len = conn.stream.read(&ctx.create_req_buf) catch 0;
+        conn.stream.writeAll(
+            "HTTP/1.1 201 Created\r\nContent-Length: 19\r\n\r\n{\"Id\":\"sandbox999\"}",
+        ) catch return;
+    } else |_| return;
+
+    // 2) POST /v1.40/containers/sandbox999/start
+    if (ctx.server.accept()) |conn| {
+        defer conn.stream.close();
+        var buf: [512]u8 = undefined;
+        _ = conn.stream.read(&buf) catch {};
+        conn.stream.writeAll("HTTP/1.1 204 No Content\r\n\r\n") catch return;
+    } else |_| return;
+}
+
+test "dispatch run --profile=sandbox serializes HostConfig.Tmpfs and logs DENY on policy violation" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir_path);
+
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-dispatch-sandbox-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    var ctx = SandboxMockCtx{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, runSandboxDispatchMockServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{
+        .allocator = alloc,
+        .socket_path = sock_path,
+    };
+    var logger = log.Logger.init(dir_path, false);
+    defer logger.deinit();
+    logger.echo_stderr = false;
+
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    // 1) Pre-flight violation: 512 MiB exceeds 256 MiB sandbox ceiling (rejected before socket I/O).
+    try std.testing.expectError(
+        pod.ApiError.PolicyViolation,
+        dispatch(&client, &logger, .{
+            .run = .{
+                .image = "alpine:3.20",
+                .profile = .sandbox,
+                .memory = 512 * 1024 * 1024,
+            },
+        }, out.writer()),
+    );
+
+    // 2) Happy-path sandbox run (-d): applies defaults + Tmpfs bounds and starts container.
+    const exit_code = try dispatch(&client, &logger, .{
+        .run = .{
+            .image = "alpine:3.20",
+            .profile = .sandbox,
+            .detach = true,
+        },
+    }, out.writer());
+    try std.testing.expectEqual(@as(u8, 0), exit_code);
+    try std.testing.expectEqualStrings("sandbox999\n", out.items);
+
+    thread.join();
+    joined = true;
+
+    const create_req = ctx.create_req_buf[0..ctx.create_req_len];
+    try std.testing.expect(std.mem.indexOf(u8, create_req, "\"ReadonlyRootfs\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, create_req, "\"NetworkMode\":\"none\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, create_req, "\"CapDrop\":[\"ALL\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, create_req, "\"Memory\":268435456") != null);
+    try std.testing.expect(std.mem.indexOf(u8, create_req, "\"PidsLimit\":64") != null);
+    try std.testing.expect(
+        std.mem.indexOf(u8, create_req, "\"Tmpfs\":{\"/tmp\":\"rw,noexec,nosuid,nodev,size=67108864\"}") != null,
+    );
+
+    // Verify audit.log recorded the DENY event with a valid SHA-256 hash chain.
+    const audit_path = try std.fs.path.join(alloc, &.{ dir_path, "audit.log" });
+    defer alloc.free(audit_path);
+    var audit_json = std.ArrayList(u8).init(alloc);
+    defer audit_json.deinit();
+    try std.testing.expect(try log.writeAuditJson(alloc, audit_path, audit_json.writer()));
+    try std.testing.expect(std.mem.indexOf(u8, audit_json.items, "\"deny_events\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, audit_json.items, "\"rule\":\"policy.max_memory_bytes\"") != null);
 }

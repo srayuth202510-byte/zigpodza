@@ -912,3 +912,86 @@ test "streamRequest handles chunked streaming, error bodies, and 101 upgrade" {
     thread.join();
     joined = true;
 }
+
+test "fuzz parseResponse and decodeChunked with deterministic PRNG" {
+    const alloc = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x51690d01);
+    const rng = prng.random();
+
+    // Part A: Round-trip property — random payloads encoded as arbitrarily split HTTP/1.1 chunks.
+    var iter: usize = 0;
+    while (iter < 48) : (iter += 1) {
+        const payload_len = rng.intRangeAtMost(usize, 0, 256);
+        const payload = try alloc.alloc(u8, payload_len);
+        defer alloc.free(payload);
+        rng.bytes(payload);
+
+        var wire = std.ArrayList(u8).init(alloc);
+        defer wire.deinit();
+        try wire.appendSlice("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+
+        var pos: usize = 0;
+        while (pos < payload.len) {
+            const chunk_len = rng.intRangeAtMost(usize, 1, 37);
+            const end = @min(payload.len, pos + chunk_len);
+            const slice = payload[pos..end];
+            if (rng.boolean()) {
+                try wire.writer().print("{x};ext=val\r\n", .{slice.len});
+            } else {
+                try wire.writer().print("{X}\r\n", .{slice.len});
+            }
+            try wire.appendSlice(slice);
+            try wire.appendSlice("\r\n");
+            pos = end;
+        }
+        try wire.appendSlice("0\r\n\r\n");
+
+        const resp = try parseResponse(alloc, wire.items);
+        defer resp.deinit();
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        try std.testing.expectEqualSlices(u8, payload, resp.body);
+    }
+
+    // Part B: Mutated and random raw inputs must never panic, overflow, or leak.
+    var fuzz_i: usize = 0;
+    while (fuzz_i < 200) : (fuzz_i += 1) {
+        var raw = std.ArrayList(u8).init(alloc);
+        defer raw.deinit();
+
+        switch (fuzz_i % 4) {
+            0 => {
+                // Completely random bytes
+                const n = rng.intRangeAtMost(usize, 0, 96);
+                try raw.resize(n);
+                rng.bytes(raw.items);
+            },
+            1 => {
+                // Chunked header with random/corrupted body
+                try raw.appendSlice("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+                const n = rng.intRangeAtMost(usize, 0, 64);
+                const start = raw.items.len;
+                try raw.resize(start + n);
+                rng.bytes(raw.items[start..]);
+            },
+            2 => {
+                // Content-Length header with random length & body
+                const fake_len = rng.int(u32);
+                try raw.writer().print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n", .{fake_len});
+                const n = rng.intRangeAtMost(usize, 0, 48);
+                const start = raw.items.len;
+                try raw.resize(start + n);
+                rng.bytes(raw.items[start..]);
+            },
+            else => {
+                // Valid chunked frame with a single random byte mutation in the body
+                try raw.appendSlice("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n");
+                const mutate_idx = rng.intRangeLessThan(usize, 0, raw.items.len);
+                raw.items[mutate_idx] ^= @as(u8, 1) << rng.int(u3);
+            },
+        }
+
+        if (parseResponse(alloc, raw.items)) |resp| {
+            resp.deinit();
+        } else |_| {}
+    }
+}

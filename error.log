@@ -2011,3 +2011,477 @@ install transitive failure
 +- install zigpod failure
 error: the following build command failed with exit code 1:
 /home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0xdb8f49f8 -Za541e7fa3be89583 -Doptimize=ReleaseSafe
+2026-11-14T06:20:36Z [ERROR] auto-audit detected 1 failure(s):
+OK: No 'page_allocator' usage in src/.
+OK: GPA leak check is enforced.
+OK: No BUG-001 AccessDenied mismatch in src/http.zig.
+OK: std.testing.allocator present in src/cli.zig.
+OK: std.testing.allocator present in src/config.zig.
+OK: std.testing.allocator present in src/http.zig.
+OK: std.testing.allocator present in src/podman_api.zig.
+OK: std.testing.allocator present in src/log.zig.
+OK: std.testing.allocator present in src/policy.zig.
+OK: validateRequestTarget() enforced in src/http.zig.
+OK: validateIdentifier() enforced in src/podman_api.zig.
+OK: validateHostPath() fail-closed host mount policy enforced in src/podman_api.zig.
+OK: validatePortMapping() fail-closed port policy enforced in src/podman_api.zig.
+OK: validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_api.zig.
+OK: validateResourceRef() inspect path guard enforced in src/podman_api.zig.
+OK: createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig.
+OK: checkRunPolicy(), writeAuditJson(), and logger.deny() enforced (BUG-019).
+OK: Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser.
+OK: Timeout poll, HostConfig hardening, audit hash-chain verification, and 14-case demo present.
+OK: Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable.
+FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)...
+test
++- run test failure
+Segmentation fault at address 0x7fbdc3cd5094
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/unicode.zig:247:43: 0x123a604 in utf8ValidateSliceImpl__anon_13842 (test)
+            const chunk: Chunk = remaining[0..chunk_len].*;
+                                          ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/unicode.zig:236:33: 0x12013c4 in utf8ValidateSlice (test)
+    return utf8ValidateSliceImpl(input, .cannot_encode_surrogate_half);
+                                ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:562:103: 0x11f6d59 in write__anon_12532 (test)
+                            if (!self.options.emit_strings_as_arrays and std.unicode.utf8ValidateSlice(slice)) {
+                                                                                                      ^
+/home/mitsword/เอกสาร/zigpodza/src/podman_types.zig:27:21: 0x12bcb0d in jsonStringify__anon_14991 (test)
+        try jw.write(self.tmp_options);
+                    ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:506:51: 0x12a4b4b in write__anon_14611 (test)
+                        return value.jsonStringify(self);
+                                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:463:46: 0x1268dc9 in write__anon_14160 (test)
+                        return try self.write(payload);
+                                             ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:533:43: 0x1237c94 in write__anon_13413 (test)
+                            try self.write(@field(value, Field.name));
+                                          ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:463:46: 0x11f7079 in write__anon_12535 (test)
+                        return try self.write(payload);
+                                             ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:533:43: 0x116c0e6 in write__anon_9687 (test)
+                            try self.write(@field(value, Field.name));
+                                          ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:80:17: 0x110d7f1 in stringifyArbitraryDepth__anon_6873 (test)
+    try jw.write(value);
+                ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:94:32: 0x10d8b41 in stringifyAlloc__anon_5613 (test)
+    try stringifyArbitraryDepth(allocator, value, options, list.writer());
+                               ^
+/home/mitsword/เอกสาร/zigpodza/src/podman_api.zig:293:49: 0x10d7d8c in createContainer (test)
+    const req_body = try std.json.stringifyAlloc(client.allocator, cfg, .{
+                                                ^
+/home/mitsword/เอกสาร/zigpodza/src/main.zig:269:47: 0x10dc95c in dispatch__anon_4421 (test)
+            const id = try pod.createContainer(client, logger, req, r.name);
+                                              ^
+/home/mitsword/เอกสาร/zigpodza/src/main.zig:586:35: 0x10e65c9 in test.dispatch run --profile=sandbox serializes HostConfig.Tmpfs and logs DENY on policy violation (test)
+    const exit_code = try dispatch(&client, &logger, .{
+                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:95:29: 0x1179643 in mainServer (test)
+                test_fn.func() catch |err| switch (err) {
+                            ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:35:26: 0x111b50e in main (test)
+        return mainServer() catch @panic("internal test runner failure");
+                         ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/start.zig:514:22: 0x10e8e29 in posixCallMainAndExit (test)
+            root.main();
+                     ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/start.zig:266:5: 0x10e8991 in _start (test)
+    asm volatile (switch (native_arch) {
+    ^
+???:?:?: 0x1 in ??? (???)
+Unwind information for `???:0x1` was not available, trace may be incomplete
+error: while executing test 'main.test.dispatch run --profile=sandbox serializes HostConfig.Tmpfs and logs DENY on policy violation', the following command terminated with signal 6 (expected exited with code 0):
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/95cc684885452438b026a9e6fe8f7c0f/test --listen=- 
+Build Summary: 1/3 steps succeeded; 1 failed; 78/78 tests passed (disable with --summary none)
+test transitive failure
++- run test failure
+error: the following build command failed with exit code 1:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0xc23fe9d4 -Z289c08be49f91a44 test
+2026-11-14T06:21:33Z [ERROR] auto-audit detected 1 failure(s):
+OK: No 'page_allocator' usage in src/.
+OK: GPA leak check is enforced.
+OK: No BUG-001 AccessDenied mismatch in src/http.zig.
+OK: std.testing.allocator present in src/cli.zig.
+OK: std.testing.allocator present in src/config.zig.
+OK: std.testing.allocator present in src/http.zig.
+OK: std.testing.allocator present in src/podman_api.zig.
+OK: std.testing.allocator present in src/log.zig.
+OK: std.testing.allocator present in src/policy.zig.
+OK: validateRequestTarget() enforced in src/http.zig.
+OK: validateIdentifier() enforced in src/podman_api.zig.
+OK: validateHostPath() fail-closed host mount policy enforced in src/podman_api.zig.
+OK: validatePortMapping() fail-closed port policy enforced in src/podman_api.zig.
+OK: validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_api.zig.
+OK: validateResourceRef() inspect path guard enforced in src/podman_api.zig.
+OK: createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig.
+OK: checkRunPolicy(), writeAuditJson(), and logger.deny() enforced (BUG-019).
+OK: Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser.
+OK: Timeout poll, HostConfig hardening, audit hash-chain verification, and 14-case demo present.
+OK: Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable.
+FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)...
+test
++- run test failure
+Segmentation fault at address 0x7f3a136bb094
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/unicode.zig:247:43: 0x123f024 in utf8ValidateSliceImpl__anon_13881 (test)
+            const chunk: Chunk = remaining[0..chunk_len].*;
+                                          ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/unicode.zig:236:33: 0x1205924 in utf8ValidateSlice (test)
+    return utf8ValidateSliceImpl(input, .cannot_encode_surrogate_half);
+                                ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:562:103: 0x11fb2b9 in write__anon_12561 (test)
+                            if (!self.options.emit_strings_as_arrays and std.unicode.utf8ValidateSlice(slice)) {
+                                                                                                      ^
+/home/mitsword/เอกสาร/zigpodza/src/podman_types.zig:27:21: 0x12c2b0d in jsonStringify__anon_15033 (test)
+        try jw.write(self.tmp_options);
+                    ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:506:51: 0x12aaaeb in write__anon_14651 (test)
+                        return value.jsonStringify(self);
+                                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:463:46: 0x126ec99 in write__anon_14200 (test)
+                        return try self.write(payload);
+                                             ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:533:43: 0x123c6b4 in write__anon_13452 (test)
+                            try self.write(@field(value, Field.name));
+                                          ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:463:46: 0x11fb5d9 in write__anon_12564 (test)
+                        return try self.write(payload);
+                                             ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:533:43: 0x116f3e6 in write__anon_9708 (test)
+                            try self.write(@field(value, Field.name));
+                                          ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:80:17: 0x110e361 in stringifyArbitraryDepth__anon_6877 (test)
+    try jw.write(value);
+                ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:94:32: 0x10d96b1 in stringifyAlloc__anon_5617 (test)
+    try stringifyArbitraryDepth(allocator, value, options, list.writer());
+                               ^
+/home/mitsword/เอกสาร/zigpodza/src/podman_api.zig:293:49: 0x10d88fc in createContainer (test)
+    const req_body = try std.json.stringifyAlloc(client.allocator, cfg, .{
+                                                ^
+/home/mitsword/เอกสาร/zigpodza/src/main.zig:269:47: 0x10dd4cc in dispatch__anon_4425 (test)
+            const id = try pod.createContainer(client, logger, req, r.name);
+                                              ^
+/home/mitsword/เอกสาร/zigpodza/src/main.zig:586:35: 0x10e7139 in test.dispatch run --profile=sandbox serializes HostConfig.Tmpfs and logs DENY on policy violation (test)
+    const exit_code = try dispatch(&client, &logger, .{
+                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:95:29: 0x117c943 in mainServer (test)
+                test_fn.func() catch |err| switch (err) {
+                            ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:35:26: 0x111c07e in main (test)
+        return mainServer() catch @panic("internal test runner failure");
+                         ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/start.zig:514:22: 0x10e9999 in posixCallMainAndExit (test)
+            root.main();
+                     ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/start.zig:266:5: 0x10e9501 in _start (test)
+    asm volatile (switch (native_arch) {
+    ^
+???:?:?: 0x1 in ??? (???)
+Unwind information for `???:0x1` was not available, trace may be incomplete
+error: while executing test 'main.test.dispatch run --profile=sandbox serializes HostConfig.Tmpfs and logs DENY on policy violation', the following command terminated with signal 6 (expected exited with code 0):
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/221460e7f1b8a186d3627146457a6e35/test --listen=- 
+Build Summary: 1/3 steps succeeded; 1 failed; 80/80 tests passed (disable with --summary none)
+test transitive failure
++- run test failure
+error: the following build command failed with exit code 1:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0x8fe59484 -Z2ea2038aa364ba86 test
+2026-11-14T06:22:39Z [ERROR] auto-audit detected 1 failure(s):
+OK: No 'page_allocator' usage in src/.
+OK: GPA leak check is enforced.
+OK: No BUG-001 AccessDenied mismatch in src/http.zig.
+OK: std.testing.allocator present in src/cli.zig.
+OK: std.testing.allocator present in src/config.zig.
+OK: std.testing.allocator present in src/http.zig.
+OK: std.testing.allocator present in src/podman_api.zig.
+OK: std.testing.allocator present in src/log.zig.
+OK: std.testing.allocator present in src/policy.zig.
+OK: validateRequestTarget() enforced in src/http.zig.
+OK: validateIdentifier() enforced in src/podman_api.zig.
+OK: validateHostPath() fail-closed host mount policy enforced in src/podman_api.zig.
+OK: validatePortMapping() fail-closed port policy enforced in src/podman_api.zig.
+OK: validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_api.zig.
+OK: validateResourceRef() inspect path guard enforced in src/podman_api.zig.
+OK: createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig.
+OK: checkRunPolicy(), writeAuditJson(), and logger.deny() enforced (BUG-019).
+OK: Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser.
+OK: Timeout poll, HostConfig hardening, audit hash-chain verification, and 14-case demo present.
+OK: Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable.
+FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)...
+test
++- run test failure
+Segmentation fault at address 0x7fc3cb76c094
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/unicode.zig:247:43: 0x12410f4 in utf8ValidateSliceImpl__anon_13895 (test)
+            const chunk: Chunk = remaining[0..chunk_len].*;
+                                          ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/unicode.zig:236:33: 0x1207924 in utf8ValidateSlice (test)
+    return utf8ValidateSliceImpl(input, .cannot_encode_surrogate_half);
+                                ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:562:103: 0x11fd2b9 in write__anon_12572 (test)
+                            if (!self.options.emit_strings_as_arrays and std.unicode.utf8ValidateSlice(slice)) {
+                                                                                                      ^
+/home/mitsword/เอกสาร/zigpodza/src/podman_types.zig:27:21: 0x12c4abd in jsonStringify__anon_15047 (test)
+        try jw.write(self.tmp_options);
+                    ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:506:51: 0x12acb2b in write__anon_14667 (test)
+                        return value.jsonStringify(self);
+                                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:463:46: 0x1270cc9 in write__anon_14215 (test)
+                        return try self.write(payload);
+                                             ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:533:43: 0x123e784 in write__anon_13466 (test)
+                            try self.write(@field(value, Field.name));
+                                          ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:463:46: 0x11fd5d9 in write__anon_12575 (test)
+                        return try self.write(payload);
+                                             ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:533:43: 0x1170ff6 in write__anon_9715 (test)
+                            try self.write(@field(value, Field.name));
+                                          ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:80:17: 0x110e891 in stringifyArbitraryDepth__anon_6878 (test)
+    try jw.write(value);
+                ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:94:32: 0x10d9be1 in stringifyAlloc__anon_5618 (test)
+    try stringifyArbitraryDepth(allocator, value, options, list.writer());
+                               ^
+/home/mitsword/เอกสาร/zigpodza/src/podman_api.zig:293:49: 0x10d8e2c in createContainer (test)
+    const req_body = try std.json.stringifyAlloc(client.allocator, cfg, .{
+                                                ^
+/home/mitsword/เอกสาร/zigpodza/src/main.zig:269:47: 0x10dd9fc in dispatch__anon_4426 (test)
+            const id = try pod.createContainer(client, logger, req, r.name);
+                                              ^
+/home/mitsword/เอกสาร/zigpodza/src/main.zig:586:35: 0x10e7669 in test.dispatch run --profile=sandbox serializes HostConfig.Tmpfs and logs DENY on policy violation (test)
+    const exit_code = try dispatch(&client, &logger, .{
+                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:95:29: 0x117e553 in mainServer (test)
+                test_fn.func() catch |err| switch (err) {
+                            ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:35:26: 0x111c5ae in main (test)
+        return mainServer() catch @panic("internal test runner failure");
+                         ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/start.zig:514:22: 0x10e9ec9 in posixCallMainAndExit (test)
+            root.main();
+                     ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/start.zig:266:5: 0x10e9a31 in _start (test)
+    asm volatile (switch (native_arch) {
+    ^
+???:?:?: 0x1 in ??? (???)
+Unwind information for `???:0x1` was not available, trace may be incomplete
+error: while executing test 'main.test.dispatch run --profile=sandbox serializes HostConfig.Tmpfs and logs DENY on policy violation', the following command terminated with signal 6 (expected exited with code 0):
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/e9751a8b133eb06ff32f93d977da1028/test --listen=- 
+Build Summary: 1/3 steps succeeded; 1 failed; 81/81 tests passed (disable with --summary none)
+test transitive failure
++- run test failure
+error: the following build command failed with exit code 1:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0x995288f0 -Zd02dff86d98412ba test
+2026-11-14T06:22:46Z [ERROR] auto-audit detected 1 failure(s):
+OK: No 'page_allocator' usage in src/.
+OK: GPA leak check is enforced.
+OK: No BUG-001 AccessDenied mismatch in src/http.zig.
+OK: std.testing.allocator present in src/cli.zig.
+OK: std.testing.allocator present in src/config.zig.
+OK: std.testing.allocator present in src/http.zig.
+OK: std.testing.allocator present in src/podman_api.zig.
+OK: std.testing.allocator present in src/log.zig.
+OK: std.testing.allocator present in src/policy.zig.
+OK: validateRequestTarget() enforced in src/http.zig.
+OK: validateIdentifier() enforced in src/podman_api.zig.
+OK: validateHostPath() fail-closed host mount policy enforced in src/podman_api.zig.
+OK: validatePortMapping() fail-closed port policy enforced in src/podman_api.zig.
+OK: validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_api.zig.
+OK: validateResourceRef() inspect path guard enforced in src/podman_api.zig.
+OK: createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig.
+OK: checkRunPolicy(), writeAuditJson(), and logger.deny() enforced (BUG-019).
+OK: Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser.
+OK: Timeout poll, HostConfig hardening, audit hash-chain verification, and 14-case demo present.
+OK: Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable.
+FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)...
+test
++- run test failure
+Segmentation fault at address 0x7f8ed757b094
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/unicode.zig:247:43: 0x1243254 in utf8ValidateSliceImpl__anon_13911 (test)
+            const chunk: Chunk = remaining[0..chunk_len].*;
+                                          ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/unicode.zig:236:33: 0x1209b24 in utf8ValidateSlice (test)
+    return utf8ValidateSliceImpl(input, .cannot_encode_surrogate_half);
+                                ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:562:103: 0x11ff4b9 in write__anon_12585 (test)
+                            if (!self.options.emit_strings_as_arrays and std.unicode.utf8ValidateSlice(slice)) {
+                                                                                                      ^
+/home/mitsword/เอกสาร/zigpodza/src/podman_types.zig:27:21: 0x12c638d in jsonStringify__anon_15063 (test)
+        try jw.write(self.tmp_options);
+                    ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:506:51: 0x12af73b in write__anon_14686 (test)
+                        return value.jsonStringify(self);
+                                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:463:46: 0x1273d69 in write__anon_14230 (test)
+                        return try self.write(payload);
+                                             ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:533:43: 0x12408e4 in write__anon_13482 (test)
+                            try self.write(@field(value, Field.name));
+                                          ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:463:46: 0x11ff7d9 in write__anon_12588 (test)
+                        return try self.write(payload);
+                                             ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:533:43: 0x1172c46 in write__anon_9721 (test)
+                            try self.write(@field(value, Field.name));
+                                          ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:80:17: 0x110ef71 in stringifyArbitraryDepth__anon_6879 (test)
+    try jw.write(value);
+                ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:94:32: 0x10da2c1 in stringifyAlloc__anon_5619 (test)
+    try stringifyArbitraryDepth(allocator, value, options, list.writer());
+                               ^
+/home/mitsword/เอกสาร/zigpodza/src/podman_api.zig:293:49: 0x10d950c in createContainer (test)
+    const req_body = try std.json.stringifyAlloc(client.allocator, cfg, .{
+                                                ^
+/home/mitsword/เอกสาร/zigpodza/src/main.zig:269:47: 0x10de0dc in dispatch__anon_4427 (test)
+            const id = try pod.createContainer(client, logger, req, r.name);
+                                              ^
+/home/mitsword/เอกสาร/zigpodza/src/main.zig:586:35: 0x10e7d49 in test.dispatch run --profile=sandbox serializes HostConfig.Tmpfs and logs DENY on policy violation (test)
+    const exit_code = try dispatch(&client, &logger, .{
+                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:95:29: 0x11801a3 in mainServer (test)
+                test_fn.func() catch |err| switch (err) {
+                            ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:35:26: 0x111cc8e in main (test)
+        return mainServer() catch @panic("internal test runner failure");
+                         ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/start.zig:514:22: 0x10ea5a9 in posixCallMainAndExit (test)
+            root.main();
+                     ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/start.zig:266:5: 0x10ea111 in _start (test)
+    asm volatile (switch (native_arch) {
+    ^
+???:?:?: 0x1 in ??? (???)
+Unwind information for `???:0x1` was not available, trace may be incomplete
+error: while executing test 'main.test.dispatch run --profile=sandbox serializes HostConfig.Tmpfs and logs DENY on policy violation', the following command terminated with signal 6 (expected exited with code 0):
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/9c04036c0cb89648e7a3ca31f249904b/test --listen=- 
+Build Summary: 1/3 steps succeeded; 1 failed; 82/82 tests passed (disable with --summary none)
+test transitive failure
++- run test failure
+error: the following build command failed with exit code 1:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0x29854dfa -Zce4fcf0af20b00a5 test
+2026-11-14T06:22:53Z [ERROR] auto-audit detected 1 failure(s):
+OK: No 'page_allocator' usage in src/.
+OK: GPA leak check is enforced.
+OK: No BUG-001 AccessDenied mismatch in src/http.zig.
+OK: std.testing.allocator present in src/cli.zig.
+OK: std.testing.allocator present in src/config.zig.
+OK: std.testing.allocator present in src/http.zig.
+OK: std.testing.allocator present in src/podman_api.zig.
+OK: std.testing.allocator present in src/log.zig.
+OK: std.testing.allocator present in src/policy.zig.
+OK: validateRequestTarget() enforced in src/http.zig.
+OK: validateIdentifier() enforced in src/podman_api.zig.
+OK: validateHostPath() fail-closed host mount policy enforced in src/podman_api.zig.
+OK: validatePortMapping() fail-closed port policy enforced in src/podman_api.zig.
+OK: validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_api.zig.
+OK: validateResourceRef() inspect path guard enforced in src/podman_api.zig.
+OK: createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig.
+OK: checkRunPolicy(), writeAuditJson(), and logger.deny() enforced (BUG-019).
+OK: Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser.
+OK: Timeout poll, HostConfig hardening, audit hash-chain verification, and 14-case demo present.
+OK: Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable.
+FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)...
+test
++- run test
+   +- zig test Debug native 1 errors
+src/log.zig:689:88: error: no error named 'AuditCorrupt' in 'error{InvalidAuditFormat,AuditTampered}'
+error: the following command failed with 1 compilation errors:
+/home/mitsword/.local/opt/zig-0.13.0/zig test -ODebug -Mroot=/home/mitsword/เอกสาร/zigpodza/src/main.zig --cache-dir /home/mitsword/เอกสาร/zigpodza/.zig-cache --global-cache-dir /home/mitsword/.cache/zig --name test --listen=- 
+Build Summary: 0/3 steps succeeded; 1 failed (disable with --summary none)
+test transitive failure
++- run test transitive failure
+   +- zig test Debug native 1 errors
+error: the following build command failed with exit code 1:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0xe0fbf842 -Za9338ed359cf5c90 test
+2026-11-14T06:24:16Z [ERROR] auto-audit detected 1 failure(s):
+OK: No 'page_allocator' usage in src/.
+OK: GPA leak check is enforced.
+OK: No BUG-001 AccessDenied mismatch in src/http.zig.
+OK: std.testing.allocator present in src/cli.zig.
+OK: std.testing.allocator present in src/config.zig.
+OK: std.testing.allocator present in src/http.zig.
+OK: std.testing.allocator present in src/podman_api.zig.
+OK: std.testing.allocator present in src/log.zig.
+OK: std.testing.allocator present in src/policy.zig.
+OK: validateRequestTarget() enforced in src/http.zig.
+OK: validateIdentifier() enforced in src/podman_api.zig.
+OK: validateHostPath() fail-closed host mount policy enforced in src/podman_api.zig.
+OK: validatePortMapping() fail-closed port policy enforced in src/podman_api.zig.
+OK: validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_api.zig.
+OK: validateResourceRef() inspect path guard enforced in src/podman_api.zig.
+OK: createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig.
+OK: checkRunPolicy(), writeAuditJson(), and logger.deny() enforced (BUG-019).
+OK: Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser.
+OK: Timeout poll, HostConfig hardening, audit hash-chain verification, and 14-case demo present.
+OK: Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable.
+FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)...
+test
++- run test failure
+Segmentation fault at address 0x7f0584222094
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/unicode.zig:247:43: 0x1245db4 in utf8ValidateSliceImpl__anon_13916 (test)
+            const chunk: Chunk = remaining[0..chunk_len].*;
+                                          ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/unicode.zig:236:33: 0x120bfc4 in utf8ValidateSlice (test)
+    return utf8ValidateSliceImpl(input, .cannot_encode_surrogate_half);
+                                ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:562:103: 0x1201959 in write__anon_12589 (test)
+                            if (!self.options.emit_strings_as_arrays and std.unicode.utf8ValidateSlice(slice)) {
+                                                                                                      ^
+/home/mitsword/เอกสาร/zigpodza/src/podman_types.zig:27:21: 0x12c8f7d in jsonStringify__anon_15070 (test)
+        try jw.write(self.tmp_options);
+                    ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:506:51: 0x12b232b in write__anon_14693 (test)
+                        return value.jsonStringify(self);
+                                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:463:46: 0x1276909 in write__anon_14236 (test)
+                        return try self.write(payload);
+                                             ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:533:43: 0x1243444 in write__anon_13487 (test)
+                            try self.write(@field(value, Field.name));
+                                          ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:463:46: 0x1201c79 in write__anon_12592 (test)
+                        return try self.write(payload);
+                                             ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:533:43: 0x11745d6 in write__anon_9724 (test)
+                            try self.write(@field(value, Field.name));
+                                          ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:80:17: 0x110f421 in stringifyArbitraryDepth__anon_6880 (test)
+    try jw.write(value);
+                ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/json/stringify.zig:94:32: 0x10da771 in stringifyAlloc__anon_5620 (test)
+    try stringifyArbitraryDepth(allocator, value, options, list.writer());
+                               ^
+/home/mitsword/เอกสาร/zigpodza/src/podman_api.zig:293:49: 0x10d99bc in createContainer (test)
+    const req_body = try std.json.stringifyAlloc(client.allocator, cfg, .{
+                                                ^
+/home/mitsword/เอกสาร/zigpodza/src/main.zig:269:47: 0x10de58c in dispatch__anon_4428 (test)
+            const id = try pod.createContainer(client, logger, req, r.name);
+                                              ^
+/home/mitsword/เอกสาร/zigpodza/src/main.zig:586:35: 0x10e81f9 in test.dispatch run --profile=sandbox serializes HostConfig.Tmpfs and logs DENY on policy violation (test)
+    const exit_code = try dispatch(&client, &logger, .{
+                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:95:29: 0x1181b33 in mainServer (test)
+                test_fn.func() catch |err| switch (err) {
+                            ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:35:26: 0x111d13e in main (test)
+        return mainServer() catch @panic("internal test runner failure");
+                         ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/start.zig:514:22: 0x10eaa59 in posixCallMainAndExit (test)
+            root.main();
+                     ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/start.zig:266:5: 0x10ea5c1 in _start (test)
+    asm volatile (switch (native_arch) {
+    ^
+???:?:?: 0x1 in ??? (???)
+Unwind information for `???:0x1` was not available, trace may be incomplete
+error: while executing test 'main.test.dispatch run --profile=sandbox serializes HostConfig.Tmpfs and logs DENY on policy violation', the following command terminated with signal 6 (expected exited with code 0):
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/ed019437919b4aaa5ccee787f7665be4/test --listen=- 
+Build Summary: 1/3 steps succeeded; 1 failed; 83/83 tests passed (disable with --summary none)
+test transitive failure
++- run test failure
+error: the following build command failed with exit code 1:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0xa25fa13f -Z8504c105e101a22e test

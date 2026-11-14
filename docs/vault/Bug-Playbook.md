@@ -223,3 +223,12 @@ status: active
   - เพิ่ม `Logger.deny()` และ `writeAuditJson()` ใน [src/log.zig](../../src/log.zig) พร้อม `--json` ใน `zigpod audit` เพื่อส่งออก structured JSON (`valid`, `entries`, `deny_events`, `deny_records`)
   - เพิ่มเทส unit สำหรับ `policy.zig` และ `writeAuditJson` พร้อม smoke E2E ทดสอบ `--profile=sandbox -m 512m` และ `audit --json`
 - **Prevention Rule**: โหมด sandbox ต้องบังคับ fail-closed defaults เสมอ, ต้องตรวจเพดานทุกข้อกับ `zigpod-policy.json` แบบ pre-flight ก่อนคุยกับ daemon, และทุกการปฏิเสธด้านความปลอดภัยต้องเรียก `logger.deny(rule, detail)` ลง hash-chained `audit.log`
+
+## BUG-020: Premature `deinit()` of Parsed Policy Before `TmpfsBounds` Serialization (Use-After-Free) `#bug-pattern` `#memory-leak`
+
+- **Symptom**: เมื่อรัน `dispatch()` พร้อม `--profile=sandbox` หรือ `--policy` โดยใช้ `std.testing.allocator` (ซึ่ง unmap/poison หน่วยความจำทันทีที่ free) เกิด Segmentation Fault ใน `std.json.stringifyAlloc` ขณะ serialize `HostConfig.Tmpfs` (`tmpfs_bounds.tmp_options`) ใน `podman_api.createContainer` ทั้งที่ตอนรันผ่าน `run()` ปกติไม่พังเพราะ `ArenaAllocator` เลื่อนการคืนหน่วยความจำไปจนจบโปรเซส
+- **Root Cause**: ใน [src/main.zig](../../src/main.zig) ตัวแปร `var loaded_pol: ?std.json.Parsed(policy.Policy) = null;` และ `defer if (loaded_pol) |lp| lp.deinit();` ถูกประกาศอยู่ภายในบล็อกย่อย `if (r.profile == .sandbox or r.policy_path != null) { ... }` ทำให้ `lp.deinit()` ทำงานทันทีที่ออกจากบล็อก `if` ก่อนที่ `tmpfs_bounds.tmp_options` (ซึ่งชี้ไปยัง slice ใน `loaded_pol`) จะถูกอ่านตอนเรียก `pod.createContainer`
+- **Fix**:
+  - ย้ายการประกาศ `var loaded_pol` และ `defer if (loaded_pol) |lp| lp.deinit();` ออกมาไว้ที่ scope ของแขนง `.run => |r_orig|` ใน [src/main.zig](../../src/main.zig) คู่กับ `var tmpfs_bounds` เพื่อให้ lifetime ของ `loaded_pol` ครอบคลุมจนจบการเรียก `pod.createContainer`
+  - เพิ่ม unit test เรียก `dispatch()` โดยตรงด้วย `std.testing.allocator` สำหรับ `--profile=sandbox` และเส้นทาง cleanup ของ `BUG-012`
+- **Prevention Rule**: ห้ามเก็บ slice ที่อ้างอิงข้อมูลใน `std.json.Parsed(T)` ข้ามขอบเขตบล็อกที่มี `defer parsed.deinit()` และต้องมี unit test ที่เรียกฟังก์ชัน orchestration (`dispatch`) ด้วย `std.testing.allocator` เสมอเพื่อไม่ให้ `ArenaAllocator` บดบังปัญหา Use-After-Free

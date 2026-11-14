@@ -1110,3 +1110,100 @@ test "parse run -it and exec -it interactive/tty flags" {
     try std.testing.expect(p_logs.command.logs.follow);
     try std.testing.expectEqualStrings("web", p_logs.command.logs.container);
 }
+
+test "fuzz parseMemoryBytes and cli.parse with deterministic PRNG" {
+    const alloc = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xc11f022);
+    const rng = prng.random();
+
+    // Part A: Property test for parseMemoryBytes on valid suffix multipliers + random strings.
+    const suffixes = [_]struct { s: []const u8, mul: i64 }{
+        .{ .s = "", .mul = 1 },
+        .{ .s = "b", .mul = 1 },
+        .{ .s = "B", .mul = 1 },
+        .{ .s = "k", .mul = 1024 },
+        .{ .s = "kb", .mul = 1024 },
+        .{ .s = "m", .mul = 1024 * 1024 },
+        .{ .s = "MB", .mul = 1024 * 1024 },
+        .{ .s = "g", .mul = 1024 * 1024 * 1024 },
+        .{ .s = "GB", .mul = 1024 * 1024 * 1024 },
+    };
+    for (suffixes) |suf| {
+        const n: i64 = rng.intRangeAtMost(i64, 1, 2048);
+        var buf: [32]u8 = undefined;
+        const text = try std.fmt.bufPrint(&buf, "{d}{s}", .{ n, suf.s });
+        try std.testing.expectEqual(n * suf.mul, try parseMemoryBytes(text));
+    }
+
+    var mem_i: usize = 0;
+    while (mem_i < 200) : (mem_i += 1) {
+        var buf: [24]u8 = undefined;
+        const len = rng.intRangeAtMost(usize, 0, buf.len);
+        rng.bytes(buf[0..len]);
+        if (parseMemoryBytes(buf[0..len])) |val| {
+            try std.testing.expect(val > 0);
+        } else |_| {}
+    }
+
+    // Part B: Fuzz cli.parse across random argument sequences to verify leak-free error cleanup.
+    const pool = [_][]const u8{
+        "run",
+        "exec",
+        "stats",
+        "logs",
+        "audit",
+        "ps",
+        "rm",
+        "-d",
+        "--rm",
+        "-it",
+        "-f",
+        "--no-stream",
+        "-a",
+        "--json",
+        "--profile=sandbox",
+        "--profile=bad",
+        "--policy",
+        "zigpod-policy.json",
+        "-e",
+        "K=V",
+        "-v",
+        "/tmp/a:/app:ro",
+        "-p",
+        "8080:80",
+        "-m",
+        "128m",
+        "-m",
+        "0",
+        "--pids-limit",
+        "32",
+        "--cap-drop",
+        "ALL",
+        "--cap-add",
+        "bad_cap",
+        "--network",
+        "none",
+        "--user",
+        "1000:1000",
+        "--workdir",
+        "/work",
+        "--bogus",
+        "",
+        "alpine:3.20",
+        "sh",
+    };
+
+    var parse_i: usize = 0;
+    while (parse_i < 160) : (parse_i += 1) {
+        const argc = rng.intRangeAtMost(usize, 0, 10);
+        var args = try alloc.alloc([]const u8, argc);
+        defer alloc.free(args);
+        for (0..argc) |idx| {
+            args[idx] = pool[rng.intRangeLessThan(usize, 0, pool.len)];
+        }
+        if (parse(alloc, args)) |parsed| {
+            var p = parsed;
+            p.deinit(alloc);
+        } else |_| {}
+    }
+}

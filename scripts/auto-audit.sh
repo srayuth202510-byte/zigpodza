@@ -58,7 +58,7 @@ else
 fi
 
 # 4. Require std.testing.allocator in every heap-allocating module
-for mod in src/cli.zig src/config.zig src/http.zig src/podman_api.zig src/log.zig src/policy.zig; do
+for mod in src/main.zig src/cli.zig src/config.zig src/http.zig src/podman_api.zig src/log.zig src/policy.zig; do
     if has_match "std\.testing\.allocator" "$mod"; then
         pass "std.testing.allocator present in $mod."
     else

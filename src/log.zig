@@ -636,3 +636,76 @@ test "logger.deny and writeAuditJson emit structured DENY telemetry and detect t
     try std.testing.expect(std.mem.indexOf(u8, json_out.items, "\"valid\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, json_out.items, "\"failure_reason\":\"AuditTampered\"") != null);
 }
+
+test "fuzz verifyAuditFile and writeAuditJson over corrupted and random audit logs" {
+    const alloc = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xa0d17f02);
+    const rng = prng.random();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir_path);
+
+    {
+        var logger = Logger.init(dir_path, false);
+        defer logger.deinit();
+        logger.echo_stderr = false;
+        logger.info("entry one", .{});
+        logger.warn("entry two", .{});
+        logger.err("entry three", .{});
+        logger.deny("policy.network_none", "network mode must be none");
+    }
+
+    const audit_path = try std.fs.path.join(alloc, &.{ dir_path, "audit.log" });
+    defer alloc.free(audit_path);
+
+    const baseline = try tmp.dir.readFileAlloc(alloc, "audit.log", 16384);
+    defer alloc.free(baseline);
+    try std.testing.expectEqual(@as(usize, 4), try verifyAuditFile(alloc, audit_path));
+
+    // Part A: Any single-byte bitflip inside the committed log (excluding the final '\n')
+    // must be caught by both verifyAuditFile and writeAuditJson without panicking or leaking.
+    var i: usize = 0;
+    while (i < 48) : (i += 1) {
+        const mutated = try alloc.dupe(u8, baseline);
+        defer alloc.free(mutated);
+
+        const pos = rng.intRangeLessThan(usize, 0, mutated.len - 1);
+        // Avoid mutating a newline into a non-newline on the very last byte; flip a bit at `pos`.
+        mutated[pos] ^= @as(u8, 1) << rng.int(u3);
+        try tmp.dir.writeFile(.{ .sub_path = "audit.log", .data = mutated });
+
+        const verify_res = verifyAuditFile(alloc, audit_path);
+        var json_out = std.ArrayList(u8).init(alloc);
+        defer json_out.deinit();
+        const json_ok = try writeAuditJson(alloc, audit_path, json_out.writer());
+
+        // Unless we turned the last newline of the file into a non-newline (which only happens at mutated.len - 1,
+        // excluded above), tampering with a committed byte must fail verification.
+        if (verify_res) |_| {
+            return error.TestUnexpectedResult;
+        } else |err| {
+            try std.testing.expect(err == AuditError.AuditTampered or err == AuditError.InvalidAuditFormat);
+        }
+        try std.testing.expect(!json_ok);
+        try std.testing.expect(std.mem.indexOf(u8, json_out.items, "\"valid\":false") != null);
+    }
+
+    // Part B: Arbitrary random byte buffers with embedded '\n' and '\t' must never panic or leak.
+    var fuzz_i: usize = 0;
+    while (fuzz_i < 48) : (fuzz_i += 1) {
+        const len = rng.intRangeAtMost(usize, 1, 256);
+        const buf = try alloc.alloc(u8, len);
+        defer alloc.free(buf);
+        rng.bytes(buf);
+        buf[len - 1] = '\n';
+
+        try tmp.dir.writeFile(.{ .sub_path = "audit.log", .data = buf });
+        _ = verifyAuditFile(alloc, audit_path) catch {};
+
+        var json_out = std.ArrayList(u8).init(alloc);
+        defer json_out.deinit();
+        _ = try writeAuditJson(alloc, audit_path, json_out.writer());
+    }
+}

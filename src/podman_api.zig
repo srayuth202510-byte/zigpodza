@@ -2249,3 +2249,205 @@ test "pullImage streaming, logs -f, and attachContainer 101 upgrade" {
     thread.join();
     joined = true;
 }
+
+const InteractiveExecMockCtx = struct {
+    server: *std.net.Server,
+    saw_attach_stdin: bool = false,
+};
+
+fn runInteractiveExecMockServer(ctx: *InteractiveExecMockCtx) void {
+    // 1) POST /v1.40/containers/web/exec -> 201 Created {"Id":"execinteractive1"}
+    if (ctx.server.accept()) |conn| {
+        defer conn.stream.close();
+        var req_buf: [1024]u8 = undefined;
+        const n = conn.stream.read(&req_buf) catch 0;
+        if (std.mem.indexOf(u8, req_buf[0..n], "\"AttachStdin\":true") != null and
+            std.mem.indexOf(u8, req_buf[0..n], "\"Tty\":true") != null)
+        {
+            ctx.saw_attach_stdin = true;
+        }
+        conn.stream.writeAll(
+            "HTTP/1.1 201 Created\r\nContent-Length: 25\r\n\r\n{\"Id\":\"execinteractive1\"}",
+        ) catch return;
+    } else |_| return;
+
+    // 2) POST /v1.40/exec/execinteractive1/start -> 101 Switching Protocols + echo
+    if (ctx.server.accept()) |conn| {
+        defer conn.stream.close();
+        var req_buf: [512]u8 = undefined;
+        _ = conn.stream.read(&req_buf) catch {};
+        conn.stream.writeAll(
+            "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n# ",
+        ) catch return;
+        var in_buf: [64]u8 = undefined;
+        const n = conn.stream.read(&in_buf) catch 0;
+        if (n > 0) {
+            conn.stream.writeAll(in_buf[0..n]) catch {};
+            conn.stream.writeAll("root\n") catch {};
+        }
+    } else |_| return;
+
+    // 3) GET /v1.40/exec/execinteractive1/json -> 200 OK {"Running":false,"ExitCode":0}
+    if (ctx.server.accept()) |conn| {
+        defer conn.stream.close();
+        var req_buf: [512]u8 = undefined;
+        _ = conn.stream.read(&req_buf) catch {};
+        conn.stream.writeAll(
+            "HTTP/1.1 200 OK\r\nContent-Length: 30\r\n\r\n{\"Running\":false,\"ExitCode\":0}",
+        ) catch return;
+    } else |_| return;
+}
+
+test "execCommandWithIo interactive 101 upgrade and TmpfsBounds JSON serialization" {
+    const alloc = std.testing.allocator;
+
+    // 1) Verify TmpfsBounds serializes as {"/tmp":"..."} inside HostConfig.
+    const create_req = ContainerCreateRequest{
+        .Image = "alpine:3.20",
+        .HostConfig = .{
+            .ReadonlyRootfs = true,
+            .Tmpfs = .{ .tmp_options = "rw,noexec,nosuid,nodev,size=67108864" },
+        },
+    };
+    const json_bytes = try std.json.stringifyAlloc(alloc, create_req, .{ .emit_null_optional_fields = false });
+    defer alloc.free(json_bytes);
+    try std.testing.expect(
+        std.mem.indexOf(u8, json_bytes, "\"Tmpfs\":{\"/tmp\":\"rw,noexec,nosuid,nodev,size=67108864\"}") != null,
+    );
+
+    // 2) Verify execCommandWithIo (AttachStdin=true, Tty=true) over 101 Switching Protocols.
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-exec-interactive-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    var ctx = InteractiveExecMockCtx{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, runInteractiveExecMockServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{
+        .allocator = alloc,
+        .socket_path = sock_path,
+    };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    const pipe_fds = try std.posix.pipe();
+    var read_open = true;
+    var write_open = true;
+    defer {
+        if (read_open) std.posix.close(pipe_fds[0]);
+        if (write_open) std.posix.close(pipe_fds[1]);
+    }
+    _ = try std.posix.write(pipe_fds[1], "whoami\n");
+    std.posix.close(pipe_fds[1]);
+    write_open = false;
+
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+    const exit_code = try execCommandWithIo(&client, &logger, "web", .{
+        .AttachStdin = true,
+        .Tty = true,
+        .Cmd = &.{"sh"},
+    }, pipe_fds[0], out.writer());
+    std.posix.close(pipe_fds[0]);
+    read_open = false;
+
+    thread.join();
+    joined = true;
+
+    try std.testing.expect(ctx.saw_attach_stdin);
+    try std.testing.expectEqual(@as(i64, 0), exit_code);
+    try std.testing.expectEqualStrings("# whoami\nroot\n", out.items);
+}
+
+test "fuzz demuxLogs and LogDemuxer with arbitrary split boundaries and random frames" {
+    const alloc = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x7a6967706f64);
+    const rng = prng.random();
+
+    // Part A: Differential property test — valid multiplexed stream split at random chunk sizes.
+    var iter: usize = 0;
+    while (iter < 48) : (iter += 1) {
+        var wire = std.ArrayList(u8).init(alloc);
+        defer wire.deinit();
+        var expected = std.ArrayList(u8).init(alloc);
+        defer expected.deinit();
+
+        const num_frames = rng.intRangeAtMost(usize, 1, 8);
+        var f: usize = 0;
+        while (f < num_frames) : (f += 1) {
+            const stream_type: u8 = if (rng.boolean()) 1 else 2;
+            const payload_len = rng.intRangeAtMost(usize, 0, 64);
+            var hdr: [8]u8 = .{ stream_type, 0, 0, 0, 0, 0, 0, 0 };
+            std.mem.writeInt(u32, hdr[4..8], @intCast(payload_len), .big);
+            try wire.appendSlice(&hdr);
+
+            const start = expected.items.len;
+            try expected.resize(start + payload_len);
+            rng.bytes(expected.items[start .. start + payload_len]);
+            try wire.appendSlice(expected.items[start .. start + payload_len]);
+        }
+
+        var oneshot_out = std.ArrayList(u8).init(alloc);
+        defer oneshot_out.deinit();
+        try demuxLogs(wire.items, oneshot_out.writer());
+        try std.testing.expectEqualSlices(u8, expected.items, oneshot_out.items);
+
+        var stream_out = std.ArrayList(u8).init(alloc);
+        defer stream_out.deinit();
+        var demuxer = LogDemuxer(@TypeOf(stream_out.writer())){
+            .allocator = alloc,
+            .writer = stream_out.writer(),
+        };
+        defer demuxer.deinit();
+
+        var pos: usize = 0;
+        while (pos < wire.items.len) {
+            const step = rng.intRangeAtMost(usize, 1, 19);
+            const end = @min(wire.items.len, pos + step);
+            try demuxer.push(wire.items[pos..end]);
+            pos = end;
+        }
+        try demuxer.flush();
+        try std.testing.expectEqualSlices(u8, expected.items, stream_out.items);
+    }
+
+    // Part B: Arbitrary/corrupted byte streams must never panic, overflow, or leak.
+    var fuzz_i: usize = 0;
+    while (fuzz_i < 160) : (fuzz_i += 1) {
+        const len = rng.intRangeAtMost(usize, 0, 128);
+        const buf = try alloc.alloc(u8, len);
+        defer alloc.free(buf);
+        rng.bytes(buf);
+
+        var out1 = std.ArrayList(u8).init(alloc);
+        defer out1.deinit();
+        try demuxLogs(buf, out1.writer());
+
+        var out2 = std.ArrayList(u8).init(alloc);
+        defer out2.deinit();
+        var demuxer = LogDemuxer(@TypeOf(out2.writer())){
+            .allocator = alloc,
+            .writer = out2.writer(),
+        };
+        defer demuxer.deinit();
+
+        var pos: usize = 0;
+        while (pos < buf.len) {
+            const step = rng.intRangeAtMost(usize, 1, 13);
+            const end = @min(buf.len, pos + step);
+            try demuxer.push(buf[pos..end]);
+            pos = end;
+        }
+        try demuxer.flush();
+    }
+}
