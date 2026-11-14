@@ -35,7 +35,7 @@ pub const Client = struct {
         const stream = std.net.connectUnixSocket(self.socket_path) catch |e| return switch (e) {
             error.FileNotFound => Error.SocketNotFound,
             error.ConnectionRefused => Error.DaemonNotRunning,
-            error.AccessDenied, error.PermissionDenied => Error.PermissionDenied,
+            error.PermissionDenied => Error.PermissionDenied,
             else => e,
         };
         defer stream.close();
