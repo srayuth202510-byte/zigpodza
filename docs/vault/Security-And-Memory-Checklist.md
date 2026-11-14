@@ -21,7 +21,8 @@ status: active
 
 - [ ] `src/main.zig` ตรวจ `gpa.deinit() == .leak` และไม่ละทิ้งด้วย `defer _ = gpa.deinit();`
 - [ ] ห้ามใช้ `std.heap.page_allocator` ใน `src/`
-- [ ] โมดูลที่มีการจอง heap (`cli.zig`, `config.zig`, `http.zig`, `podman_api.zig`, `log.zig`) ต้องมีเทสที่ใช้ `std.testing.allocator`
+- [ ] โมดูลที่มีการจอง heap (`main.zig`, `cli.zig`, `config.zig`, `http.zig`, `podman_api.zig`, `log.zig`, `policy.zig`) ต้องมีเทสที่ใช้ `std.testing.allocator`
+- [ ] ห้ามเก็บ slice ที่อ้างอิงข้อมูลใน `std.json.Parsed(T)` ข้ามขอบเขตบล็อกที่มี `defer parsed.deinit()` (BUG-020)
 - [ ] Error paths ที่มี `ArrayList` / temporary allocation ต้องมี `errdefer` และมี unit test พิสูจน์ว่าไม่ leak
 
 ## 2. Protocol & Input Security Gates `#security-gate`

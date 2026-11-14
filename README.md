@@ -11,10 +11,12 @@ A minimal Docker/Podman-compatible CLI written in pure Zig (`>= 0.13.0`) that co
 ```mermaid
 flowchart TD
     CLI["src/main.zig + src/cli.zig\n(Arg parsing & dispatch)"] --> CFG["src/config.zig\n(Socket & log dir resolution)"]
-    CLI --> API["src/podman_api.zig\n(Podman/Docker v1.40 REST API)"]
-    API --> HTTP["src/http.zig\n(HTTP/1.1 over Unix socket)"]
+    CLI --> POL["src/policy.zig + zigpod-policy.json\n(Fail-closed sandbox guardrails)"]
+    CLI --> API["src/podman_api.zig + src/podman_types.zig\n(Podman/Docker v1.40 REST API)"]
+    POL --> API
+    API --> HTTP["src/http.zig\n(HTTP/1.1, chunked streaming & 101 upgrade)"]
     HTTP --> SOCK[("Podman Socket\n/run/podman/podman.sock")]
-    CLI --> LOG["src/log.zig + src/utils.zig\n(system.log & error.log)"]
+    CLI --> LOG["src/log.zig + src/utils.zig\n(system.log, error.log & audit.log)"]
     API --> LOG
 ```
 
@@ -25,16 +27,24 @@ flowchart TD
 ```text
 zigpodza/
 ├─ src/
-│  ├─ main.zig         # CLI entry point, dispatch & error reporting
+│  ├─ main.zig         # CLI entry point, dispatch & error/DENY reporting
 │  ├─ cli.zig          # Subcommand & flag parser
 │  ├─ config.zig       # Socket path & log directory resolution
-│  ├─ http.zig         # Minimal HTTP/1.1 Unix-socket client (Content-Length & chunked)
-│  ├─ podman_api.zig   # Docker/Podman v1.40 API structs & endpoints
-│  ├─ log.zig          # Timestamped file logger (system.log & error.log)
+│  ├─ demo.zig         # 14-case fail-closed ALLOW/DENY self-test suite
+│  ├─ http.zig         # HTTP/1.1 Unix-socket client (Content-Length, chunked streaming, 101 upgrade, RawTermGuard)
+│  ├─ podman_types.zig # Podman/Docker v1.40 DTO structs, JSON serializers & stats calculators
+│  ├─ podman_api.zig   # Docker/Podman v1.40 API endpoints, security validators & LogDemuxer
+│  ├─ policy.zig       # --profile=sandbox & zigpod-policy.json pre-flight engine
+│  ├─ log.zig          # Timestamped file logger (system.log, error.log & SHA-256 hash-chained audit.log)
 │  └─ utils.zig        # Formatting helpers (shortId, formatSize)
 ├─ scripts/
+│  ├─ auto-audit.sh      # Static memory & security invariant checks
+│  ├─ bug-dashboard.py   # Bug tracking dashboard generator & local web UI
+│  ├─ check-ci-parity.py # CI workflow, Makefile, CLI, vault & README parity verifier
+│  ├─ graph-query.py     # Offline Knowledge Graph CLI
 │  ├─ install.sh         # Build ReleaseSafe binary and install to PATH
-│  └─ security-check.sh  # Run leak/security tests, ELF hardening, and optional balorsh check
+│  ├─ security-check.sh  # Run leak/security tests, ELF hardening, and optional balorsh check
+│  └─ smoke.sh           # 4-stage parity, graph, static audit, and mock-daemon E2E test suite
 ├─ examples/
 │  └─ demo.sh          # End-to-end sample workflow script
 ├─ .github/workflows/
@@ -45,8 +55,10 @@ zigpodza/
 ├─ build.zig.zon       # Zig package manifest
 ├─ Dockerfile          # Multi-stage Alpine container image
 ├─ zigpod.toml         # Sample runtime settings reference
+├─ zigpod-policy.json  # Fail-closed sandbox security policy guardrails
 ├─ projectplan.md      # Initial design document
-├─ system.log          # Runtime system & info/debug/warn/error log
+├─ audit.log           # SHA-256 hash-chained tamper-evident audit log
+├─ system.log          # Runtime system & info/debug/warn/error/deny log
 ├─ error.log           # Runtime error-only log
 └─ LICENSE             # MIT License
 ```
@@ -107,6 +119,12 @@ zigpod run --rm -p 8080:80 -p 127.0.0.1:9000:9000/udp alpine:3.20 sleep 1
 # Run with a hardened network/identity profile
 zigpod run --rm --network none -w /work -u 1000:1000 --cap-drop ALL --cap-add NET_BIND_SERVICE alpine:3.20 id
 
+# Run with the fail-closed sandbox profile (enforces zigpod-policy.json guardrails)
+zigpod run --rm --profile=sandbox alpine:3.20 id
+
+# Run an interactive TTY shell inside a container
+zigpod run --rm -it alpine:3.20 sh
+
 # Run a container in the background with a name
 zigpod run -d --name demo-alpine alpine:3.20 sleep 60
 
@@ -114,15 +132,25 @@ zigpod run -d --name demo-alpine alpine:3.20 sleep 60
 zigpod ps
 zigpod ps -a
 
-# Fetch container logs
+# Fetch or stream container logs (-f follows live output)
 zigpod logs demo-alpine
+zigpod logs -f demo-alpine
+
+# Snapshot container CPU, memory, and PID resource usage
+zigpod stats --no-stream
+zigpod stats --no-stream demo-alpine
 
 # Inspect a container or image (state, IP, mounts, hardening limits)
 zigpod inspect demo-alpine
 zigpod inspect alpine:3.20
 
-# Run a command in a live container (exit code is propagated)
+# Run a command in a live container (supports -i/-t/-it; exit code is propagated)
 zigpod exec demo-alpine ls -la
+zigpod exec -it demo-alpine sh
+
+# Verify the SHA-256 hash-chained audit log (plain or structured JSON with DENY telemetry)
+zigpod audit
+zigpod audit --json
 
 # Stop and remove a container
 zigpod stop demo-alpine
@@ -173,7 +201,10 @@ zig build test
 - Port-publishing validator (`validatePortMapping`), `ExposedPorts`/`PortBindings` JSON serialization และ CLI `-p` parsing (`src/cli.zig`, `src/podman_api.zig`)
 - Network/identity/capability validators (`validateNetworkMode`, `validateWorkdir`, `validateUser`, `validateCapability`) และ CLI `--network`/`-w`/`-u`/`--cap-*` parsing (`src/cli.zig`, `src/podman_api.zig`)
 - Container/image inspect (`inspect` → `GET /containers/{id}/json` แล้ว fallback `GET /images/{name}/json`) พร้อม `validateResourceRef()` ป้องกัน request-line injection (`src/podman_api.zig`)
-- Exec (`exec` → `POST /containers/{id}/exec` + `POST /exec/{id}/start` + `GET /exec/{id}/json`) พร้อม demultiplex output, propagation ของ exit code และ validation ของ exec ID (`src/podman_api.zig`)
+- Exec (`exec` → `POST /containers/{id}/exec` + `POST /exec/{id}/start` + `GET /exec/{id}/json`) ทั้งโหมดปกติและ interactive TTY (`101 Switching Protocols` + `RawTermGuard`), demultiplex output, propagation ของ exit code และ validation ของ exec ID (`src/podman_api.zig`)
+- Container resource stats (`stats --no-stream` → `GET /containers/{id}/stats?stream=false`), streaming `pullImage`, `logs -f` (`LogDemuxer`), และ `attachContainer` (`src/podman_api.zig`, `src/podman_types.zig`)
+- Sandbox security profile (`--profile=sandbox`), `zigpod-policy.json` pre-flight guardrails (`src/policy.zig`), `dispatch()` orphan cleanup (`BUG-012`) และ `DENY` audit JSON telemetry (`src/main.zig`, `src/log.zig`)
+- Deterministic PRNG property & fuzz tests สำหรับ `parseResponse`/`decodeChunked`, `demuxLogs`/`LogDemuxer`, `parseMemoryBytes`/`cli.parse`, และ `verifyAuditFile`/`writeAuditJson`
 
 ---
 
@@ -190,7 +221,8 @@ zig build test
   - `podman_api.validatePortMapping` (BUG-015) ปฏิเสธพอร์ตนอกช่วง `1..65535`, โปรโตคอลที่ไม่อยู่ใน allow-list (`tcp`/`udp`/`sctp`) และ host address ที่ไม่ใช่ IPv4 literal ก่อนส่งคำขอไปยัง daemon
   - `podman_api.validateNetworkMode` / `validateWorkdir` / `validateUser` / `validateCapability` (BUG-016) จำกัด `--network` เป็น allow-list, บังคับ `--workdir` เป็น absolute traversal-free path, ตรวจรูปแบบ `--user` และปฏิเสธชื่อ capability ที่ไม่ใช่ `ALL`/uppercase ก่อนส่งคำขอไปยัง daemon
   - `podman_api.validateResourceRef` (BUG-017) จำกัด `inspect` target ให้เป็น image/container reference เท่านั้น (ตัด space, control char, `?`, `#`) เพื่อป้องกัน HTTP request-line injection
-  - `podman_api.createExec`/`startExec`/`inspectExec` (BUG-018) ตรวจ container ID, `--user`, `--workdir` และ exec ID ที่ได้จาก daemon ก่อนนำไปประกอบ URL, demultiplex output stream และคืนค่า exit code ของคำสั่ง
+  - `podman_api.createExec`/`startExec`/`startExecInteractive`/`inspectExec` (BUG-018) ตรวจ container ID, `--user`, `--workdir` และ exec ID ที่ได้จาก daemon ก่อนนำไปประกอบ URL, demultiplex output stream และคืนค่า exit code ของคำสั่ง
+  - `policy.applySandboxDefaults` / `policy.checkRunPolicy` (BUG-019) บังคับค่าเริ่มต้นแบบ fail-closed สำหรับ `--profile=sandbox` และตรวจเพดานทุกข้อกับ `zigpod-policy.json` แบบ pre-flight ก่อนคุยกับ daemon พร้อมบันทึก `Logger.deny` ลง hash-chained `audit.log`
 - **Automated Security Check Script**:
 
 ```bash
@@ -226,9 +258,13 @@ Apply defense-in-depth limits in `HostConfig` when launching containers:
 - `-w, --workdir <PATH>`: Container working directory (`WorkingDir`)
 - `-u, --user <USER[:GROUP]>`: Run as user (and optional group) (`User`)
 - `--cap-drop <CAP>` / `--cap-add <CAP>`: Drop/add a Linux capability, repeatable (`HostConfig.CapDrop` / `CapAdd`)
+- `--profile=sandbox`: Apply fail-closed sandbox defaults (`--read-only`, `--no-new-privileges`, `--cap-drop=ALL`, `--network=none`, `--pids-limit=64`, `--memory=256m`, bounded `/tmp` tmpfs) and enforce `zigpod-policy.json`
+- `--policy <FILE>`: Enforce a custom `zigpod-policy.json` guardrail file pre-flight
+- `-i, --interactive` / `-t, --tty` (`-it`): Attach interactive stdin and allocate a pseudo-TTY over HTTP `101 Switching Protocols`
 
 ```bash
 zigpod run --rm -m 64m --pids-limit 32 --read-only --no-new-privileges alpine:3.20 echo ok
+zigpod run --rm --profile=sandbox alpine:3.20 echo sandbox-ok
 ```
 
 #### Host Path Policy Validator (`-v`)
@@ -265,7 +301,7 @@ zigpod run --rm -m 64m --pids-limit 32 --read-only --no-new-privileges alpine:3.
 
 #### Running Commands in a Live Container (`exec`)
 
-`zigpod exec [OPTIONS] CONTAINER CMD...` creates an exec instance (`POST /containers/{id}/exec`), starts it (`POST /exec/{id}/start`), demultiplexes the Docker stream to stdout/stderr, then reads `GET /exec/{id}/json` and propagates the command's exit code as the CLI exit status. `-e/--env`, `-u/--user`, and `-w/--workdir` are validated with the same validators as `run`; the daemon-allocated exec ID is re-validated with `validateIdentifier` before it is reused in a URL (BUG-018). The start call uses the blocking socket timeout so long-running commands are not cut off. (Interactive `-i`/`-t` TTY handling is Phase 2.)
+`zigpod exec [OPTIONS] CONTAINER CMD...` creates an exec instance (`POST /containers/{id}/exec`), starts it (`POST /exec/{id}/start`), demultiplexes the Docker stream to stdout/stderr (or upgrades to HTTP `101 Switching Protocols` with `RawTermGuard` when `-i`/`-t`/`-it` is specified), then reads `GET /exec/{id}/json` and propagates the command's exit code as the CLI exit status. `-e/--env`, `-u/--user`, and `-w/--workdir` are validated with the same validators as `run`; the daemon-allocated exec ID is re-validated with `validateIdentifier` before it is reused in a URL (BUG-018). The start call uses the blocking socket timeout so long-running commands are not cut off.
 
 ### Built-In 14-Case Fail-Closed Self-Test (`zigpod demo`)
 
@@ -279,11 +315,12 @@ make demo
 
 ### Tamper-Evident Audit Log (`zigpod audit`)
 
-In addition to `system.log` and `error.log`, `Logger` maintains a SHA-256 hash-chained `audit.log`. Verify chain integrity with:
+In addition to `system.log` and `error.log`, `Logger` maintains a SHA-256 hash-chained `audit.log` and records security policy violations as structured `DENY` events. Verify chain integrity or export JSON telemetry for `balorsh` / SIEM analysis with:
 
 ```bash
-zigpod audit              # checks audit.log in configured log_dir
-zigpod audit /path/to.log # checks a specific audit log file
+zigpod audit                    # checks audit.log in configured log_dir
+zigpod audit /path/to.log       # checks a specific audit log file
+zigpod audit --json             # outputs structured JSON with valid/entries/deny_events/deny_records
 ```
 
 ### Verification & Offline Knowledge Graph CLI
