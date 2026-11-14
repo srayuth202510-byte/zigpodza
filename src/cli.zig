@@ -1,313 +1,53 @@
-//! Docker-style command-line parsing.
+//! Pure-Zig Podman/Docker-compatible CLI parser.
 const std = @import("std");
+pub const types = @import("cli_types.zig");
+pub const specs = @import("cli_specs.zig");
 
-pub const usage =
-    \\Usage: zigpod [GLOBAL OPTIONS] COMMAND [ARGS...]
-    \\
-    \\A small Docker/Podman-compatible CLI written in Zig. It talks to the
-    \\Podman (Docker-compatible) REST API over a Unix socket.
-    \\
-    \\Commands:
-    \\  run [OPTIONS] IMAGE [CMD...]   Create and start a container
-    \\      -d, --detach               Run in background and print the container ID
-    \\      -i, --interactive          Keep STDIN open
-    \\      -t, --tty                  Allocate a pseudo-TTY
-    \\      --rm                       Remove the container when it exits
-    \\      --name NAME                Assign a name to the container
-    \\      -e, --env KEY=VALUE        Set an environment variable (repeatable)
-    \\      -v, --volume SRC:DST[:ro|rw]  Bind mount a host path (default: read-only)
-    \\      -p, --publish [IP:]HOST:CONTAINER[/proto]  Publish a container port (repeatable)
-    \\      --network MODE             Network mode: none|bridge|host|pasta|slirp4netns
-    \\      -w, --workdir PATH         Working directory inside the container
-    \\      -u, --user USER[:GROUP]    Run as user (and optional group)
-    \\      --cap-drop CAP             Drop a Linux capability (repeatable, e.g. ALL)
-    \\      --cap-add CAP              Add a Linux capability (repeatable)
-    \\      -m, --memory BYTES         Memory limit (e.g., 64m, 1g, 1048576)
-    \\      --pids-limit N             Limit container PIDs
-    \\      --read-only                Mount container root filesystem as read-only
-    \\      --no-new-privileges        Prevent privilege escalation inside container
-    \\      --profile PROFILE          Security profile: default|sandbox (fail-closed AI sandbox)
-    \\      --policy FILE              Pre-flight policy guardrails JSON (e.g. zigpod-policy.json)
-    \\  ps [-a] [--json]               List containers (-a: include stopped, --json: JSON output)
-    \\  images [--json]                List local images (--json: JSON output)
-    \\  pull IMAGE                     Pull an image from a registry
-    \\  rmi [-f] IMAGE                 Remove a local image (-f: force)
-    \\  start CONTAINER                Start a created or stopped container
-    \\  stop CONTAINER                 Stop a running container
-    \\  restart [-t SECS] CONTAINER    Restart a container (-t: stop timeout seconds)
-    \\  pause CONTAINER                Pause all processes inside a container
-    \\  unpause CONTAINER              Unpause a paused container
-    \\  rename CONTAINER NEW_NAME      Rename an existing container
-    \\  kill [-s SIGNAL] CONTAINER     Send a signal to a running container (default: SIGTERM)
-    \\  rm [-f] CONTAINER              Remove a container (-f: force)
-    \\  logs [-f] CONTAINER            Print a container's logs (-f: follow live output)
-    \\  top CONTAINER                  Display the running processes of a container
-    \\  exec [OPTIONS] CONTAINER CMD...  Run a command in a running container
-    \\      -i, --interactive          Keep STDIN open
-    \\      -t, --tty                  Allocate a pseudo-TTY
-    \\      -e, --env KEY=VALUE        Set an environment variable (repeatable)
-    \\      -u, --user USER[:GROUP]    Run as user (and optional group)
-    \\      -w, --workdir PATH         Working directory inside the container
-    \\  inspect [--json] TARGET        Show container or image details (state, IP, mounts, limits)
-    \\  stats [--no-stream] [-a] [--json] [CONTAINER...]  Display CPU, memory, and PIDs metrics
-    \\  volume ls|create|rm|inspect [NAME]       Manage named volumes
-    \\  network ls|inspect [NAME]      List or inspect container networks
-    \\  system ping|df|prune [-f]      Check daemon health, disk usage, or prune unused resources
-    \\  audit [--json] [FILE]          Verify SHA-256 hash chain of audit.log (--json: structured output)
-    \\  demo                           Run 14-case fail-closed ALLOW/DENY self-test suite
-    \\  version                        Show client and server versions
-    \\  help                           Show this help
-    \\
-    \\Global options:
-    \\  -v, --verbose                  Echo INFO/DEBUG log messages to stderr
-    \\  --socket PATH                  Podman API socket (default: auto-detect)
-    \\  -h, --help                     Show this help
-    \\  --version                      Show client version
-    \\
-    \\Environment:
-    \\  ZIGPOD_SOCKET, CONTAINER_HOST, DOCKER_HOST   API socket (unix://...)
-    \\  ZIGPOD_LOG_DIR                               Where system.log / error.log go
-    \\
-;
+pub const usage = types.usage;
+pub const Global = types.Global;
+pub const Volume = types.Volume;
+pub const PortMapping = types.PortMapping;
+pub const Profile = types.Profile;
+pub const RunOpts = types.RunOpts;
+pub const RmOpts = types.RmOpts;
+pub const LogsOpts = types.LogsOpts;
+pub const ExecOpts = types.ExecOpts;
+pub const StatsOpts = types.StatsOpts;
+pub const PsOpts = types.PsOpts;
+pub const ImagesOpts = types.ImagesOpts;
+pub const InspectOpts = types.InspectOpts;
+pub const AuditOpts = types.AuditOpts;
+pub const KillOpts = types.KillOpts;
+pub const RestartOpts = types.RestartOpts;
+pub const RenameOpts = types.RenameOpts;
+pub const RmiOpts = types.RmiOpts;
+pub const VolumeAction = types.VolumeAction;
+pub const VolumeOpts = types.VolumeOpts;
+pub const NetworkAction = types.NetworkAction;
+pub const NetworkOpts = types.NetworkOpts;
+pub const SystemAction = types.SystemAction;
+pub const SystemOpts = types.SystemOpts;
+pub const Command = types.Command;
+pub const Parsed = types.Parsed;
+pub const ParseError = types.ParseError;
+pub const describeError = types.describeError;
 
-pub const Global = struct {
-    verbose: bool = false,
-    socket: ?[]const u8 = null,
-};
+const eql = types.eql;
+const isFlag = types.isFlag;
+const takeValue = types.takeValue;
 
-pub const Volume = struct {
-    source: []const u8,
-    destination: []const u8,
-    /// Read-only unless the user explicitly opts out with `:rw` (BUG-014).
-    readonly: bool = true,
-};
-
-/// Parsed `-p`/`--publish` mapping. `host_ip` (IPv4) and `host_port` are null
-/// when the user only exposes a container port.
-pub const PortMapping = struct {
-    host_ip: ?[]const u8 = null,
-    host_port: ?u16 = null,
-    container_port: u16,
-    proto: []const u8 = "tcp",
-};
-
-pub const Profile = enum {
-    default,
-    sandbox,
-};
-
-pub const RunOpts = struct {
-    image: []const u8,
-    cmd: []const []const u8 = &.{},
-    env: []const []const u8 = &.{},
-    volumes: []const Volume = &.{},
-    ports: []const PortMapping = &.{},
-    cap_drop: []const []const u8 = &.{},
-    cap_add: []const []const u8 = &.{},
-    name: ?[]const u8 = null,
-    network: ?[]const u8 = null,
-    workdir: ?[]const u8 = null,
-    user: ?[]const u8 = null,
-    profile: Profile = .default,
-    policy_path: ?[]const u8 = null,
-    detach: bool = false,
-    interactive: bool = false,
-    tty: bool = false,
-    remove: bool = false,
-    read_only: bool = false,
-    no_new_privileges: bool = false,
-    memory: ?i64 = null,
-    pids_limit: ?i64 = null,
-};
-
-pub const RmOpts = struct {
-    container: []const u8,
-    force: bool = false,
-};
-
-pub const LogsOpts = struct {
-    container: []const u8,
-    follow: bool = false,
-};
-
-pub const ExecOpts = struct {
-    container: []const u8,
-    cmd: []const []const u8 = &.{},
-    env: []const []const u8 = &.{},
-    user: ?[]const u8 = null,
-    workdir: ?[]const u8 = null,
-    interactive: bool = false,
-    tty: bool = false,
-};
-
-pub const StatsOpts = struct {
-    no_stream: bool = false,
-    all: bool = false,
-    json: bool = false,
-    containers: []const []const u8 = &.{},
-};
-
-pub const PsOpts = struct {
-    all: bool = false,
-    json: bool = false,
-};
-
-pub const ImagesOpts = struct {
-    json: bool = false,
-};
-
-pub const InspectOpts = struct {
-    target: []const u8,
-    json: bool = false,
-};
-
-pub const AuditOpts = struct {
-    path: ?[]const u8 = null,
-    json: bool = false,
-};
-
-pub const KillOpts = struct {
-    container: []const u8,
-    signal: []const u8 = "SIGTERM",
-};
-
-pub const RestartOpts = struct {
-    container: []const u8,
-    timeout_secs: ?u32 = null,
-};
-
-pub const RenameOpts = struct {
-    container: []const u8,
-    new_name: []const u8,
-};
-
-pub const RmiOpts = struct {
-    image: []const u8,
-    force: bool = false,
-};
-
-pub const VolumeAction = enum {
-    ls,
-    create,
-    rm,
-    inspect,
-};
-
-pub const VolumeOpts = struct {
-    action: VolumeAction,
-    name: ?[]const u8 = null,
-    force: bool = false,
-};
-
-pub const NetworkAction = enum {
-    ls,
-    inspect,
-};
-
-pub const NetworkOpts = struct {
-    action: NetworkAction,
-    name: ?[]const u8 = null,
-};
-
-pub const SystemAction = enum {
-    ping,
-    df,
-    prune,
-};
-
-pub const SystemOpts = struct {
-    action: SystemAction,
-    force: bool = false,
-};
-
-pub const Command = union(enum) {
-    help,
-    client_version,
-    version,
-    demo,
-    audit: AuditOpts,
-    ps: PsOpts,
-    images: ImagesOpts,
-    pull: []const u8,
-    rmi: RmiOpts,
-    run: RunOpts,
-    start: []const u8,
-    stop: []const u8,
-    restart: RestartOpts,
-    pause: []const u8,
-    unpause: []const u8,
-    rename: RenameOpts,
-    kill: KillOpts,
-    rm: RmOpts,
-    logs: LogsOpts,
-    top: []const u8,
-    inspect: InspectOpts,
-    exec: ExecOpts,
-    stats: StatsOpts,
-    volume: VolumeOpts,
-    network: NetworkOpts,
-    system: SystemOpts,
-};
-
-pub const Parsed = struct {
-    global: Global,
-    command: Command,
-
-    pub fn deinit(self: Parsed, allocator: std.mem.Allocator) void {
-        switch (self.command) {
-            .run => |r| {
-                if (r.env.len > 0) allocator.free(r.env);
-                if (r.volumes.len > 0) allocator.free(r.volumes);
-                if (r.ports.len > 0) allocator.free(r.ports);
-                if (r.cap_drop.len > 0) allocator.free(r.cap_drop);
-                if (r.cap_add.len > 0) allocator.free(r.cap_add);
-            },
-            .exec => |e| {
-                if (e.env.len > 0) allocator.free(e.env);
-            },
-            .stats => |s| {
-                if (s.containers.len > 0) allocator.free(s.containers);
-            },
-            else => {},
-        }
-    }
-};
-
-pub const ParseError = error{
-    UnknownCommand,
-    UnknownFlag,
-    MissingValue,
-    InvalidValue,
-    MissingArgument,
-    TooManyArguments,
-} || std.mem.Allocator.Error;
-
-pub fn describeError(e: ParseError) []const u8 {
-    return switch (e) {
-        error.UnknownCommand => "unknown command",
-        error.UnknownFlag => "unknown flag",
-        error.MissingValue => "flag requires a value",
-        error.InvalidValue => "invalid flag value",
-        error.MissingArgument => "missing required argument",
-        error.TooManyArguments => "too many arguments",
-        error.OutOfMemory => "out of memory",
-    };
-}
-
-fn eql(a: []const u8, b: []const u8) bool {
-    return std.mem.eql(u8, a, b);
-}
-
-fn isFlag(a: []const u8) bool {
-    return a.len > 1 and a[0] == '-';
-}
-
-/// Returns the value following the flag at `i.*` and advances `i`.
-fn takeValue(args: []const []const u8, i: *usize) ParseError![]const u8 {
-    i.* += 1;
-    if (i.* >= args.len) return error.MissingValue;
-    return args[i.*];
-}
+pub const parseMemoryBytes = specs.parseMemoryBytes;
+const parseProfile = specs.parseProfile;
+const parsePolicyPath = specs.parsePolicyPath;
+const parsePidsLimit = specs.parsePidsLimit;
+const parseVolumeSpec = specs.parseVolumeSpec;
+const parsePortNumber = specs.parsePortNumber;
+const parsePortSpec = specs.parsePortSpec;
+const parseNetworkMode = specs.parseNetworkMode;
+const parseWorkdir = specs.parseWorkdir;
+const parseUserSpec = specs.parseUserSpec;
+const parseCapName = specs.parseCapName;
+const parseSignal = specs.parseSignal;
 
 /// `args` excludes the program name. Slices in the result point into `args`
 /// or into memory from `allocator` (use an arena).
@@ -404,19 +144,6 @@ fn parseAudit(args: []const []const u8) ParseError!Command {
     return .{ .audit = opts };
 }
 
-fn parseProfile(s: []const u8) ParseError!Profile {
-    if (eql(s, "default")) return .default;
-    if (eql(s, "sandbox")) return .sandbox;
-    return error.InvalidValue;
-}
-
-fn parsePolicyPath(s: []const u8) ParseError![]const u8 {
-    if (s.len == 0 or s.len > 4096) return error.InvalidValue;
-    for (s) |c| {
-        if (c < 0x20 or c == 0x7f) return error.InvalidValue;
-    }
-    return s;
-}
 
 fn noArgs(args: []const []const u8, cmd: Command) ParseError!Command {
     if (args.len > 0) return if (isFlag(args[0])) error.UnknownFlag else error.TooManyArguments;
@@ -510,165 +237,6 @@ fn parseLogs(args: []const []const u8) ParseError!Command {
     return .{ .logs = opts };
 }
 
-pub fn parseMemoryBytes(s: []const u8) ParseError!i64 {
-    if (s.len == 0) return error.InvalidValue;
-    var num_end = s.len;
-    var mult: i64 = 1;
-    if (std.ascii.endsWithIgnoreCase(s, "kb")) {
-        num_end = s.len - 2;
-        mult = 1024;
-    } else if (std.ascii.endsWithIgnoreCase(s, "mb")) {
-        num_end = s.len - 2;
-        mult = 1024 * 1024;
-    } else if (std.ascii.endsWithIgnoreCase(s, "gb")) {
-        num_end = s.len - 2;
-        mult = 1024 * 1024 * 1024;
-    } else {
-        switch (s[s.len - 1]) {
-            'b', 'B' => {
-                num_end = s.len - 1;
-                mult = 1;
-            },
-            'k', 'K' => {
-                num_end = s.len - 1;
-                mult = 1024;
-            },
-            'm', 'M' => {
-                num_end = s.len - 1;
-                mult = 1024 * 1024;
-            },
-            'g', 'G' => {
-                num_end = s.len - 1;
-                mult = 1024 * 1024 * 1024;
-            },
-            else => {},
-        }
-    }
-    if (num_end == 0) return error.InvalidValue;
-    const base = std.fmt.parseInt(i64, s[0..num_end], 10) catch return error.InvalidValue;
-    if (base <= 0) return error.InvalidValue;
-    return std.math.mul(i64, base, mult) catch error.InvalidValue;
-}
-
-fn parsePidsLimit(s: []const u8) ParseError!i64 {
-    const limit = std.fmt.parseInt(i64, s, 10) catch return error.InvalidValue;
-    if (limit <= 0) return error.InvalidValue;
-    return limit;
-}
-
-/// Parses a `SRC:DST[:ro|rw]` volume specification. Only syntax is checked
-/// here; the host-path security policy is enforced by `podman_api.makeMount`.
-fn parseVolumeSpec(spec: []const u8) ParseError!Volume {
-    const first = std.mem.indexOfScalar(u8, spec, ':') orelse return error.InvalidValue;
-    const source = spec[0..first];
-    const rest = spec[first + 1 ..];
-
-    var destination = rest;
-    var readonly = true;
-    if (std.mem.indexOfScalar(u8, rest, ':')) |second| {
-        destination = rest[0..second];
-        const opt = rest[second + 1 ..];
-        if (std.mem.indexOfScalar(u8, opt, ':') != null) return error.InvalidValue;
-        if (eql(opt, "ro")) {
-            readonly = true;
-        } else if (eql(opt, "rw")) {
-            readonly = false;
-        } else return error.InvalidValue;
-    }
-    if (source.len == 0 or destination.len == 0) return error.InvalidValue;
-    return .{ .source = source, .destination = destination, .readonly = readonly };
-}
-
-fn parsePortNumber(s: []const u8) ParseError!u16 {
-    if (s.len == 0) return error.InvalidValue;
-    const n = std.fmt.parseInt(u16, s, 10) catch return error.InvalidValue;
-    if (n == 0) return error.InvalidValue;
-    return n;
-}
-
-/// Parses `[IP:]HOST:CONTAINER[/proto]` or `CONTAINER[/proto]`. Only IPv4 host
-/// addresses are accepted. The port policy is re-checked by `podman_api.makePortMapping`.
-fn parsePortSpec(spec: []const u8) ParseError!PortMapping {
-    if (spec.len == 0) return error.InvalidValue;
-
-    var base = spec;
-    var proto: []const u8 = "tcp";
-    if (std.mem.lastIndexOfScalar(u8, spec, '/')) |slash| {
-        proto = spec[slash + 1 ..];
-        base = spec[0..slash];
-        if (!(eql(proto, "tcp") or eql(proto, "udp") or eql(proto, "sctp"))) return error.InvalidValue;
-    }
-
-    var it = std.mem.splitScalar(u8, base, ':');
-    const f0 = it.next() orelse return error.InvalidValue;
-    const f1 = it.next();
-    const f2 = it.next();
-    if (it.next() != null) return error.InvalidValue; // more than three fields
-
-    var mapping = PortMapping{ .container_port = 0, .proto = proto };
-    if (f2) |container| {
-        // IP:HOST:CONTAINER — host address must be a valid IPv4 literal.
-        _ = std.net.Address.parseIp4(f0, 0) catch return error.InvalidValue;
-        mapping.host_ip = f0;
-        mapping.host_port = try parsePortNumber(f1.?);
-        mapping.container_port = try parsePortNumber(container);
-    } else if (f1) |container| {
-        mapping.host_port = try parsePortNumber(f0);
-        mapping.container_port = try parsePortNumber(container);
-    } else {
-        mapping.container_port = try parsePortNumber(f0);
-    }
-    return mapping;
-}
-
-/// Network modes accepted by `--network`. Re-checked by `podman_api.validateNetworkMode`.
-const network_modes = [_][]const u8{ "none", "bridge", "host", "pasta", "slirp4netns" };
-
-fn parseNetworkMode(s: []const u8) ParseError![]const u8 {
-    for (network_modes) |m| {
-        if (eql(s, m)) return s;
-    }
-    return error.InvalidValue;
-}
-
-/// Container working directory: only the absolute-path shape is checked here;
-/// the full path policy is enforced by `podman_api.validateWorkdir`.
-fn parseWorkdir(s: []const u8) ParseError![]const u8 {
-    if (s.len == 0 or s[0] != '/') return error.InvalidValue;
-    return s;
-}
-
-/// `USER[:GROUP]` where each field is alphanumeric plus `_`, `-`, `.`.
-fn parseUserSpec(s: []const u8) ParseError![]const u8 {
-    if (s.len == 0 or s.len > 128) return error.InvalidValue;
-    var it = std.mem.splitScalar(u8, s, ':');
-    var fields: usize = 0;
-    while (it.next()) |field| {
-        fields += 1;
-        if (fields > 2) return error.InvalidValue;
-        if (field.len == 0 or field.len > 64) return error.InvalidValue;
-        for (field, 0..) |c, idx| {
-            if (std.ascii.isAlphanumeric(c) or c == '_' or c == '-' or c == '.') {
-                if (idx == 0 and (c == '-' or c == '.')) return error.InvalidValue;
-                continue;
-            }
-            return error.InvalidValue;
-        }
-    }
-    return s;
-}
-
-/// Linux capability name: `ALL` or an uppercase `[A-Z][A-Z0-9_]*` token.
-fn parseCapName(s: []const u8) ParseError![]const u8 {
-    if (s.len == 0 or s.len > 64) return error.InvalidValue;
-    if (eql(s, "ALL")) return s;
-    if (!std.ascii.isUpper(s[0])) return error.InvalidValue;
-    for (s) |c| {
-        if (std.ascii.isUpper(c) or std.ascii.isDigit(c) or c == '_') continue;
-        return error.InvalidValue;
-    }
-    return s;
-}
 
 fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!RunOpts {
     var opts = RunOpts{ .image = "" };
@@ -833,29 +401,6 @@ fn parseStats(allocator: std.mem.Allocator, args: []const []const u8) ParseError
     return opts;
 }
 
-const allowed_signals = [_][]const u8{
-    "SIGTERM",
-    "SIGKILL",
-    "SIGINT",
-    "SIGHUP",
-    "SIGQUIT",
-    "SIGUSR1",
-    "SIGUSR2",
-    "TERM",
-    "KILL",
-    "INT",
-    "HUP",
-    "QUIT",
-    "USR1",
-    "USR2",
-};
-
-fn parseSignal(s: []const u8) ParseError![]const u8 {
-    for (allowed_signals) |allowed| {
-        if (eql(s, allowed)) return s;
-    }
-    return error.InvalidValue;
-}
 
 /// Parses `kill [-s|--signal SIGNAL] CONTAINER`.
 fn parseKill(args: []const []const u8) ParseError!Command {
@@ -1665,4 +1210,9 @@ test "parse start, restart, pause, unpause, rename, and rmi subcommands" {
     defer p_sys_prune.deinit(alloc);
     try std.testing.expectEqual(SystemAction.prune, p_sys_prune.command.system.action);
     try std.testing.expect(p_sys_prune.command.system.force);
+}
+
+test {
+    _ = types;
+    _ = specs;
 }

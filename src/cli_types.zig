@@ -1,0 +1,310 @@
+//! Docker-style command-line parsing.
+const std = @import("std");
+
+pub const usage =
+    \\Usage: zigpod [GLOBAL OPTIONS] COMMAND [ARGS...]
+    \\
+    \\A small Docker/Podman-compatible CLI written in Zig. It talks to the
+    \\Podman (Docker-compatible) REST API over a Unix socket.
+    \\
+    \\Commands:
+    \\  run [OPTIONS] IMAGE [CMD...]   Create and start a container
+    \\      -d, --detach               Run in background and print the container ID
+    \\      -i, --interactive          Keep STDIN open
+    \\      -t, --tty                  Allocate a pseudo-TTY
+    \\      --rm                       Remove the container when it exits
+    \\      --name NAME                Assign a name to the container
+    \\      -e, --env KEY=VALUE        Set an environment variable (repeatable)
+    \\      -v, --volume SRC:DST[:ro|rw]  Bind mount a host path (default: read-only)
+    \\      -p, --publish [IP:]HOST:CONTAINER[/proto]  Publish a container port (repeatable)
+    \\      --network MODE             Network mode: none|bridge|host|pasta|slirp4netns
+    \\      -w, --workdir PATH         Working directory inside the container
+    \\      -u, --user USER[:GROUP]    Run as user (and optional group)
+    \\      --cap-drop CAP             Drop a Linux capability (repeatable, e.g. ALL)
+    \\      --cap-add CAP              Add a Linux capability (repeatable)
+    \\      -m, --memory BYTES         Memory limit (e.g., 64m, 1g, 1048576)
+    \\      --pids-limit N             Limit container PIDs
+    \\      --read-only                Mount container root filesystem as read-only
+    \\      --no-new-privileges        Prevent privilege escalation inside container
+    \\      --profile PROFILE          Security profile: default|sandbox (fail-closed AI sandbox)
+    \\      --policy FILE              Pre-flight policy guardrails JSON (e.g. zigpod-policy.json)
+    \\  ps [-a] [--json]               List containers (-a: include stopped, --json: JSON output)
+    \\  images [--json]                List local images (--json: JSON output)
+    \\  pull IMAGE                     Pull an image from a registry
+    \\  rmi [-f] IMAGE                 Remove a local image (-f: force)
+    \\  start CONTAINER                Start a created or stopped container
+    \\  stop CONTAINER                 Stop a running container
+    \\  restart [-t SECS] CONTAINER    Restart a container (-t: stop timeout seconds)
+    \\  pause CONTAINER                Pause all processes inside a container
+    \\  unpause CONTAINER              Unpause a paused container
+    \\  rename CONTAINER NEW_NAME      Rename an existing container
+    \\  kill [-s SIGNAL] CONTAINER     Send a signal to a running container (default: SIGTERM)
+    \\  rm [-f] CONTAINER              Remove a container (-f: force)
+    \\  logs [-f] CONTAINER            Print a container's logs (-f: follow live output)
+    \\  top CONTAINER                  Display the running processes of a container
+    \\  exec [OPTIONS] CONTAINER CMD...  Run a command in a running container
+    \\      -i, --interactive          Keep STDIN open
+    \\      -t, --tty                  Allocate a pseudo-TTY
+    \\      -e, --env KEY=VALUE        Set an environment variable (repeatable)
+    \\      -u, --user USER[:GROUP]    Run as user (and optional group)
+    \\      -w, --workdir PATH         Working directory inside the container
+    \\  inspect [--json] TARGET        Show container or image details (state, IP, mounts, limits)
+    \\  stats [--no-stream] [-a] [--json] [CONTAINER...]  Display CPU, memory, and PIDs metrics
+    \\  volume ls|create|rm|inspect [NAME]       Manage named volumes
+    \\  network ls|inspect [NAME]      List or inspect container networks
+    \\  system ping|df|prune [-f]      Check daemon health, disk usage, or prune unused resources
+    \\  audit [--json] [FILE]          Verify SHA-256 hash chain of audit.log (--json: structured output)
+    \\  demo                           Run 14-case fail-closed ALLOW/DENY self-test suite
+    \\  version                        Show client and server versions
+    \\  help                           Show this help
+    \\
+    \\Global options:
+    \\  -v, --verbose                  Echo INFO/DEBUG log messages to stderr
+    \\  --socket PATH                  Podman API socket (default: auto-detect)
+    \\  -h, --help                     Show this help
+    \\  --version                      Show client version
+    \\
+    \\Environment:
+    \\  ZIGPOD_SOCKET, CONTAINER_HOST, DOCKER_HOST   API socket (unix://...)
+    \\  ZIGPOD_LOG_DIR                               Where system.log / error.log go
+    \\
+;
+
+pub const Global = struct {
+    verbose: bool = false,
+    socket: ?[]const u8 = null,
+};
+
+pub const Volume = struct {
+    source: []const u8,
+    destination: []const u8,
+    /// Read-only unless the user explicitly opts out with `:rw` (BUG-014).
+    readonly: bool = true,
+};
+
+/// Parsed `-p`/`--publish` mapping. `host_ip` (IPv4) and `host_port` are null
+/// when the user only exposes a container port.
+pub const PortMapping = struct {
+    host_ip: ?[]const u8 = null,
+    host_port: ?u16 = null,
+    container_port: u16,
+    proto: []const u8 = "tcp",
+};
+
+pub const Profile = enum {
+    default,
+    sandbox,
+};
+
+pub const RunOpts = struct {
+    image: []const u8,
+    cmd: []const []const u8 = &.{},
+    env: []const []const u8 = &.{},
+    volumes: []const Volume = &.{},
+    ports: []const PortMapping = &.{},
+    cap_drop: []const []const u8 = &.{},
+    cap_add: []const []const u8 = &.{},
+    name: ?[]const u8 = null,
+    network: ?[]const u8 = null,
+    workdir: ?[]const u8 = null,
+    user: ?[]const u8 = null,
+    profile: Profile = .default,
+    policy_path: ?[]const u8 = null,
+    detach: bool = false,
+    interactive: bool = false,
+    tty: bool = false,
+    remove: bool = false,
+    read_only: bool = false,
+    no_new_privileges: bool = false,
+    memory: ?i64 = null,
+    pids_limit: ?i64 = null,
+};
+
+pub const RmOpts = struct {
+    container: []const u8,
+    force: bool = false,
+};
+
+pub const LogsOpts = struct {
+    container: []const u8,
+    follow: bool = false,
+};
+
+pub const ExecOpts = struct {
+    container: []const u8,
+    cmd: []const []const u8 = &.{},
+    env: []const []const u8 = &.{},
+    user: ?[]const u8 = null,
+    workdir: ?[]const u8 = null,
+    interactive: bool = false,
+    tty: bool = false,
+};
+
+pub const StatsOpts = struct {
+    no_stream: bool = false,
+    all: bool = false,
+    json: bool = false,
+    containers: []const []const u8 = &.{},
+};
+
+pub const PsOpts = struct {
+    all: bool = false,
+    json: bool = false,
+};
+
+pub const ImagesOpts = struct {
+    json: bool = false,
+};
+
+pub const InspectOpts = struct {
+    target: []const u8,
+    json: bool = false,
+};
+
+pub const AuditOpts = struct {
+    path: ?[]const u8 = null,
+    json: bool = false,
+};
+
+pub const KillOpts = struct {
+    container: []const u8,
+    signal: []const u8 = "SIGTERM",
+};
+
+pub const RestartOpts = struct {
+    container: []const u8,
+    timeout_secs: ?u32 = null,
+};
+
+pub const RenameOpts = struct {
+    container: []const u8,
+    new_name: []const u8,
+};
+
+pub const RmiOpts = struct {
+    image: []const u8,
+    force: bool = false,
+};
+
+pub const VolumeAction = enum {
+    ls,
+    create,
+    rm,
+    inspect,
+};
+
+pub const VolumeOpts = struct {
+    action: VolumeAction,
+    name: ?[]const u8 = null,
+    force: bool = false,
+};
+
+pub const NetworkAction = enum {
+    ls,
+    inspect,
+};
+
+pub const NetworkOpts = struct {
+    action: NetworkAction,
+    name: ?[]const u8 = null,
+};
+
+pub const SystemAction = enum {
+    ping,
+    df,
+    prune,
+};
+
+pub const SystemOpts = struct {
+    action: SystemAction,
+    force: bool = false,
+};
+
+pub const Command = union(enum) {
+    help,
+    client_version,
+    version,
+    demo,
+    audit: AuditOpts,
+    ps: PsOpts,
+    images: ImagesOpts,
+    pull: []const u8,
+    rmi: RmiOpts,
+    run: RunOpts,
+    start: []const u8,
+    stop: []const u8,
+    restart: RestartOpts,
+    pause: []const u8,
+    unpause: []const u8,
+    rename: RenameOpts,
+    kill: KillOpts,
+    rm: RmOpts,
+    logs: LogsOpts,
+    top: []const u8,
+    inspect: InspectOpts,
+    exec: ExecOpts,
+    stats: StatsOpts,
+    volume: VolumeOpts,
+    network: NetworkOpts,
+    system: SystemOpts,
+};
+
+pub const Parsed = struct {
+    global: Global,
+    command: Command,
+
+    pub fn deinit(self: Parsed, allocator: std.mem.Allocator) void {
+        switch (self.command) {
+            .run => |r| {
+                if (r.env.len > 0) allocator.free(r.env);
+                if (r.volumes.len > 0) allocator.free(r.volumes);
+                if (r.ports.len > 0) allocator.free(r.ports);
+                if (r.cap_drop.len > 0) allocator.free(r.cap_drop);
+                if (r.cap_add.len > 0) allocator.free(r.cap_add);
+            },
+            .exec => |e| {
+                if (e.env.len > 0) allocator.free(e.env);
+            },
+            .stats => |s| {
+                if (s.containers.len > 0) allocator.free(s.containers);
+            },
+            else => {},
+        }
+    }
+};
+
+pub const ParseError = error{
+    UnknownCommand,
+    UnknownFlag,
+    MissingValue,
+    InvalidValue,
+    MissingArgument,
+    TooManyArguments,
+} || std.mem.Allocator.Error;
+
+pub fn describeError(e: ParseError) []const u8 {
+    return switch (e) {
+        error.UnknownCommand => "unknown command",
+        error.UnknownFlag => "unknown flag",
+        error.MissingValue => "flag requires a value",
+        error.InvalidValue => "invalid flag value",
+        error.MissingArgument => "missing required argument",
+        error.TooManyArguments => "too many arguments",
+        error.OutOfMemory => "out of memory",
+    };
+}
+
+pub fn eql(a: []const u8, b: []const u8) bool {
+    return std.mem.eql(u8, a, b);
+}
+
+pub fn isFlag(a: []const u8) bool {
+    return a.len > 1 and a[0] == '-';
+}
+
+/// Returns the value following the flag at `i.*` and advances `i`.
+pub fn takeValue(args: []const []const u8, i: *usize) ParseError![]const u8 {
+    i.* += 1;
+    if (i.* >= args.len) return error.MissingValue;
+    return args[i.*];
+}

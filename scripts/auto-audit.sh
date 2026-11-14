@@ -58,7 +58,7 @@ else
 fi
 
 # 4. Require std.testing.allocator in every heap-allocating module
-for mod in src/main.zig src/cli.zig src/config.zig src/http.zig src/podman_api.zig src/log.zig src/policy.zig; do
+for mod in src/main.zig src/cli.zig src/cli_specs.zig src/config.zig src/http.zig src/http_parser.zig src/podman_api.zig src/podman_validate.zig src/podman_logs.zig src/podman_images.zig src/podman_system.zig src/log.zig src/policy.zig; do
     if has_match "std\.testing\.allocator" "$mod"; then
         pass "std.testing.allocator present in $mod."
     else
@@ -73,38 +73,38 @@ else
     fail "validateRequestTarget() is not called in src/http.zig."
 fi
 
-if has_match "try validateIdentifier\(" "src/podman_api.zig"; then
-    pass "validateIdentifier() enforced in src/podman_api.zig."
+if has_match "try validateIdentifier\(" "src/"; then
+    pass "validateIdentifier() enforced in src/podman_*.zig."
 else
-    fail "validateIdentifier() is not called in src/podman_api.zig."
+    fail "validateIdentifier() is not called in src/podman_*.zig."
 fi
 
 # 5b. Require the fail-closed host bind-mount policy (BUG-014)
-if has_match "pub fn validateHostPath\(" "src/podman_api.zig" && has_match "try validateHostPath\(" "src/podman_api.zig"; then
-    pass "validateHostPath() fail-closed host mount policy enforced in src/podman_api.zig."
+if has_match "pub fn validateHostPath\(" "src/" && has_match "try validateHostPath\(" "src/"; then
+    pass "validateHostPath() fail-closed host mount policy enforced in src/podman_*.zig."
 else
-    fail "Missing validateHostPath() host mount policy in src/podman_api.zig (see BUG-014)."
+    fail "Missing validateHostPath() host mount policy in src/podman_*.zig (see BUG-014)."
 fi
 
 # 5c. Require the fail-closed port-publishing policy (BUG-015)
-if has_match "pub fn validatePortMapping\(" "src/podman_api.zig" && has_match "try validatePortMapping\(" "src/podman_api.zig"; then
-    pass "validatePortMapping() fail-closed port policy enforced in src/podman_api.zig."
+if has_match "pub fn validatePortMapping\(" "src/" && has_match "try validatePortMapping\(" "src/"; then
+    pass "validatePortMapping() fail-closed port policy enforced in src/podman_*.zig."
 else
-    fail "Missing validatePortMapping() port policy in src/podman_api.zig (see BUG-015)."
+    fail "Missing validatePortMapping() port policy in src/podman_*.zig (see BUG-015)."
 fi
 
 # 5d. Require the fail-closed network/identity/capability policy (BUG-016)
-if has_match "pub fn validateNetworkMode\(" "src/podman_api.zig" && has_match "pub fn validateCapability\(" "src/podman_api.zig" && has_match "try validateNetworkMode\(" "src/podman_api.zig"; then
-    pass "validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_api.zig."
+if has_match "pub fn validateNetworkMode\(" "src/" && has_match "pub fn validateCapability\(" "src/" && has_match "try validateNetworkMode\(" "src/"; then
+    pass "validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_*.zig."
 else
-    fail "Missing validateNetworkMode()/validateCapability() identity policy in src/podman_api.zig (see BUG-016)."
+    fail "Missing validateNetworkMode()/validateCapability() identity policy in src/podman_*.zig (see BUG-016)."
 fi
 
 # 5e. Require the inspect resource-reference guard (BUG-017)
-if has_match "pub fn validateResourceRef\(" "src/podman_api.zig" && has_match "try validateResourceRef\(" "src/podman_api.zig"; then
-    pass "validateResourceRef() inspect path guard enforced in src/podman_api.zig."
+if has_match "pub fn validateResourceRef\(" "src/" && has_match "try validateResourceRef\(" "src/"; then
+    pass "validateResourceRef() inspect path guard enforced in src/podman_*.zig."
 else
-    fail "Missing validateResourceRef() inspect path guard in src/podman_api.zig (see BUG-017)."
+    fail "Missing validateResourceRef() inspect path guard in src/podman_*.zig (see BUG-017)."
 fi
 
 # 5f. Require the exec lifecycle validation (BUG-018)
@@ -122,10 +122,10 @@ else
 fi
 
 # 6. Require checked arithmetic in parsers & decoders
-if has_match "std\.math\.add" "src/http.zig" && has_match "std\.math\.add" "src/podman_api.zig" && has_match "std\.math\.mul" "src/cli.zig"; then
+if has_match "std\.math\.add" "src/http_parser.zig" && has_match "std\.math\.add" "src/podman_logs.zig" && has_match "std\.math\.mul" "src/cli_specs.zig"; then
     pass "Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser."
 else
-    fail "Missing checked arithmetic in src/http.zig, src/podman_api.zig, or src/cli.zig."
+    fail "Missing checked arithmetic in src/http_parser.zig, src/podman_logs.zig, or src/cli_specs.zig."
 fi
 
 # 7. Require socket timeout polling, hardening config, audit verification, and 14-case demo

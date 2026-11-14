@@ -175,9 +175,9 @@ def evaluate_static_gates() -> list[dict[str, Any]]:
     src_texts = {p.relative_to(ROOT).as_posix(): read_text(p) for p in sorted(SRC_DIR.glob("*.zig"))}
     all_src = "\n".join(src_texts.values())
 
-    cli_txt = src_texts.get("src/cli.zig", "")
-    http_txt = src_texts.get("src/http.zig", "")
-    pod_txt = src_texts.get("src/podman_api.zig", "")
+    cli_txt = "\n".join(txt for path, txt in src_texts.items() if path.startswith("src/cli"))
+    http_txt = "\n".join(txt for path, txt in src_texts.items() if path.startswith("src/http"))
+    pod_txt = "\n".join(txt for path, txt in src_texts.items() if path.startswith("src/podman_"))
     log_txt = src_texts.get("src/log.zig", "")
     demo_txt = src_texts.get("src/demo.zig", "")
 
