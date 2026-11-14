@@ -337,26 +337,33 @@ flowchart LR
 ### Phase 6: Deep Balor (`balorsh`) Security Integration & Advanced Observation/Policy Tooling
 
 #### 🛡️ 6A. Balor Toolkit (`balorsh` v1.2.0) Security Integration
-- [ ] **1. AI Log Analyst & Blue-Team Pipeline (`scripts/balor-security-audit.sh` & `scripts/security-check.sh`)**:
-  - Connect `zigpod audit --json`, `audit.log`, `system.log`, and `error.log` (including structured `DENY` telemetry from `--profile=sandbox`, path traversal, capability, port, and volume blocks) directly to `balorsh llm` (`balor:loganalyst` and `balor:blueteam` Seneca Cybersecurity personas on Ollama)
-  - Generate automated **Incident & Threat Reports** in `/opt/balorsh/data/llm/logs/` (or project report output) with actionable `zigpod-policy.json` hardening recommendations, plus deterministic offline rule-based analysis when Ollama is not running
-- [ ] **2. Container Attack-Surface & Vulnerability Scanner (`networkscan` + `webexploit`)**:
-  - Extract live container IP addresses and published host/container ports (`-p`) automatically from `zigpod inspect --json <CONTAINER>`
-  - Feed discovered endpoints into Balor's `networkscan` (`nmap -F`, `-sV -sC`, `--script vuln`) and `webexploit` (`whatweb`, `nikto`, `gobuster`, `ffuf`) stacks to audit exposed container services, then optionally pipe XML/text scan results into `balor:blueteam`
-- [ ] **3. Purple-Team Policy Review & Red-Team Adversarial Suite (`purpleteam` / `redteam`)**:
-  - Audit `zigpod inspect --json <CONTAINER>` (`HostConfig.CapDrop`, `CapAdd`, `ReadonlyRootfs`, `SecurityOpt`, `PidsLimit`, `Memory`, `Mounts`) against `zigpod-policy.json` using `balor:purpleteam` / `balor:redteam` to detect privilege escalation or container-escape risks
-  - Expand `zigpod demo` (`src/demo.zig`) with adversarial Red-Team/Blue-Team test vectors and JSON security report export
-- [ ] **4. Environment & Image Secret/Hash Hygiene (`password` stack — `hashid`)**:
-  - Inspect container `-e KEY=VALUE` flags and `Config.Env` from `zigpod inspect --json` for accidental password hashes, tokens, or credentials, integrating with `balorsh password` (`hashid`) and fail-closed policy warnings/blocks
+- [x] **1. Offline deterministic log & policy audit pipeline (`scripts/balor-security-audit.sh`)**:
+  - `--offline` / `--json` / `--quiet` modes parse `audit.log` (5-column hash-chain format with DENY/ERROR/malformed stats) and `zigpod-policy.json` guardrails (read-only, no-new-privileges, cap-drop-all, allowed networks) with zero network access -- DONE (wired into `scripts/security-check.sh` and `scripts/smoke.sh`)
+- [ ] **1b. AI Log Analyst & Blue-Team live reports (`balorsh llm` on Ollama)**:
+  - `--llm` currently pipes the sanitized summary to `balorsh llm --persona loganalyst` when available; automated **Incident & Threat Reports** written to `/opt/balorsh/data/llm/logs/` with actionable `zigpod-policy.json` hardening recommendations require a running Ollama instance (deterministic offline fallback is complete)
+- [x] **2a. Container attack-surface discovery from `zigpod inspect --json`**:
+  - `--inspect-json FILE` / `--container NAME` extract `NetworkSettings` IPs and `HostConfig.PortBindings` into structured `endpoints` findings for SIEM/automation -- DONE
+- [ ] **2b. Live vulnerability scanner execution (`networkscan` + `webexploit`)**:
+  - `--run-scan` is a readiness stub; actual `nmap -F/-sV -sC --script vuln`, `whatweb`, `nikto`, `gobuster`, `ffuf` invocation against discovered endpoints and piping results into `balor:blueteam` remain TODO (requires balorsh stacks)
+- [x] **3a. Offline purple-team policy review**:
+  - Rule-based checks of `HostConfig` (`ReadonlyRootfs`, `CapDrop=ALL`, `CapAdd`, `SecurityOpt no-new-privileges`, `NetworkMode=host` → CRITICAL, `PidsLimit`) against `zigpod-policy.json` in the same report -- DONE
+- [ ] **3b. Red-team adversarial demo vectors & JSON export (`purpleteam` / `redteam`)**:
+  - `zigpod demo` (`src/demo.zig`) currently runs 14 fail-closed ALLOW/DENY self-tests but has no adversarial Red-Team/Blue-Team test vectors, no JSON security report export, and no `balor:purpleteam`/`balor:redteam` persona wiring
+- [x] **4a. Environment & image secret/hash hygiene (deterministic patterns)**:
+  - `--env KEY=VALUE` flags and inspect `Config.Env` are checked against regex rules (bcrypt/sha-crypt/argon2 hashes, AWS `AKIA` keys, GitHub `gh[pousr]_` tokens, `sk-` tokens, sensitive env names) emitting HIGH `secret-hygiene` findings -- DONE
+- [ ] **4b. `balorsh password` (`hashid`) integration**:
+  - Exact hash-type identification via the balorsh password stack plus fail-closed policy warnings/blocks remain TODO
 
 #### ⚙️ 6B. Advanced CLI, Runtime Config & Release Tooling
-- [ ] **Container & Daemon Observation (`port`, `wait`, `diff`, `events`)**:
-  - `zigpod port <CONTAINER> [PRIVATE_PORT[/PROTO]]`, `zigpod wait <CONTAINER>`, `zigpod diff <CONTAINER>`, and `zigpod events [--since TS] [--until TS] [--json]`
-- [ ] **Image Tagging & Container Checkpointing (`tag`, `history`, `commit`)**:
-  - `zigpod tag <SRC_IMAGE> <TARGET_IMAGE>`, `zigpod history [--json] <IMAGE>`, and `zigpod commit [-m MSG] [-a AUTHOR] <CONTAINER> <REPO[:TAG]>`
-- [ ] **Runtime Config & Policy CLI (`zigpod.toml` & `zigpod policy`)**:
-  - Pure-Zig parser for `zigpod.toml` in `src/config.zig` and `zigpod policy check|show [--json]` pre-flight dry-run inspector
-- [ ] **Shell Tab-Completion, Image Build, Native Pods & Static Releases**:
-  - `zigpod completion bash|zsh|fish`
-  - `zigpod build -t <TAG> <DIR>` (`POST /v1.40/build`) and `zigpod pod create|ps|stop|rm`
-  - Static multi-arch release binaries (`x86_64-linux-musl` & `aarch64-linux-musl`) with SHA-256 checksums
+- [x] **Container & Daemon Observation (`port`, `wait`, `diff`, `events`)**:
+  - `zigpod port <CONTAINER> [PRIVATE_PORT[/PROTO]]`, `zigpod wait <CONTAINER>`, `zigpod diff <CONTAINER>`, and `zigpod events [--since TS] [--until TS] [--json]` -- DONE (`src/podman_system.zig`, `src/cli.zig`, `src/main.zig`)
+- [x] **Image Tagging & Container Checkpointing (`tag`, `history`, `commit`)**:
+  - `zigpod tag <SRC_IMAGE> <TARGET_IMAGE>`, `zigpod history [--json] <IMAGE>`, and `zigpod commit [-m MSG] [-a AUTHOR] <CONTAINER> <REPO[:TAG]>` -- DONE (`src/podman_images.zig`, `src/cli.zig`, `src/main.zig`)
+- [x] **Runtime Config & Policy CLI (`zigpod.toml` & `zigpod policy`)**:
+  - Pure-Zig TOML parser for `zigpod.toml` in `src/config.zig` and `zigpod policy check|show [--json]` pre-flight dry-run inspector -- DONE (`src/policy.zig`)
+- [x] **Shell Tab-Completion (`completion`)**:
+  - `zigpod completion bash|zsh|fish` emitting valid scripts per shell -- DONE (`src/completion.zig`)
+- [ ] **Image Build & Native Pods (`build`, `pod`)**:
+  - `zigpod build -t <TAG> <DIR>` (`POST /v1.40/build`) and `zigpod pod create|ps|stop|rm` remain TODO
+- [ ] **Static multi-arch release binaries**:
+  - `x86_64-linux-musl` & `aarch64-linux-musl` static builds with SHA-256 checksums remain TODO

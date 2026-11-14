@@ -473,6 +473,27 @@ test "validateResourceRef accepts image refs and rejects injection" {
 }
 
 
+test "validateResourceRef accepts image refs at the 256-byte boundary and rejects longer" {
+    const ref_256 = "docker.io/library/" ++ ("a" ** 233) ++ ":3.20";
+    try std.testing.expectEqual(@as(usize, 256), ref_256.len);
+    try validateResourceRef(ref_256);
+
+    const ref_257 = "docker.io/library/" ++ ("a" ** 234) ++ ":3.20";
+    try std.testing.expectEqual(@as(usize, 257), ref_257.len);
+    try std.testing.expectError(ApiError.InvalidIdentifier, validateResourceRef(ref_257));
+
+    const digest_ref = "docker.io/library/alpine@sha256:" ++ ("0123456789abcdef" ** 4);
+    try std.testing.expectEqual(@as(usize, 96), digest_ref.len);
+    try validateResourceRef(digest_ref);
+}
+
+
+test "validateIdentifier enforces the 128-byte length boundary" {
+    try validateIdentifier("x" ** 128);
+    try std.testing.expectError(ApiError.InvalidIdentifier, validateIdentifier("x" ** 129));
+}
+
+
 test "ContainerCreateRequest serializes hardening HostConfig fields" {
     const alloc = std.testing.allocator;
     const req = ContainerCreateRequest{
