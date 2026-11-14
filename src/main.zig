@@ -142,9 +142,21 @@ fn dispatch(
         .images => try pod.listImages(client, logger, stdout),
         .pull => |image| try pod.pullImage(client, logger, image, stdout),
         .stop => |container| try pod.stopContainer(client, logger, container),
+        .kill => |opts| try pod.killContainer(client, logger, opts.container, opts.signal),
         .rm => |opts| try pod.removeContainer(client, logger, opts.container, opts.force),
         .logs => |opts| try pod.fetchLogs(client, logger, opts.container, opts.follow, stdout),
+        .top => |container| try pod.topContainer(client, logger, container, stdout),
         .inspect => |target| try pod.inspect(client, logger, target, stdout),
+        .volume => |v| switch (v.action) {
+            .ls => try pod.listVolumes(client, logger, stdout),
+            .create => try pod.createVolume(client, logger, v.name.?, stdout),
+            .rm => try pod.removeVolume(client, logger, v.name.?, v.force),
+            .inspect => try pod.inspectVolume(client, logger, v.name.?, stdout),
+        },
+        .network => |n| switch (n.action) {
+            .ls => try pod.listNetworks(client, logger, stdout),
+            .inspect => try pod.inspectNetwork(client, logger, n.name.?, stdout),
+        },
         .stats => |opts| {
             if (!opts.no_stream) {
                 logger.info("stats live streaming not yet implemented; using --no-stream snapshot", .{});
@@ -368,6 +380,10 @@ fn reportFailure(logger: *log.Logger, cmd: cli.Command, socket_path: []const u8,
         pod.ApiError.InvalidCapability => logger.deny(
             "api.validateCapability",
             "Rejected invalid capability name. Use ALL or an uppercase name such as NET_ADMIN.",
+        ),
+        pod.ApiError.InvalidSignal => logger.deny(
+            "api.validateSignal",
+            "Rejected invalid kill signal. Allowed: SIGTERM, SIGKILL, SIGINT, SIGHUP, SIGQUIT, SIGUSR1, SIGUSR2.",
         ),
         pod.ApiError.InvalidPolicyFile => logger.deny(
             "policy.loadPolicyFile",

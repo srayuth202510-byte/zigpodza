@@ -93,9 +93,9 @@ def reply(conn, status, body=b""):
     hdr = f"HTTP/1.1 {status}\r\nContent-Length: {len(body)}\r\n\r\n".encode("ascii")
     conn.sendall(hdr + body)
 
-# Expect 12 requests: create, start, wait, logs, delete (--rm), ps -a, inspect, exec-create, exec-start, exec-inspect, stats-list, stats-one
+# Expect 16 requests: create, start, wait, logs, delete (--rm), ps -a, inspect, exec-create, exec-start, exec-inspect, stats-list, stats-one, kill, top, volume-ls, network-ls
 with open(req_path, "wb") as out:
-    for step in range(12):
+    for step in range(16):
         conn, _ = srv.accept()
         try:
             req = read_req(conn)
@@ -107,6 +107,14 @@ with open(req_path, "wb") as out:
                 reply(conn, "204 No Content")
             elif req.startswith(b"POST ") and b"/containers/" in req and b"/wait" in req:
                 reply(conn, "200 OK", b'{"StatusCode":0}')
+            elif req.startswith(b"POST ") and b"/containers/" in req and b"/kill?signal=SIGKILL" in req:
+                reply(conn, "204 No Content")
+            elif req.startswith(b"GET ") and b"/containers/" in req and b"/top" in req:
+                reply(conn, "200 OK", b'{"Titles":["UID","PID","CMD"],"Processes":[["root","4321","sleep 60"]]}')
+            elif req.startswith(b"GET ") and b"/v1.40/volumes HTTP/1.1" in req:
+                reply(conn, "200 OK", b'{"Volumes":[{"Name":"app-data","Driver":"local"}]}')
+            elif req.startswith(b"GET ") and b"/v1.40/networks HTTP/1.1" in req:
+                reply(conn, "200 OK", b'[{"Id":"abcdef0123456789","Name":"podman","Driver":"bridge","Scope":"local"}]')
             elif b"/logs" in req:
                 reply(conn, "200 OK", b"\x01\x00\x00\x00\x00\x00\x00\x03ok\n")
             elif req.startswith(b"DELETE "):
@@ -170,7 +178,23 @@ echo "$STATS_OUT" | grep -q "20.00%"
 echo "$STATS_OUT" | grep -q "48.0 MB / 256.0 MB"
 echo "$STATS_OUT" | grep -q "12"
 
+"$BIN" --socket "$SOCK" kill -s SIGKILL smoke1234567890ab
+TOP_OUT=$("$BIN" --socket "$SOCK" top smoke1234567890ab)
+echo "$TOP_OUT" | grep -q "4321"
+VOL_OUT=$("$BIN" --socket "$SOCK" volume ls)
+echo "$VOL_OUT" | grep -q "app-data"
+NET_OUT=$("$BIN" --socket "$SOCK" network ls)
+echo "$NET_OUT" | grep -q "podman"
+
 # Adversarial input must fail closed before reaching daemon.
+if "$BIN" --socket "$SOCK" kill -s SIGBAD smoke1234567890ab >/dev/null 2>&1; then
+    echo "[FAIL] expected invalid kill signal (SIGBAD) to fail closed" >&2
+    exit 1
+fi
+if "$BIN" --socket "$SOCK" volume create ../evil >/dev/null 2>&1; then
+    echo "[FAIL] expected traversal volume name (../evil) to fail closed" >&2
+    exit 1
+fi
 if "$BIN" --socket "$SOCK" rm ../evil >/dev/null 2>&1; then
     echo "[FAIL] expected path traversal container identifier to fail" >&2
     exit 1

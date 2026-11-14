@@ -32,8 +32,10 @@ pub const usage =
     \\  images                         List local images
     \\  pull IMAGE                     Pull an image from a registry
     \\  stop CONTAINER                 Stop a running container
+    \\  kill [-s SIGNAL] CONTAINER     Send a signal to a running container (default: SIGTERM)
     \\  rm [-f] CONTAINER              Remove a container (-f: force)
     \\  logs [-f] CONTAINER            Print a container's logs (-f: follow live output)
+    \\  top CONTAINER                  Display the running processes of a container
     \\  exec [OPTIONS] CONTAINER CMD...  Run a command in a running container
     \\      -i, --interactive          Keep STDIN open
     \\      -t, --tty                  Allocate a pseudo-TTY
@@ -42,6 +44,8 @@ pub const usage =
     \\      -w, --workdir PATH         Working directory inside the container
     \\  inspect TARGET                 Show container or image details (state, IP, mounts, limits)
     \\  stats [--no-stream] [-a] [CONTAINER...]  Display CPU, memory, and PIDs metrics
+    \\  volume ls|create|rm|inspect [NAME]       Manage named volumes
+    \\  network ls|inspect [NAME]      List or inspect container networks
     \\  audit [--json] [FILE]          Verify SHA-256 hash chain of audit.log (--json: structured output)
     \\  demo                           Run 14-case fail-closed ALLOW/DENY self-test suite
     \\  version                        Show client and server versions
@@ -140,6 +144,34 @@ pub const AuditOpts = struct {
     json: bool = false,
 };
 
+pub const KillOpts = struct {
+    container: []const u8,
+    signal: []const u8 = "SIGTERM",
+};
+
+pub const VolumeAction = enum {
+    ls,
+    create,
+    rm,
+    inspect,
+};
+
+pub const VolumeOpts = struct {
+    action: VolumeAction,
+    name: ?[]const u8 = null,
+    force: bool = false,
+};
+
+pub const NetworkAction = enum {
+    ls,
+    inspect,
+};
+
+pub const NetworkOpts = struct {
+    action: NetworkAction,
+    name: ?[]const u8 = null,
+};
+
 pub const Command = union(enum) {
     help,
     client_version,
@@ -151,11 +183,15 @@ pub const Command = union(enum) {
     pull: []const u8,
     run: RunOpts,
     stop: []const u8,
+    kill: KillOpts,
     rm: RmOpts,
     logs: LogsOpts,
+    top: []const u8,
     inspect: []const u8,
     exec: ExecOpts,
     stats: StatsOpts,
+    volume: VolumeOpts,
+    network: NetworkOpts,
 };
 
 pub const Parsed = struct {
@@ -251,16 +287,24 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
         .{ .pull = try single(rest) }
     else if (eql(name, "stop"))
         .{ .stop = try single(rest) }
+    else if (eql(name, "kill"))
+        try parseKill(rest)
     else if (eql(name, "rm"))
         try parseRm(rest)
     else if (eql(name, "logs"))
         try parseLogs(rest)
+    else if (eql(name, "top"))
+        .{ .top = try single(rest) }
     else if (eql(name, "inspect"))
         .{ .inspect = try single(rest) }
     else if (eql(name, "exec"))
         .{ .exec = try parseExec(allocator, rest) }
     else if (eql(name, "stats"))
         .{ .stats = try parseStats(allocator, rest) }
+    else if (eql(name, "volume"))
+        try parseVolume(rest)
+    else if (eql(name, "network"))
+        try parseNetwork(rest)
     else if (eql(name, "audit"))
         try parseAudit(rest)
     else if (eql(name, "demo"))
@@ -674,6 +718,110 @@ fn parseStats(allocator: std.mem.Allocator, args: []const []const u8) ParseError
     }
     opts.containers = try containers.toOwnedSlice();
     return opts;
+}
+
+const allowed_signals = [_][]const u8{
+    "SIGTERM",
+    "SIGKILL",
+    "SIGINT",
+    "SIGHUP",
+    "SIGQUIT",
+    "SIGUSR1",
+    "SIGUSR2",
+    "TERM",
+    "KILL",
+    "INT",
+    "HUP",
+    "QUIT",
+    "USR1",
+    "USR2",
+};
+
+fn parseSignal(s: []const u8) ParseError![]const u8 {
+    for (allowed_signals) |allowed| {
+        if (eql(s, allowed)) return s;
+    }
+    return error.InvalidValue;
+}
+
+/// Parses `kill [-s|--signal SIGNAL] CONTAINER`.
+fn parseKill(args: []const []const u8) ParseError!Command {
+    var signal: []const u8 = "SIGTERM";
+    var container: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (eql(a, "-s") or eql(a, "--signal")) {
+            signal = try parseSignal(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--signal=")) {
+            signal = try parseSignal(a["--signal=".len..]);
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else if (container == null) {
+            container = a;
+        } else {
+            return error.TooManyArguments;
+        }
+    }
+    return .{ .kill = .{
+        .container = container orelse return error.MissingArgument,
+        .signal = signal,
+    } };
+}
+
+/// Parses `volume ls|create|rm|inspect [-f|--force] [NAME]`.
+fn parseVolume(args: []const []const u8) ParseError!Command {
+    if (args.len == 0) return error.MissingArgument;
+    const sub = args[0];
+    const rest = args[1..];
+    if (eql(sub, "ls") or eql(sub, "list")) {
+        if (rest.len > 0) return if (isFlag(rest[0])) error.UnknownFlag else error.TooManyArguments;
+        return .{ .volume = .{ .action = .ls } };
+    } else if (eql(sub, "create")) {
+        return .{ .volume = .{ .action = .create, .name = try single(rest) } };
+    } else if (eql(sub, "inspect")) {
+        return .{ .volume = .{ .action = .inspect, .name = try single(rest) } };
+    } else if (eql(sub, "rm") or eql(sub, "remove")) {
+        var force = false;
+        var name: ?[]const u8 = null;
+        for (rest) |a| {
+            if (eql(a, "-f") or eql(a, "--force")) {
+                force = true;
+            } else if (isFlag(a)) {
+                return error.UnknownFlag;
+            } else if (name == null) {
+                name = a;
+            } else {
+                return error.TooManyArguments;
+            }
+        }
+        return .{ .volume = .{
+            .action = .rm,
+            .name = name orelse return error.MissingArgument,
+            .force = force,
+        } };
+    } else if (isFlag(sub)) {
+        return error.UnknownFlag;
+    } else {
+        return error.UnknownCommand;
+    }
+}
+
+/// Parses `network ls|inspect [NAME]`.
+fn parseNetwork(args: []const []const u8) ParseError!Command {
+    if (args.len == 0) return error.MissingArgument;
+    const sub = args[0];
+    const rest = args[1..];
+    if (eql(sub, "ls") or eql(sub, "list")) {
+        if (rest.len > 0) return if (isFlag(rest[0])) error.UnknownFlag else error.TooManyArguments;
+        return .{ .network = .{ .action = .ls } };
+    } else if (eql(sub, "inspect")) {
+        return .{ .network = .{ .action = .inspect, .name = try single(rest) } };
+    } else if (isFlag(sub)) {
+        return error.UnknownFlag;
+    } else {
+        return error.UnknownCommand;
+    }
 }
 
 // ---------------------------------------------------------------- tests
@@ -1187,6 +1335,14 @@ test "fuzz parseMemoryBytes and cli.parse with deterministic PRNG" {
         "1000:1000",
         "--workdir",
         "/work",
+        "kill",
+        "-s",
+        "SIGKILL",
+        "top",
+        "volume",
+        "network",
+        "ls",
+        "create",
         "--bogus",
         "",
         "alpine:3.20",
@@ -1206,4 +1362,47 @@ test "fuzz parseMemoryBytes and cli.parse with deterministic PRNG" {
             p.deinit(alloc);
         } else |_| {}
     }
+}
+
+test "parse kill, top, volume, and network subcommands" {
+    const alloc = std.testing.allocator;
+
+    const k1 = try parse(alloc, &.{ "kill", "web" });
+    defer k1.deinit(alloc);
+    try std.testing.expectEqualStrings("web", k1.command.kill.container);
+    try std.testing.expectEqualStrings("SIGTERM", k1.command.kill.signal);
+
+    const k2 = try parse(alloc, &.{ "kill", "-s", "SIGKILL", "web" });
+    defer k2.deinit(alloc);
+    try std.testing.expectEqualStrings("SIGKILL", k2.command.kill.signal);
+
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "kill", "-s", "SIGBAD", "web" }));
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "kill", "-s", "SIGTERM" }));
+
+    const t1 = try parse(alloc, &.{ "top", "web" });
+    defer t1.deinit(alloc);
+    try std.testing.expectEqualStrings("web", t1.command.top);
+
+    const v_ls = try parse(alloc, &.{ "volume", "ls" });
+    defer v_ls.deinit(alloc);
+    try std.testing.expectEqual(VolumeAction.ls, v_ls.command.volume.action);
+
+    const v_create = try parse(alloc, &.{ "volume", "create", "app-data" });
+    defer v_create.deinit(alloc);
+    try std.testing.expectEqual(VolumeAction.create, v_create.command.volume.action);
+    try std.testing.expectEqualStrings("app-data", v_create.command.volume.name.?);
+
+    const v_rm = try parse(alloc, &.{ "volume", "rm", "-f", "app-data" });
+    defer v_rm.deinit(alloc);
+    try std.testing.expectEqual(VolumeAction.rm, v_rm.command.volume.action);
+    try std.testing.expect(v_rm.command.volume.force);
+
+    const n_ls = try parse(alloc, &.{ "network", "ls" });
+    defer n_ls.deinit(alloc);
+    try std.testing.expectEqual(NetworkAction.ls, n_ls.command.network.action);
+
+    const n_insp = try parse(alloc, &.{ "network", "inspect", "podman" });
+    defer n_insp.deinit(alloc);
+    try std.testing.expectEqual(NetworkAction.inspect, n_insp.command.network.action);
+    try std.testing.expectEqualStrings("podman", n_insp.command.network.name.?);
 }

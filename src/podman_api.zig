@@ -27,6 +27,11 @@ pub const ExecCreateResponse = types.ExecCreateResponse;
 pub const ExecStartRequest = types.ExecStartRequest;
 pub const ExecInspect = types.ExecInspect;
 pub const ContainerStats = types.ContainerStats;
+pub const ContainerTop = types.ContainerTop;
+pub const VolumeCreateRequest = types.VolumeCreateRequest;
+pub const VolumeInfo = types.VolumeInfo;
+pub const VolumeListResponse = types.VolumeListResponse;
+pub const NetworkInfo = types.NetworkInfo;
 const PullStatusLine = types.PullStatusLine;
 
 /// Validates a container ID or name to prevent path traversal, query injection,
@@ -237,6 +242,32 @@ pub fn validateCapability(cap: []const u8) ApiError!void {
     }
 }
 
+/// Signals accepted by `zigpod kill -s` (`POST /containers/{id}/kill?signal=...`).
+/// Restricted to a strict allow-list so arbitrary query strings cannot reach the daemon.
+const allowed_signals = [_][]const u8{
+    "SIGTERM",
+    "SIGKILL",
+    "SIGINT",
+    "SIGHUP",
+    "SIGQUIT",
+    "SIGUSR1",
+    "SIGUSR2",
+    "TERM",
+    "KILL",
+    "INT",
+    "HUP",
+    "QUIT",
+    "USR1",
+    "USR2",
+};
+
+pub fn validateSignal(sig: []const u8) ApiError!void {
+    for (allowed_signals) |s| {
+        if (std.mem.eql(u8, sig, s)) return;
+    }
+    return ApiError.InvalidSignal;
+}
+
 fn appendQueryEncoded(out: *std.ArrayList(u8), s: []const u8) !void {
     for (s) |c| {
         if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
@@ -346,6 +377,227 @@ pub fn stopContainer(client: *const http.Client, logger: *log.Logger, id: []cons
         return logApiFailure(logger, "POST", path, resp);
     }
     logger.info("stopped container {s}", .{utils.shortId(id)});
+}
+
+/// Sends an allow-listed signal to a running container (`POST /containers/{id}/kill?signal={sig}`).
+pub fn killContainer(client: *const http.Client, logger: *log.Logger, id: []const u8, signal: []const u8) !void {
+    try validateIdentifier(id);
+    try validateSignal(signal);
+
+    const path = try std.fmt.allocPrint(
+        client.allocator,
+        "{s}/containers/{s}/kill?signal={s}",
+        .{ api_prefix, id, signal },
+    );
+    defer client.allocator.free(path);
+
+    logger.debug("POST {s}", .{path});
+    const resp = try client.request("POST", path, null);
+    defer resp.deinit();
+
+    if (resp.status != 204) {
+        return logApiFailure(logger, "POST", path, resp);
+    }
+    logger.info("killed container {s} (signal={s})", .{ utils.shortId(id), signal });
+}
+
+/// Displays running processes inside a container (`GET /containers/{id}/top`).
+pub fn topContainer(client: *const http.Client, logger: *log.Logger, id: []const u8, writer: anytype) !void {
+    try validateIdentifier(id);
+
+    const path = try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/top", .{ api_prefix, id });
+    defer client.allocator.free(path);
+
+    logger.debug("GET {s}", .{path});
+    const resp = try client.request("GET", path, null);
+    defer resp.deinit();
+
+    if (!resp.ok()) return logApiFailure(logger, "GET", path, resp);
+
+    const parsed = try std.json.parseFromSlice(ContainerTop, client.allocator, resp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    if (parsed.value.Titles) |titles| {
+        for (titles, 0..) |t, idx| {
+            if (idx > 0) try writer.writeAll("\t");
+            try writer.writeAll(t);
+        }
+        try writer.writeAll("\n");
+    }
+    if (parsed.value.Processes) |procs| {
+        for (procs) |row| {
+            for (row, 0..) |col, idx| {
+                if (idx > 0) try writer.writeAll("\t");
+                try writer.writeAll(col);
+            }
+            try writer.writeAll("\n");
+        }
+        logger.info("listed {d} process(es) in container {s}", .{ procs.len, utils.shortId(id) });
+    }
+}
+
+/// Lists named volumes (`GET /volumes`).
+pub fn listVolumes(client: *const http.Client, logger: *log.Logger, writer: anytype) !void {
+    const path = api_prefix ++ "/volumes";
+
+    logger.debug("GET {s}", .{path});
+    const resp = try client.request("GET", path, null);
+    defer resp.deinit();
+
+    if (!resp.ok()) return logApiFailure(logger, "GET", path, resp);
+
+    try writer.print("{s:<20} {s}\n", .{ "DRIVER", "VOLUME NAME" });
+
+    const trimmed = std.mem.trimLeft(u8, resp.body, " \t\r\n");
+    if (trimmed.len > 0 and trimmed[0] == '[') {
+        const parsed_arr = try std.json.parseFromSlice([]VolumeInfo, client.allocator, resp.body, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed_arr.deinit();
+        for (parsed_arr.value) |v| {
+            try writer.print("{s:<20} {s}\n", .{ v.Driver, v.Name });
+        }
+        logger.info("listed {d} volume(s)", .{parsed_arr.value.len});
+        return;
+    }
+
+    const parsed = try std.json.parseFromSlice(VolumeListResponse, client.allocator, resp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const vols = parsed.value.Volumes orelse &[_]VolumeInfo{};
+    for (vols) |v| {
+        try writer.print("{s:<20} {s}\n", .{ v.Driver, v.Name });
+    }
+    logger.info("listed {d} volume(s)", .{vols.len});
+}
+
+/// Creates a named volume (`POST /volumes/create`).
+pub fn createVolume(client: *const http.Client, logger: *log.Logger, name: []const u8, writer: anytype) !void {
+    try validateVolumeName(name);
+
+    const path = api_prefix ++ "/volumes/create";
+    const req_body = try std.json.stringifyAlloc(client.allocator, VolumeCreateRequest{ .Name = name }, .{});
+    defer client.allocator.free(req_body);
+
+    logger.debug("POST {s} body={s}", .{ path, req_body });
+    const resp = try client.request("POST", path, req_body);
+    defer resp.deinit();
+
+    if (!resp.ok()) return logApiFailure(logger, "POST", path, resp);
+
+    const parsed = try std.json.parseFromSlice(VolumeInfo, client.allocator, resp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const created_name = if (parsed.value.Name.len > 0) parsed.value.Name else name;
+    try writer.print("{s}\n", .{created_name});
+    logger.info("created volume {s}", .{created_name});
+}
+
+/// Removes a named volume (`DELETE /volumes/{name}?force={true|false}`).
+pub fn removeVolume(client: *const http.Client, logger: *log.Logger, name: []const u8, force: bool) !void {
+    try validateVolumeName(name);
+
+    const path = try std.fmt.allocPrint(
+        client.allocator,
+        "{s}/volumes/{s}?force={s}",
+        .{ api_prefix, name, if (force) "true" else "false" },
+    );
+    defer client.allocator.free(path);
+
+    logger.debug("DELETE {s}", .{path});
+    const resp = try client.request("DELETE", path, null);
+    defer resp.deinit();
+
+    if (resp.status != 204 and !resp.ok()) {
+        return logApiFailure(logger, "DELETE", path, resp);
+    }
+    logger.info("removed volume {s}", .{name});
+}
+
+/// Inspects a named volume (`GET /volumes/{name}`).
+pub fn inspectVolume(client: *const http.Client, logger: *log.Logger, name: []const u8, writer: anytype) !void {
+    try validateVolumeName(name);
+
+    const path = try std.fmt.allocPrint(client.allocator, "{s}/volumes/{s}", .{ api_prefix, name });
+    defer client.allocator.free(path);
+
+    logger.debug("GET {s}", .{path});
+    const resp = try client.request("GET", path, null);
+    defer resp.deinit();
+
+    if (!resp.ok()) return logApiFailure(logger, "GET", path, resp);
+
+    const parsed = try std.json.parseFromSlice(VolumeInfo, client.allocator, resp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const v = parsed.value;
+    try writer.print("{s:<15}{s}\n", .{ "Name:", v.Name });
+    try writer.print("{s:<15}{s}\n", .{ "Driver:", v.Driver });
+    if (v.Mountpoint.len > 0) try writer.print("{s:<15}{s}\n", .{ "Mountpoint:", v.Mountpoint });
+    if (v.CreatedAt.len > 0) try writer.print("{s:<15}{s}\n", .{ "CreatedAt:", v.CreatedAt });
+    logger.info("inspected volume {s}", .{name});
+}
+
+/// Lists container networks (`GET /networks`).
+pub fn listNetworks(client: *const http.Client, logger: *log.Logger, writer: anytype) !void {
+    const path = api_prefix ++ "/networks";
+
+    logger.debug("GET {s}", .{path});
+    const resp = try client.request("GET", path, null);
+    defer resp.deinit();
+
+    if (!resp.ok()) return logApiFailure(logger, "GET", path, resp);
+
+    const parsed = try std.json.parseFromSlice([]NetworkInfo, client.allocator, resp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    try writer.print("{s:<14} {s:<20} {s:<14} {s}\n", .{ "NETWORK ID", "NAME", "DRIVER", "SCOPE" });
+    for (parsed.value) |net| {
+        try writer.print("{s:<14} {s:<20} {s:<14} {s}\n", .{
+            utils.shortId(net.Id),
+            net.Name,
+            net.Driver,
+            net.Scope,
+        });
+    }
+    logger.info("listed {d} network(s)", .{parsed.value.len});
+}
+
+/// Inspects a container network (`GET /networks/{name}`).
+pub fn inspectNetwork(client: *const http.Client, logger: *log.Logger, name: []const u8, writer: anytype) !void {
+    try validateIdentifier(name);
+
+    const path = try std.fmt.allocPrint(client.allocator, "{s}/networks/{s}", .{ api_prefix, name });
+    defer client.allocator.free(path);
+
+    logger.debug("GET {s}", .{path});
+    const resp = try client.request("GET", path, null);
+    defer resp.deinit();
+
+    if (!resp.ok()) return logApiFailure(logger, "GET", path, resp);
+
+    const parsed = try std.json.parseFromSlice(NetworkInfo, client.allocator, resp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const net = parsed.value;
+    if (net.Id.len > 0) try writer.print("{s:<15}{s}\n", .{ "Id:", net.Id });
+    try writer.print("{s:<15}{s}\n", .{ "Name:", net.Name });
+    if (net.Driver.len > 0) try writer.print("{s:<15}{s}\n", .{ "Driver:", net.Driver });
+    if (net.Scope.len > 0) try writer.print("{s:<15}{s}\n", .{ "Scope:", net.Scope });
+    try writer.print("{s:<15}{s}\n", .{ "Internal:", if (net.Internal) "true" else "false" });
+    logger.info("inspected network {s}", .{name});
 }
 
 pub fn removeContainer(client: *const http.Client, logger: *log.Logger, id: []const u8, force: bool) !void {
@@ -1594,6 +1846,7 @@ fn readHttpRequest(stream: std.net.Stream, buf: []u8) ![]const u8 {    var total
 
 const ScriptedReply = struct {
     expected_prefix: []const u8,
+    expected_substring: ?[]const u8 = null,
     raw_response: []const u8,
 };
 
@@ -1609,7 +1862,8 @@ fn runMockPodmanServer(ctx: *MockApiCtx) void {
         const conn = ctx.server.accept() catch return;
         defer conn.stream.close();
         const req = readHttpRequest(conn.stream, &buf) catch return;
-        if (std.mem.startsWith(u8, req, reply.expected_prefix)) {
+        const sub_ok = if (reply.expected_substring) |sub| std.mem.indexOf(u8, req, sub) != null else true;
+        if (std.mem.startsWith(u8, req, reply.expected_prefix) and sub_ok) {
             ctx.matched += 1;
         }
         conn.stream.writeAll(reply.raw_response) catch return;
@@ -2450,4 +2704,123 @@ test "fuzz demuxLogs and LogDemuxer with arbitrary split boundaries and random f
         }
         try demuxer.flush();
     }
+}
+
+test "kill, top, volume, and network endpoints + signal/name validation" {
+    const alloc = std.testing.allocator;
+
+    // 1) Pre-flight validator unit checks
+    try validateSignal("SIGTERM");
+    try validateSignal("SIGKILL");
+    try validateSignal("INT");
+    try std.testing.expectError(ApiError.InvalidSignal, validateSignal(""));
+    try std.testing.expectError(ApiError.InvalidSignal, validateSignal("sigterm"));
+    try std.testing.expectError(ApiError.InvalidSignal, validateSignal("9"));
+    try std.testing.expectError(ApiError.InvalidSignal, validateSignal("SIGKILL&force=true"));
+
+    // 2) Mock Unix socket server covering kill, top, volume (ls/create/inspect/rm), network (ls/inspect)
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-phase4-api-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const top_json = "{\"Titles\":[\"UID\",\"PID\",\"CMD\"],\"Processes\":[[\"root\",\"1234\",\"sleep 60\"]]}";
+    const vol_list_json = "{\"Volumes\":[{\"Name\":\"app-data\",\"Driver\":\"local\",\"Mountpoint\":\"/var/lib/containers/storage/volumes/app-data/_data\"}]}";
+    const vol_info_json = "{\"Name\":\"app-data\",\"Driver\":\"local\",\"Mountpoint\":\"/var/lib/containers/storage/volumes/app-data/_data\",\"CreatedAt\":\"2026-11-14T00:00:00Z\"}";
+    const net_list_json = "[{\"Id\":\"abcdef0123456789\",\"Name\":\"podman\",\"Driver\":\"bridge\",\"Scope\":\"local\"}]";
+    const net_info_json = "{\"Id\":\"abcdef0123456789\",\"Name\":\"podman\",\"Driver\":\"bridge\",\"Scope\":\"local\",\"Internal\":false}";
+
+    const replies = [_]ScriptedReply{
+        .{
+            .expected_prefix = "POST /v1.40/containers/web/kill?signal=SIGKILL HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 204 No Content\r\n\r\n",
+        },
+        .{
+            .expected_prefix = "GET /v1.40/containers/web/top HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ top_json.len, top_json }),
+        },
+        .{
+            .expected_prefix = "GET /v1.40/volumes HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ vol_list_json.len, vol_list_json }),
+        },
+        .{
+            .expected_prefix = "POST /v1.40/volumes/create HTTP/1.1\r\n",
+            .expected_substring = "\"Name\":\"app-data\"",
+            .raw_response = std.fmt.comptimePrint("HTTP/1.1 201 Created\r\nContent-Length: {d}\r\n\r\n{s}", .{ vol_info_json.len, vol_info_json }),
+        },
+        .{
+            .expected_prefix = "GET /v1.40/volumes/app-data HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ vol_info_json.len, vol_info_json }),
+        },
+        .{
+            .expected_prefix = "DELETE /v1.40/volumes/app-data?force=true HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 204 No Content\r\n\r\n",
+        },
+        .{
+            .expected_prefix = "GET /v1.40/networks HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ net_list_json.len, net_list_json }),
+        },
+        .{
+            .expected_prefix = "GET /v1.40/networks/podman HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ net_info_json.len, net_info_json }),
+        },
+    };
+
+    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{
+        .allocator = alloc,
+        .socket_path = sock_path,
+    };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    // Reject bad signal or traversal names before touching the socket.
+    try std.testing.expectError(ApiError.InvalidSignal, killContainer(&client, &logger, "web", "SIGBAD"));
+    try std.testing.expectError(ApiError.InvalidHostPath, createVolume(&client, &logger, "../bad", out.writer()));
+    try std.testing.expectError(ApiError.InvalidIdentifier, inspectNetwork(&client, &logger, "../bad", out.writer()));
+
+    try killContainer(&client, &logger, "web", "SIGKILL");
+
+    try topContainer(&client, &logger, "web", out.writer());
+    try std.testing.expectEqualStrings("UID\tPID\tCMD\nroot\t1234\tsleep 60\n", out.items);
+
+    out.clearRetainingCapacity();
+    try listVolumes(&client, &logger, out.writer());
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "app-data") != null);
+
+    out.clearRetainingCapacity();
+    try createVolume(&client, &logger, "app-data", out.writer());
+    try std.testing.expectEqualStrings("app-data\n", out.items);
+
+    out.clearRetainingCapacity();
+    try inspectVolume(&client, &logger, "app-data", out.writer());
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "Mountpoint:") != null);
+
+    try removeVolume(&client, &logger, "app-data", true);
+
+    out.clearRetainingCapacity();
+    try listNetworks(&client, &logger, out.writer());
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "podman") != null);
+
+    out.clearRetainingCapacity();
+    try inspectNetwork(&client, &logger, "podman", out.writer());
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "Driver:        bridge") != null);
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
 }

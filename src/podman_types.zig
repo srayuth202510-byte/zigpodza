@@ -12,6 +12,7 @@ pub const ApiError = error{
     InvalidWorkdir,
     InvalidUser,
     InvalidCapability,
+    InvalidSignal,
     PolicyViolation,
     InvalidPolicyFile,
 };
@@ -280,4 +281,38 @@ pub const ContainerStats = struct {
     pub const PidsStats = struct {
         current: ?u64 = null,
     };
+};
+
+/// Response from `GET /containers/{id}/top`.
+pub const ContainerTop = struct {
+    Titles: ?[]const []const u8 = null,
+    Processes: ?[]const []const []const u8 = null,
+};
+
+/// Request body for `POST /volumes/create`.
+pub const VolumeCreateRequest = struct {
+    Name: []const u8,
+    Driver: []const u8 = "local",
+};
+
+/// Volume metadata returned by `/volumes/create`, `/volumes/{name}`, and `/volumes`.
+pub const VolumeInfo = struct {
+    Name: []const u8 = "",
+    Driver: []const u8 = "local",
+    Mountpoint: []const u8 = "",
+    CreatedAt: []const u8 = "",
+};
+
+/// Response wrapper for `GET /volumes` (`{"Volumes":[...]}`).
+pub const VolumeListResponse = struct {
+    Volumes: ?[]const VolumeInfo = null,
+};
+
+/// Network metadata returned by `GET /networks` and `GET /networks/{name}`.
+pub const NetworkInfo = struct {
+    Id: []const u8 = "",
+    Name: []const u8 = "",
+    Driver: []const u8 = "",
+    Scope: []const u8 = "local",
+    Internal: bool = false,
 };

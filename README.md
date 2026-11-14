@@ -140,6 +140,18 @@ zigpod logs -f demo-alpine
 zigpod stats --no-stream
 zigpod stats --no-stream demo-alpine
 
+# List running processes inside a container or send an allow-listed signal
+zigpod top demo-alpine
+zigpod kill -s SIGTERM demo-alpine
+
+# Manage named volumes and inspect container networks
+zigpod volume ls
+zigpod volume create app-data
+zigpod volume inspect app-data
+zigpod volume rm app-data
+zigpod network ls
+zigpod network inspect podman
+
 # Inspect a container or image (state, IP, mounts, hardening limits)
 zigpod inspect demo-alpine
 zigpod inspect alpine:3.20
