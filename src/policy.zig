@@ -22,9 +22,59 @@ pub const Policy = struct {
     forbid_cap_add: bool = true,
     forbid_rw_mounts: bool = true,
     forbid_published_ports: bool = false,
+    forbid_secret_env: bool = true,
     allowed_networks: []const []const u8 = &default_allowed_networks,
     tmpfs_tmp_options: []const u8 = default_sandbox_tmpfs_opts,
 };
+
+/// Deterministic secret/hash hygiene check for a single `KEY=VALUE` env entry
+/// (mirrors the offline rules in `scripts/balor-security-audit.sh`; the exact
+/// hash-type identification stays with `hashid` / `balorsh password`).
+pub fn looksLikeSecretEnv(entry: []const u8) bool {
+    const eq = std.mem.indexOfScalar(u8, entry, '=') orelse return false;
+    const key = entry[0..eq];
+    const value = entry[eq + 1 ..];
+
+    if (std.mem.startsWith(u8, value, "$2a$") or
+        std.mem.startsWith(u8, value, "$2b$") or
+        std.mem.startsWith(u8, value, "$2y$") or
+        std.mem.startsWith(u8, value, "$2x$") or
+        std.mem.startsWith(u8, value, "$6$") or
+        std.mem.startsWith(u8, value, "$5$") or
+        std.mem.startsWith(u8, value, "$argon2"))
+    {
+        return true;
+    }
+    if (std.mem.startsWith(u8, value, "AKIA") and value.len >= 20) return true;
+    const gh_prefixes = [_][]const u8{ "ghp_", "gho_", "ghu_", "ghs_", "ghr_" };
+    for (gh_prefixes) |p| {
+        if (std.mem.startsWith(u8, value, p) and value.len >= p.len + 20) return true;
+    }
+    if (std.mem.startsWith(u8, value, "sk-") and value.len >= 19) return true;
+
+    const sensitive_markers = [_][]const u8{ "PASSWORD", "SECRET", "TOKEN", "API_KEY", "PRIVATE_KEY" };
+    var upper_buf: [64]u8 = undefined;
+    if (key.len > 0 and key.len <= upper_buf.len) {
+        const upper = std.ascii.upperString(upper_buf[0..key.len], key);
+        for (sensitive_markers) |m| {
+            if (std.mem.indexOf(u8, upper, m) != null) {
+                const v = std.mem.trim(u8, value, " \t");
+                if (v.len == 0 or std.ascii.eqlIgnoreCase(v, "changeme") or std.ascii.eqlIgnoreCase(v, "placeholder")) {
+                    return false;
+                }
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn hasSecretEnv(env: []const []const u8) bool {
+    for (env) |e| {
+        if (looksLikeSecretEnv(e)) return true;
+    }
+    return false;
+}
 
 pub const default_sandbox_policy = Policy{};
 
@@ -103,6 +153,8 @@ pub fn checkRunPolicy(r: cli.RunOpts, pol: Policy) ?[]const u8 {
 
     if (pol.forbid_published_ports and r.ports.len > 0) return "policy.forbid_published_ports";
 
+    if (pol.forbid_secret_env and hasSecretEnv(r.env)) return "policy.forbid_secret_env";
+
     const net = r.network orelse return "policy.allowed_networks";
     var net_allowed = false;
     for (pol.allowed_networks) |allowed| {
@@ -166,6 +218,7 @@ fn printPolicyHuman(writer: anytype, source: []const u8, pol: Policy) !void {
     try writer.print("Forbid CapAdd:           {}\n", .{pol.forbid_cap_add});
     try writer.print("Forbid RW Mounts:        {}\n", .{pol.forbid_rw_mounts});
     try writer.print("Forbid Published Ports:  {}\n", .{pol.forbid_published_ports});
+    try writer.print("Forbid Secret Env:       {}\n", .{pol.forbid_secret_env});
 }
 
 test "applySandboxDefaults locks down unset RunOpts and passes default policy" {
@@ -211,6 +264,43 @@ test "enforceRunPolicy rejects flags exceeding sandbox guardrails" {
     var r_vol = cli.RunOpts{ .image = "alpine:3.20", .profile = .sandbox, .volumes = &rw_vols };
     applySandboxDefaults(&r_vol);
     try std.testing.expectEqualStrings("policy.forbid_rw_mounts", checkRunPolicy(r_vol, default_sandbox_policy).?);
+}
+
+test "forbid_secret_env fail-closed blocks credential-bearing env" {
+    const secrets = [_][]const u8{
+        "DB_PASS=$2b$12$abcdefghijklmnopqrstuv",
+        "LEGACY_HASH=$6$salt$abcdefghijklmnopqrst",
+        "ARG=$argon2id$v=19$m=65536,t=3,p=4$saltsaltsalt",
+        "AWS_KEY=AKIAIOSFODNN7EXAMPLE",
+        "GH_TOKEN=ghp_1234567890abcdefghij123456",
+        "OPENAI_KEY=sk-abcdefghij123456",
+        "MY_PASSWORD=s3cr3t-value",
+    };
+    for (secrets) |s| {
+        try std.testing.expect(looksLikeSecretEnv(s));
+    }
+
+    const benign = [_][]const u8{
+        "PATH=/usr/bin:/bin",
+        "DB_PASSWORD=changeme",
+        "MY_SECRET=placeholder",
+        "EMPTY_TOKEN=",
+        "LANG=C.UTF-8",
+    };
+    for (benign) |s| {
+        try std.testing.expect(!looksLikeSecretEnv(s));
+    }
+
+    const env = [_][]const u8{"DB_PASS=$2b$12$abcdefghijklmnopqrstuv"};
+    var r_secret = cli.RunOpts{ .image = "alpine:3.20", .profile = .sandbox, .env = &env };
+    applySandboxDefaults(&r_secret);
+    try std.testing.expectEqualStrings("policy.forbid_secret_env", checkRunPolicy(r_secret, default_sandbox_policy).?);
+    try std.testing.expectError(ApiError.PolicyViolation, enforceRunPolicy(r_secret, default_sandbox_policy));
+
+    const allowed = default_sandbox_policy;
+    const pol_open = Policy{ .forbid_secret_env = false };
+    try std.testing.expectEqualStrings("policy.forbid_secret_env", checkRunPolicy(r_secret, allowed).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), checkRunPolicy(r_secret, pol_open));
 }
 
 test "showPolicy and checkPolicyFile render and validate policy JSON without leaks" {

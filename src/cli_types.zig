@@ -61,9 +61,11 @@ pub const usage =
     \\  history [--json] IMAGE         Show the history of an image
     \\  commit [-m MSG] [-a AUTHOR] CONTAINER REPO[:TAG]  Create a new image from a container
     \\  policy show|check [--json] [FILE]  Inspect or validate a zigpod-policy.json file
+    \\  build -t TAG DIR               Build an image from a build-context directory
+    \\  pod create NAME|pod ps|pod stop ID|pod rm [-f] ID  Manage pods
     \\  completion bash|zsh|fish       Generate shell tab-completion script
     \\  audit [--json] [FILE]          Verify SHA-256 hash chain of audit.log (--json: structured output)
-    \\  demo                           Run 14-case fail-closed ALLOW/DENY self-test suite
+    \\  demo [--json]                  Run 18-case fail-closed ALLOW/DENY self-test suite (--json: security report)
     \\  version                        Show client and server versions
     \\  help                           Show this help
     \\
@@ -175,6 +177,23 @@ pub const AuditOpts = struct {
     json: bool = false,
 };
 
+pub const DemoOpts = struct {
+    json: bool = false,
+};
+
+pub const BuildOpts = struct {
+    tag: []const u8,
+    ctx: []const u8,
+};
+
+pub const PodAction = enum { create, ps, stop, rm };
+
+pub const PodOpts = struct {
+    action: PodAction,
+    arg: ?[]const u8 = null,
+    force: bool = false,
+};
+
 pub const KillOpts = struct {
     container: []const u8,
     signal: []const u8 = "SIGTERM",
@@ -278,7 +297,7 @@ pub const Command = union(enum) {
     help,
     client_version,
     version,
-    demo,
+    demo: DemoOpts,
     audit: AuditOpts,
     ps: PsOpts,
     images: ImagesOpts,
@@ -309,6 +328,8 @@ pub const Command = union(enum) {
     history: HistoryOpts,
     commit: CommitOpts,
     policy: PolicyOpts,
+    build: BuildOpts,
+    pod: PodOpts,
     completion: Shell,
 };
 
@@ -512,7 +533,7 @@ test "Parsed.deinit is no-op for commands without owned slices" {
     var p4 = Parsed{ .global = .{}, .command = .version };
     p4.deinit(alloc);
 
-    var p5 = Parsed{ .global = .{}, .command = .demo };
+    var p5 = Parsed{ .global = .{}, .command = .{ .demo = .{} } };
     p5.deinit(alloc);
 
     var p6 = Parsed{ .global = .{}, .command = .{ .audit = .{} } };

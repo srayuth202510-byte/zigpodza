@@ -7,6 +7,8 @@ const demo = @import("demo.zig");
 const http = @import("http.zig");
 const log = @import("log.zig");
 const pod = @import("podman_api.zig");
+const pods = @import("podman_pods.zig");
+const build_mod = @import("podman_build.zig");
 const policy = @import("policy.zig");
 
 pub const version = "0.1.0";
@@ -57,11 +59,24 @@ fn run(gpa_allocator: std.mem.Allocator) u8 {
             stdout.print("zigpod version {s}\n", .{version}) catch {};
             return 0;
         },
-        .demo => {
-            demo.runSelfTest(gpa_allocator, stdout) catch |e| {
-                stderr.print("zigpod: demo failed: {s}\n", .{@errorName(e)}) catch {};
-                return 1;
-            };
+        .demo => |d| {
+            if (d.json) {
+                var report = demo.runSelfTestReport(gpa_allocator) catch |e| {
+                    stderr.print("zigpod: demo failed: {s}\n", .{@errorName(e)}) catch {};
+                    return 1;
+                };
+                defer report.deinit(gpa_allocator);
+                demo.renderJsonReport(gpa_allocator, report, stdout) catch |e| {
+                    stderr.print("zigpod: demo failed: {s}\n", .{@errorName(e)}) catch {};
+                    return 1;
+                };
+                if (report.passed != report.total_cases) return 1;
+            } else {
+                demo.runSelfTest(gpa_allocator, stdout) catch |e| {
+                    stderr.print("zigpod: demo failed: {s}\n", .{@errorName(e)}) catch {};
+                    return 1;
+                };
+            }
             return 0;
         },
         .completion => |shell| {
@@ -191,6 +206,13 @@ fn dispatch(
             .create => try pod.createVolume(client, logger, v.name.?, stdout),
             .rm => try pod.removeVolume(client, logger, v.name.?, v.force),
             .inspect => try pod.inspectVolume(client, logger, v.name.?, stdout),
+        },
+        .build => |b| try build_mod.buildImage(client, logger, b.tag, b.ctx, stdout),
+        .pod => |p| switch (p.action) {
+            .create => try pods.createPod(client, logger, p.arg.?, stdout),
+            .ps => try pods.listPods(client, logger, stdout),
+            .stop => try pods.stopPod(client, logger, p.arg.?, stdout),
+            .rm => try pods.rmPod(client, logger, p.arg.?, p.force, stdout),
         },
         .network => |n| switch (n.action) {
             .ls => try pod.listNetworks(client, logger, stdout),

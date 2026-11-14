@@ -29,10 +29,15 @@ pub fn validateIdentifier(id: []const u8) ApiError!void {
 
 /// Validates a container/image reference used inside an inspect URL path.
 /// Allows image-reference characters (including `/` and `:`) while rejecting
-/// control chars and URL delimiters that could alter the request line.
+/// control chars, URL delimiters that could alter the request line, and any
+/// `..` path segment that could escape the API prefix (BUG-021).
 pub fn validateResourceRef(ref: []const u8) ApiError!void {
     if (ref.len == 0 or ref.len > 256) return ApiError.InvalidIdentifier;
     if (std.mem.eql(u8, ref, ".") or std.mem.eql(u8, ref, "..")) return ApiError.InvalidIdentifier;
+    var segments = std.mem.splitScalar(u8, ref, '/');
+    while (segments.next()) |seg| {
+        if (std.mem.eql(u8, seg, "..")) return ApiError.InvalidIdentifier;
+    }
     for (ref) |c| {
         if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == ':' or c == '/' or c == '@') continue;
         return ApiError.InvalidIdentifier;
@@ -470,6 +475,17 @@ test "validateResourceRef accepts image refs and rejects injection" {
     try std.testing.expectError(ApiError.InvalidIdentifier, validateResourceRef("a b"));
     try std.testing.expectError(ApiError.InvalidIdentifier, validateResourceRef("a?b"));
     try std.testing.expectError(ApiError.InvalidIdentifier, validateResourceRef("a\nb"));
+    try std.testing.expectError(ApiError.InvalidIdentifier, validateResourceRef("alpine;rm-rf /"));
+}
+
+
+test "validateResourceRef rejects traversal path segments (BUG-021)" {
+    try std.testing.expectError(ApiError.InvalidIdentifier, validateResourceRef("a/../b"));
+    try std.testing.expectError(ApiError.InvalidIdentifier, validateResourceRef("web/../../etc/shadow"));
+    try std.testing.expectError(ApiError.InvalidIdentifier, validateResourceRef("..hidden/../etc"));
+    try validateResourceRef("a/./b");
+    try validateResourceRef("docker.io/library/alpine:3.20");
+    try validateResourceRef("reg.mirror/team/name:1.2.3");
 }
 
 

@@ -138,12 +138,16 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
         try parseCommit(rest)
     else if (eql(name, "policy"))
         try parsePolicyCmd(rest)
+    else if (eql(name, "build"))
+        try parseBuild(rest)
+    else if (eql(name, "pod"))
+        try parsePodCmd(rest)
     else if (eql(name, "completion"))
         try parseCompletion(rest)
     else if (eql(name, "audit"))
         try parseAudit(rest)
     else if (eql(name, "demo"))
-        try noArgs(rest, .demo)
+        try parseDemo(rest)
     else if (eql(name, "version"))
         try noArgs(rest, .version)
     else if (eql(name, "help"))
@@ -170,10 +174,85 @@ fn parseAudit(args: []const []const u8) ParseError!Command {
     return .{ .audit = opts };
 }
 
+fn parseBuild(args: []const []const u8) ParseError!Command {
+    var tag: ?[]const u8 = null;
+    var ctx: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (eql(a, "-t") or eql(a, "--tag")) {
+            tag = try takeValue(args, &i);
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else if (ctx == null) {
+            ctx = a;
+        } else {
+            return error.TooManyArguments;
+        }
+    }
+    if (tag == null) return error.MissingValue;
+    if (ctx == null) return error.MissingArgument;
+    return .{ .build = .{ .tag = tag.?, .ctx = ctx.? } };
+}
+
+fn parsePodCmd(args: []const []const u8) ParseError!Command {
+    if (args.len == 0) return error.MissingArgument;
+    var rest = args;
+    const action_str = rest[0];
+    rest = rest[1..];
+
+    if (eql(action_str, "create")) {
+        if (rest.len != 1) return if (rest.len > 1) error.TooManyArguments else error.MissingArgument;
+        if (isFlag(rest[0])) return error.UnknownFlag;
+        return .{ .pod = .{ .action = .create, .arg = rest[0] } };
+    }
+    if (eql(action_str, "ps")) {
+        if (rest.len > 0) return if (isFlag(rest[0])) error.UnknownFlag else error.TooManyArguments;
+        return .{ .pod = .{ .action = .ps } };
+    }
+    if (eql(action_str, "stop")) {
+        if (rest.len != 1) return if (rest.len > 1) error.TooManyArguments else error.MissingArgument;
+        if (isFlag(rest[0])) return error.UnknownFlag;
+        return .{ .pod = .{ .action = .stop, .arg = rest[0] } };
+    }
+    if (eql(action_str, "rm")) {
+        var force = false;
+        var arg: ?[]const u8 = null;
+        for (rest) |a| {
+            if (eql(a, "-f") or eql(a, "--force")) {
+                force = true;
+            } else if (isFlag(a)) {
+                return error.UnknownFlag;
+            } else if (arg == null) {
+                arg = a;
+            } else {
+                return error.TooManyArguments;
+            }
+        }
+        if (arg == null) return error.MissingArgument;
+        return .{ .pod = .{ .action = .rm, .arg = arg, .force = force } };
+    }
+    return error.UnknownCommand;
+}
+
 
 fn noArgs(args: []const []const u8, cmd: Command) ParseError!Command {
     if (args.len > 0) return if (isFlag(args[0])) error.UnknownFlag else error.TooManyArguments;
     return cmd;
+}
+
+fn parseDemo(args: []const []const u8) ParseError!Command {
+    var json_mode = false;
+    for (args) |a| {
+        if (eql(a, "--json")) {
+            json_mode = true;
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else {
+            return error.TooManyArguments;
+        }
+    }
+    return .{ .demo = .{ .json = json_mode } };
 }
 
 fn single(args: []const []const u8) ParseError![]const u8 {
@@ -1119,6 +1198,14 @@ test "parse demo and audit subcommands" {
     defer p_demo.deinit(alloc);
     try std.testing.expect(p_demo.command == .demo);
     try std.testing.expectError(error.TooManyArguments, parse(alloc, &.{ "demo", "extra" }));
+
+    var p_demo_json = try parse(alloc, &.{ "demo", "--json" });
+    defer p_demo_json.deinit(alloc);
+    switch (p_demo_json.command) {
+        .demo => |d| try std.testing.expect(d.json),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectError(error.UnknownFlag, parse(alloc, &.{ "demo", "--verbose" }));
 
     var p_audit_default = try parse(alloc, &.{"audit"});
     defer p_audit_default.deinit(alloc);

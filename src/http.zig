@@ -73,7 +73,20 @@ pub const Client = struct {
         body: ?[]const u8,
         timeout_ms: i32,
     ) !Response {
-        const stream = try self.connectAndSend(method, path, body, false);
+        return self.requestWithContentType(method, path, body, "application/json", timeout_ms);
+    }
+
+    /// Same as `requestWithTimeout` but lets the caller pick the `Content-Type`
+    /// (e.g. `application/x-tar` for image build context uploads).
+    pub fn requestWithContentType(
+        self: Client,
+        method: []const u8,
+        path: []const u8,
+        body: ?[]const u8,
+        content_type: []const u8,
+        timeout_ms: i32,
+    ) !Response {
+        const stream = try self.connectAndSend(method, path, body, false, content_type);
         defer stream.close();
 
         const raw = try readAllWithTimeout(stream, self.allocator, max_response_bytes, timeout_ms);
@@ -93,7 +106,7 @@ pub const Client = struct {
         ctx: anytype,
         comptime on_chunk: fn (@TypeOf(ctx), []const u8) anyerror!void,
     ) !StreamResponse {
-        const stream = try self.connectAndSend(method, path, body, false);
+        const stream = try self.connectAndSend(method, path, body, false, "application/json");
         defer stream.close();
 
         var buf = std.ArrayList(u8).init(self.allocator);
@@ -134,7 +147,7 @@ pub const Client = struct {
         body: ?[]const u8,
         timeout_ms: i32,
     ) !UpgradedConn {
-        const stream = try self.connectAndSend(method, path, body, true);
+        const stream = try self.connectAndSend(method, path, body, true, "application/json");
         errdefer stream.close();
 
         var buf = std.ArrayList(u8).init(self.allocator);
@@ -178,6 +191,7 @@ pub const Client = struct {
         path: []const u8,
         body: ?[]const u8,
         is_upgrade: bool,
+        content_type: []const u8,
     ) !std.net.Stream {
         try validateRequestTarget(path);
 
@@ -199,7 +213,7 @@ pub const Client = struct {
             try w.writeAll("Host: d\r\nUser-Agent: zigpod/0.1\r\nAccept: application/json\r\nConnection: close\r\n");
         }
         if (body) |b| {
-            try w.print("Content-Type: application/json\r\nContent-Length: {d}\r\n\r\n", .{b.len});
+            try w.print("Content-Type: {s}\r\nContent-Length: {d}\r\n\r\n", .{ content_type, b.len });
             try w.writeAll(b);
         } else {
             try w.writeAll("Content-Length: 0\r\n\r\n");

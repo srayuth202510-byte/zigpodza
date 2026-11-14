@@ -50,7 +50,7 @@ mkdir -p "$ZIGPOD_LOG_DIR"
 
 "$BIN" --help | grep -q "audit"
 "$BIN" --version | grep -q "zigpod version"
-"$BIN" demo | grep -q "14/14 cases passed"
+"$BIN" demo | grep -q "18/18 cases passed"
 
 SOCK="$TMPDIR/smoke.sock"
 REQ_LOG="$TMPDIR/captured-req.txt"

@@ -1,55 +1,111 @@
-//! Built-in 14-case fail-closed security and reliability self-test (`zigpod demo`).
+//! Built-in 18-case fail-closed security and reliability self-test (`zigpod demo`),
+//! including Red-Team adversarial vectors with structured JSON report export.
 const std = @import("std");
 const cli = @import("cli.zig");
 const http = @import("http.zig");
 const log = @import("log.zig");
 const pod = @import("podman_api.zig");
+const policy = @import("policy.zig");
 
-const total_cases: usize = 14;
+const total_cases: usize = 18;
 
-/// Runs all 14 deterministic ALLOW/DENY enforcement checks without touching a live Podman daemon.
-pub fn runSelfTest(allocator: std.mem.Allocator, writer: anytype) !void {
-    try writer.writeAll("zigpod security & reliability self-test (14 cases)\n");
-
-    var idx: usize = 0;
-    var passed: usize = 0;
-
-    try recordCase(writer, &idx, &passed, "ALLOW", "hardened container CLI parse (-m 64m --pids-limit 32 --read-only --no-new-privileges)", checkHardenedCliParse(allocator));
-    try recordCase(writer, &idx, &passed, "DENY", "reject invalid memory limit (-m 0)", expectParseError(allocator, &.{ "run", "-m", "0", "alpine" }, error.InvalidValue));
-    try recordCase(writer, &idx, &passed, "DENY", "reject overflowing memory limit (--memory 99999999999999999g)", expectParseError(allocator, &.{ "run", "--memory", "99999999999999999g", "alpine" }, error.InvalidValue));
-    try recordCase(writer, &idx, &passed, "DENY", "reject non-positive pids limit (--pids-limit 0)", expectParseError(allocator, &.{ "run", "--pids-limit", "0", "alpine" }, error.InvalidValue));
-
-    try recordCase(writer, &idx, &passed, "DENY", "reject container identifier path traversal (../etc/passwd)", expectIdentifierDenied("../etc/passwd"));
-    try recordCase(writer, &idx, &passed, "DENY", "reject container name query smuggling (web?force=true)", expectIdentifierDenied("web?force=true"));
-
-    try recordCase(writer, &idx, &passed, "DENY", "reject HTTP request-target CRLF injection", expectTargetDenied("/v1.40/version\r\nX-Evil: 1"));
-    try recordCase(writer, &idx, &passed, "DENY", "reject non-absolute HTTP request target", expectTargetDenied("v1.40/version"));
-    try recordCase(writer, &idx, &passed, "DENY", "reject malformed HTTP response status line", expectMalformedResponseDenied(allocator));
-
-    try recordCase(writer, &idx, &passed, "DENY", "enforce socket poll timeout on stalled daemon", try testSocketTimeout(allocator));
-    try recordCase(writer, &idx, &passed, "ALLOW", "serialize hardened HostConfig JSON fields", try testHostConfigJson(allocator));
-    try recordCase(writer, &idx, &passed, "ALLOW", "end-to-end hardened mock Podman container lifecycle", try testHardenedLifecycle(allocator));
-
-    const audit_res = try testAuditChainAndTamper(allocator);
-    try recordCase(writer, &idx, &passed, "ALLOW", "verify intact SHA-256 hash-chained audit.log", audit_res.chain_ok);
-    try recordCase(writer, &idx, &passed, "DENY", "detect single-byte tampering in audit.log", audit_res.tamper_denied);
-
-    try writer.print("demo: {d}/{d} cases passed (fail-closed enforcement verified)\n", .{ passed, total_cases });
-    if (passed != total_cases) return error.DemoSelfTestFailed;
-}
-
-fn recordCase(
-    writer: anytype,
-    idx: *usize,
-    passed: *usize,
+pub const DemoCase = struct {
     verdict: []const u8,
     label: []const u8,
-    ok: bool,
-) !void {
-    idx.* += 1;
-    if (ok) passed.* += 1;
-    const status = if (ok) "PASS" else "FAIL";
-    try writer.print("  [{d:>2}/{d}] {s:<5} {s} -> {s}\n", .{ idx.*, total_cases, verdict, label, status });
+    result: []const u8,
+};
+
+pub const DemoReport = struct {
+    tool: []const u8 = "zigpod-demo",
+    total_cases: usize,
+    passed: usize,
+    failed: usize,
+    status: []const u8,
+    cases: []DemoCase,
+
+    pub fn deinit(self: DemoReport, allocator: std.mem.Allocator) void {
+        allocator.free(self.cases);
+    }
+};
+
+const Runner = struct {
+    cases: []DemoCase,
+    idx: usize = 0,
+    passed: usize = 0,
+
+    fn record(self: *Runner, verdict: []const u8, label: []const u8, ok: bool) void {
+        self.cases[self.idx] = .{
+            .verdict = verdict,
+            .label = label,
+            .result = if (ok) "PASS" else "FAIL",
+        };
+        self.idx += 1;
+        if (ok) self.passed += 1;
+    }
+};
+
+/// Runs all 18 deterministic ALLOW/DENY enforcement checks (no live Podman daemon)
+/// and returns a structured report for text rendering or `--json` export.
+pub fn runSelfTestReport(allocator: std.mem.Allocator) !DemoReport {
+    const cases = try allocator.alloc(DemoCase, total_cases);
+    errdefer allocator.free(cases);
+
+    var runner = Runner{ .cases = cases };
+
+    runner.record("ALLOW", "hardened container CLI parse (-m 64m --pids-limit 32 --read-only --no-new-privileges)", checkHardenedCliParse(allocator));
+    runner.record("DENY", "reject invalid memory limit (-m 0)", expectParseError(allocator, &.{ "run", "-m", "0", "alpine" }, error.InvalidValue));
+    runner.record("DENY", "reject overflowing memory limit (--memory 99999999999999999g)", expectParseError(allocator, &.{ "run", "--memory", "99999999999999999g", "alpine" }, error.InvalidValue));
+    runner.record("DENY", "reject non-positive pids limit (--pids-limit 0)", expectParseError(allocator, &.{ "run", "--pids-limit", "0", "alpine" }, error.InvalidValue));
+
+    runner.record("DENY", "reject container identifier path traversal (../etc/passwd)", expectIdentifierDenied("../etc/passwd"));
+    runner.record("DENY", "reject container name query smuggling (web?force=true)", expectIdentifierDenied("web?force=true"));
+
+    runner.record("DENY", "reject HTTP request-target CRLF injection", expectTargetDenied("/v1.40/version\r\nX-Evil: 1"));
+    runner.record("DENY", "reject non-absolute HTTP request target", expectTargetDenied("v1.40/version"));
+    runner.record("DENY", "reject malformed HTTP response status line", expectMalformedResponseDenied(allocator));
+
+    runner.record("DENY", "enforce socket poll timeout on stalled daemon", try testSocketTimeout(allocator));
+    runner.record("ALLOW", "serialize hardened HostConfig JSON fields", try testHostConfigJson(allocator));
+    runner.record("ALLOW", "end-to-end hardened mock Podman container lifecycle", try testHardenedLifecycle(allocator));
+
+    const audit_res = try testAuditChainAndTamper(allocator);
+    runner.record("ALLOW", "verify intact SHA-256 hash-chained audit.log", audit_res.chain_ok);
+    runner.record("DENY", "detect single-byte tampering in audit.log", audit_res.tamper_denied);
+
+    runner.record("DENY", "red-team: image-ref shell injection payload (alpine;rm -rf /)", expectResourceRefDenied("alpine;rm -rf /"));
+    runner.record("DENY", "red-team: inspect URL traversal (web/../../etc/shadow)", expectResourceRefDenied("web/../../etc/shadow"));
+    runner.record("DENY", "red-team: bind-mount /etc/shadow into container", expectHostPathDenied("/etc/shadow"));
+    runner.record("DENY", "red-team: sandbox policy denies --network=host run", testSandboxPolicyDeniesHostNetwork());
+
+    const status = if (runner.passed == total_cases) "pass" else "fail";
+    return .{
+        .total_cases = total_cases,
+        .passed = runner.passed,
+        .failed = total_cases - runner.passed,
+        .status = status,
+        .cases = cases,
+    };
+}
+
+/// Renders the human-readable ALLOW/DENY summary (unchanged text contract).
+pub fn runSelfTest(allocator: std.mem.Allocator, writer: anytype) !void {
+    var report = try runSelfTestReport(allocator);
+    defer report.deinit(allocator);
+
+    try writer.print("zigpod security & reliability self-test ({d} cases)\n", .{total_cases});
+    for (report.cases, 0..) |c, i| {
+        try writer.print("  [{d:>2}/{d}] {s:<5} {s} -> {s}\n", .{ i + 1, total_cases, c.verdict, c.label, c.result });
+    }
+    try writer.print("demo: {d}/{d} cases passed (fail-closed enforcement verified)\n", .{ report.passed, total_cases });
+    if (report.passed != total_cases) return error.DemoSelfTestFailed;
+}
+
+/// Renders the structured JSON security report for `zigpod demo --json`.
+pub fn renderJsonReport(allocator: std.mem.Allocator, report: DemoReport, writer: anytype) !void {
+    const out = try std.json.stringifyAlloc(allocator, report, .{ .whitespace = .indent_2 });
+    defer allocator.free(out);
+    try writer.writeAll(out);
+    try writer.writeAll("\n");
 }
 
 fn checkHardenedCliParse(allocator: std.mem.Allocator) bool {
@@ -88,6 +144,32 @@ fn expectParseError(allocator: std.mem.Allocator, args: []const []const u8, expe
 
 fn expectIdentifierDenied(name: []const u8) bool {
     pod.validateIdentifier(name) catch |e| return e == pod.ApiError.InvalidIdentifier;
+    return false;
+}
+
+fn expectResourceRefDenied(ref: []const u8) bool {
+    pod.validateResourceRef(ref) catch |e| return e == pod.ApiError.InvalidIdentifier;
+    return false;
+}
+
+fn expectHostPathDenied(path: []const u8) bool {
+    pod.validateHostPath(path, false) catch |e| return e == pod.ApiError.InvalidHostPath;
+    return false;
+}
+
+fn testSandboxPolicyDeniesHostNetwork() bool {
+    const r = cli.RunOpts{
+        .image = "alpine:3.20",
+        .read_only = true,
+        .no_new_privileges = true,
+        .memory = 67_108_864,
+        .pids_limit = 32,
+        .cap_drop = &.{"ALL"},
+        .network = "host",
+    };
+    policy.enforceRunPolicy(r, policy.default_sandbox_policy) catch |e| {
+        return e == pod.ApiError.PolicyViolation;
+    };
     return false;
 }
 
@@ -375,5 +457,30 @@ test "demo self-test suite passes with zero memory leaks" {
     defer out.deinit();
 
     try runSelfTest(std.testing.allocator, out.writer());
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "14/14 cases passed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "18/18 cases passed") != null);
+}
+
+test "demo report includes red-team vectors and serializes to JSON" {
+    const alloc = std.testing.allocator;
+    var report = try runSelfTestReport(alloc);
+    defer report.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 18), report.total_cases);
+    try std.testing.expectEqualStrings("pass", report.status);
+    var red_team_hits: usize = 0;
+    for (report.cases) |c| {
+        if (std.mem.indexOf(u8, c.label, "red-team") != null and
+            std.mem.eql(u8, c.result, "PASS") and
+            std.mem.eql(u8, c.verdict, "DENY"))
+        {
+            red_team_hits += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 4), red_team_hits);
+
+    const json = try std.json.stringifyAlloc(alloc, report, .{ .whitespace = .indent_2 });
+    defer alloc.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"tool\": \"zigpod-demo\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"status\": \"pass\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "red-team: bind-mount /etc/shadow into container") != null);
 }

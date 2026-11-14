@@ -112,6 +112,8 @@ TMP_REPORT="$(mktemp)"
 python3 - "$ROOT_DIR" "$JSON_OUT" "$QUIET" "$INSPECT_FILE" "$BALOR_AVAILABLE" "$TMP_EP" "${ENV_ITEMS[@]+"${ENV_ITEMS[@]}"}" > "$TMP_REPORT" <<'PYEOF'
 import json
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -194,6 +196,25 @@ SECRET_PATTERNS = [
     ("sensitive-env-name", re.compile(r"^(?:.*(?:PASSWORD|SECRET|TOKEN|API_KEY|PRIVATE_KEY))=(.+)$", re.IGNORECASE)),
 ]
 
+def identify_hash_types(value: str) -> list:
+    """4b: exact hash-type identification via hashid (balorsh password stack input)."""
+    if not shutil.which("hashid"):
+        return []
+    try:
+        out = subprocess.run(
+            ["hashid", value], capture_output=True, text=True, timeout=10
+        ).stdout
+    except Exception:
+        return []
+    types = []
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("[+]"):
+            name = line[3:].strip()
+            if name and name.lower() != "unknown hash":
+                types.append(name)
+    return types
+
 def check_env_entry(entry: str) -> None:
     for kind, pat in SECRET_PATTERNS:
         m = pat.search(entry)
@@ -201,11 +222,19 @@ def check_env_entry(entry: str) -> None:
             if kind == "sensitive-env-name" and m.group(1).strip() in ("", "changeme", "placeholder"):
                 continue
             key = entry.split("=", 1)[0]
-            secret_hits.append({"kind": kind, "key": key})
+            value = entry.split("=", 1)[1] if "=" in entry else entry
+            hash_types = identify_hash_types(value) if kind == "password-hash" else []
+            hit = {"kind": kind, "key": key}
+            if hash_types:
+                hit["hash_types"] = hash_types
+            secret_hits.append(hit)
+            detail = f"Matched rule '{kind}' on env variable '{key}'."
+            if hash_types:
+                detail += f" hashid identified: {', '.join(hash_types)}."
             add_finding(
                 "HIGH", "secret-hygiene", f"Potential secret/hash in env ({key})",
-                f"Matched rule '{kind}' on env variable '{key}'.",
-                "Remove hardcoded secrets from -e flags; use runtime secret mounts or `balorsh password`.",
+                detail,
+                "Remove hardcoded secrets from -e flags; use runtime secret mounts or `balorsh password` (hashid) for exact hash typing.",
             )
             break
 

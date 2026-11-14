@@ -15,6 +15,9 @@ pub const ApiError = error{
     InvalidSignal,
     PolicyViolation,
     InvalidPolicyFile,
+    BuildFailed,
+    BuildContextTooLarge,
+    MissingDockerfile,
 };
 
 /// Serializes Docker `HostConfig.Tmpfs` mapping `/tmp` to bounded mount options:
@@ -405,6 +408,33 @@ pub const ImageHistoryItem = struct {
 /// Response from `POST /commit`.
 pub const CommitResponse = struct {
     Id: []const u8 = "",
+};
+
+pub const PodCreateRequest = struct {
+    name: []const u8 = "",
+};
+
+pub const PodSummary = struct {
+    Id: []const u8 = "",
+    Name: []const u8 = "",
+    Status: []const u8 = "",
+    Created: []const u8 = "",
+};
+
+/// One JSON line emitted by `POST /build` (docker stream protocol).
+pub const BuildStreamEvent = struct {
+    stream: ?[]const u8 = null,
+    @"error": ?[]const u8 = null,
+    errorDetail: ?BuildErrorDetail = null,
+    aux: ?BuildAux = null,
+};
+
+pub const BuildErrorDetail = struct {
+    message: []const u8 = "",
+};
+
+pub const BuildAux = struct {
+    ID: []const u8 = "",
 };
 
 // ---------------------------------------------------------------- tests
@@ -803,4 +833,38 @@ test "ImageHistoryItem defaults and populated fields" {
     try std.testing.expectEqualStrings("docker.io/library/alpine:latest", ih_full.Tags.?[1]);
     try std.testing.expectEqualStrings("build step", ih_full.Comment);
     _ = alloc;
+}
+
+test "Pod types defaults and serialization" {
+    const alloc = std.testing.allocator;
+    const req = PodCreateRequest{ .name = "web-pod" };
+    try std.testing.expectEqualStrings("web-pod", req.name);
+
+    const summary = PodSummary{ .Id = "abc123", .Name = "web-pod", .Status = "Running", .Created = "now" };
+    try std.testing.expectEqualStrings("Running", summary.Status);
+
+    const parsed = try std.json.parseFromSlice(PodSummary, alloc, "{\"Id\":\"p1\",\"Name\":\"db-pod\",\"Status\":\"Exited\",\"Created\":\"yesterday\"}", .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("db-pod", parsed.value.Name);
+}
+
+test "Build stream event parses stream, error, and aux lines" {
+    const alloc = std.testing.allocator;
+
+    const stream_line = "{\"stream\":\"Step 1/2 : FROM alpine:3.20\\n\"}";
+    const s = try std.json.parseFromSlice(BuildStreamEvent, alloc, stream_line, .{});
+    defer s.deinit();
+    try std.testing.expectEqualStrings("Step 1/2 : FROM alpine:3.20\n", s.value.stream.?);
+    try std.testing.expect(s.value.@"error" == null);
+
+    const err_line = "{\"error\":\"build failed\",\"errorDetail\":{\"message\":\"exit 1\"}}";
+    const e = try std.json.parseFromSlice(BuildStreamEvent, alloc, err_line, .{});
+    defer e.deinit();
+    try std.testing.expectEqualStrings("build failed", e.value.@"error".?);
+    try std.testing.expectEqualStrings("exit 1", e.value.errorDetail.?.message);
+
+    const aux_line = "{\"aux\":{\"ID\":\"sha256:deadbeef\"}}";
+    const a = try std.json.parseFromSlice(BuildStreamEvent, alloc, aux_line, .{});
+    defer a.deinit();
+    try std.testing.expectEqualStrings("sha256:deadbeef", a.value.aux.?.ID);
 }
