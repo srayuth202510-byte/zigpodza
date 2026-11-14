@@ -33,13 +33,13 @@ flowchart TD
 
 | Module | Link | Responsibility | Allocation Owner / Deinit |
 | :--- | :--- | :--- | :--- |
-| Entry Point | [src/main.zig](../../src/main.zig) | Arg collection, config/log setup, command dispatch (`demo`/`audit`/`run`), GPA leak check | `ArenaAllocator` over `GeneralPurposeAllocator`; passes `gpa_allocator` to `demo`; asserts `gpa.deinit() != .leak` |
+| Entry Point | [src/main.zig](../../src/main.zig) | Arg collection, config/log setup, command dispatch (`demo`/`audit`/`run`), GPA leak check, best-effort container cleanup on `run` failure paths | `ArenaAllocator` over `GeneralPurposeAllocator`; passes `gpa_allocator` to `demo`; frees `createContainer` Id via `defer`; asserts `gpa.deinit() != .leak` |
 | Self-Test Demo | [src/demo.zig](../../src/demo.zig) | 14-case fail-closed ALLOW/DENY enforcement & mock lifecycle demo | Caller allocator (`gpa_allocator` / `std.testing.allocator`), temp `/tmp/zp-demo-*` cleaned via `defer` |
 | CLI Parser | [src/cli.zig](../../src/cli.zig) | Subcommands & flags (`run`, `ps`, `images`, `pull`, `stop`, `rm`, `logs`, `version`, `audit`, `demo`, `--memory`, `--pids-limit`, `--read-only`, `--no-new-privileges`) | `Parsed.deinit(allocator)` frees `r.env` |
-| Config | [src/config.zig](../../src/config.zig) | Socket auto-detection & log directory resolution | `Config.deinit(allocator)` frees owned `socket_path` and `log_dir` |
-| HTTP Client | [src/http.zig](../../src/http.zig) | HTTP/1.1 over Unix domain socket (`Content-Length`, chunked, `waitReadable` poll timeout) | `Response.deinit()` frees `body`; request buffer freed internally |
-| Podman API | [src/podman_api.zig](../../src/podman_api.zig) | Docker/Podman `/v1.40` endpoints, `HostConfig` hardening & `demuxLogs` | `createContainer` returns duped `Id` (caller frees); `std.json.Parsed` freed via `defer parsed.deinit()` |
-| Logger | [src/log.zig](../../src/log.zig) | ISO-8601 UTC logging to `system.log`, `error.log`, and SHA-256 hash-chained `audit.log` (`verifyAuditFile`) | Stack buffer `[4096]u8`; `Logger.deinit()` closes file handles |
+| Config | [src/config.zig](../../src/config.zig) | Socket auto-detection (warns on non-`unix://` `CONTAINER_HOST`/`DOCKER_HOST`) & log directory resolution | `Config.deinit(allocator)` frees owned `socket_path` and `log_dir` |
+| HTTP Client | [src/http.zig](../../src/http.zig) | HTTP/1.1 over Unix domain socket (`Content-Length`, chunked, per-read `waitReadable` poll, `blocking_timeout_ms` for wait/pull) | `Response.deinit()` frees `body`; request buffer freed internally |
+| Podman API | [src/podman_api.zig](../../src/podman_api.zig) | Docker/Podman `/v1.40` endpoints, `HostConfig` hardening & `demuxLogs`; `wait`/`pull` use `blocking_timeout_ms` (BUG-007) | `createContainer` returns duped `Id` (caller frees); `std.json.Parsed` freed via `defer parsed.deinit()` |
+| Logger | [src/log.zig](../../src/log.zig) | ISO-8601 UTC logging to `system.log`, `error.log`, and SHA-256 hash-chained `audit.log` (`verifyAuditFile`); audit writes take `flock` + re-read chain head; crash-interrupted tails repaired at init (BUG-008/009); files `0640` | Stack buffer `[4096]u8`; `Logger.deinit()` closes file handles |
 | Utils | [src/utils.zig](../../src/utils.zig) | `shortId`, `formatSize`, re-exports `log.zig` | Stack buffer formatting (no heap allocations) |
 
 ## Trust Boundaries

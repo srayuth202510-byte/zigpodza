@@ -43,10 +43,17 @@ pub const Logger = struct {
             return self;
         };
         defer dir.close();
-        self.system_file = openAppend(dir, "system.log");
-        self.error_file = openAppend(dir, "error.log");
-        self.last_hash = readLastAuditHash(dir);
-        self.audit_file = openAppend(dir, "audit.log");
+        self.system_file = openAppend(dir, "system.log", false);
+        self.error_file = openAppend(dir, "error.log", false);
+        self.audit_file = openAppend(dir, "audit.log", true);
+        if (self.audit_file) |f| {
+            // BUG-008/BUG-009: repair an interrupted tail and resume the chain
+            // under an exclusive lock so concurrent processes stay consistent.
+            lockAudit(f);
+            defer unlockAudit(f);
+            repairAuditTail(f);
+            self.last_hash = lastHashFromFd(f.handle);
+        }
         return self;
     }
 
@@ -86,12 +93,18 @@ pub const Logger = struct {
             const audit_msg = sanitizeAuditField(&audit_msg_buf, raw_msg);
             const ts_end = std.mem.indexOfScalar(u8, line.text, ' ') orelse 0;
             const ts_str = line.text[0..ts_end];
-            const entry_hash = computeEntryHash(ts_str, level.label(), &self.last_hash, audit_msg);
+            // BUG-009: hold an exclusive lock and re-read the current chain
+            // head from the file so interleaved zigpod processes never fork
+            // the hash chain.
+            lockAudit(f);
+            defer unlockAudit(f);
+            const prev_hash = lastHashFromFd(f.handle);
+            const entry_hash = computeEntryHash(ts_str, level.label(), &prev_hash, audit_msg);
             var audit_buf: [4400]u8 = undefined;
             if (std.fmt.bufPrint(&audit_buf, "{s}\t{s}\t{s}\t{s}\t{s}\n", .{
                 ts_str,
                 level.label(),
-                self.last_hash,
+                prev_hash,
                 entry_hash,
                 audit_msg,
             })) |audit_line| {
@@ -146,17 +159,61 @@ pub fn computeEntryHash(ts_str: []const u8, level_str: []const u8, prev_hash: *c
     return out;
 }
 
-fn readLastAuditHash(dir: std.fs.Dir) [64]u8 {
+fn lockAudit(f: std.fs.File) void {
+    std.posix.flock(f.handle, std.posix.LOCK.EX) catch {};
+}
+
+fn unlockAudit(f: std.fs.File) void {
+    std.posix.flock(f.handle, std.posix.LOCK.UN) catch {};
+}
+
+/// `pread` in a loop; short reads are normal for regular files.
+fn preadAll(fd: std.posix.fd_t, buf: []u8, offset: u64) usize {
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = std.posix.pread(fd, buf[total..], offset + total) catch break;
+        if (n == 0) break;
+        total += n;
+    }
+    return total;
+}
+
+/// BUG-008: truncate an incomplete trailing line left behind when a previous
+/// process crashed mid-append. The partial line was never committed to the
+/// chain (no successor ever referenced its hash), so removing it restores a
+/// verifiable chain instead of poisoning every future verification.
+fn repairAuditTail(f: std.fs.File) void {
+    const stat = f.stat() catch return;
+    if (stat.size == 0) return;
+    var buf: [8192]u8 = undefined;
+    const start: u64 = if (stat.size > buf.len) stat.size - buf.len else 0;
+    const n = preadAll(f.handle, &buf, start);
+    if (n == 0) return;
+    const last_nl = std.mem.lastIndexOfScalar(u8, buf[0..n], '\n') orelse {
+        // No newline in the window: either the whole file is one partial
+        // line (start == 0) or the partial tail exceeds the writer's max
+        // line size; only the former is safe to repair here.
+        if (start == 0) std.posix.ftruncate(f.handle, 0) catch {};
+        return;
+    };
+    const complete_end: u64 = start + @as(u64, last_nl) + 1;
+    if (complete_end < stat.size) {
+        std.posix.ftruncate(f.handle, complete_end) catch {};
+    }
+}
+
+/// Reads the hash of the last complete audit line directly from the file
+/// descriptor (usable both at init and for per-write re-reads under flock).
+fn lastHashFromFd(fd: std.posix.fd_t) [64]u8 {
     const genesis = [_]u8{'0'} ** 64;
-    const file = dir.openFile("audit.log", .{}) catch return genesis;
-    defer file.close();
-    const stat = file.stat() catch return genesis;
+    const f = std.fs.File{ .handle = fd };
+    const stat = f.stat() catch return genesis;
     if (stat.size == 0) return genesis;
 
     var buf: [8192]u8 = undefined;
     const start: u64 = if (stat.size > buf.len) stat.size - buf.len else 0;
-    file.seekTo(start) catch return genesis;
-    const n = file.readAll(&buf) catch return genesis;
+    const n = preadAll(fd, &buf, start);
+    if (n == 0) return genesis;
     const trimmed = std.mem.trimRight(u8, buf[0..n], "\r\n");
     if (trimmed.len == 0) return genesis;
 
@@ -175,17 +232,20 @@ fn readLastAuditHash(dir: std.fs.Dir) [64]u8 {
 }
 
 /// Verifies the SHA-256 hash chain in `path`. Returns the verified entry count.
+/// A trailing line without a terminating newline is an uncommitted partial
+/// write (crash mid-append, BUG-008): it is skipped, not counted, and is not
+/// treated as tampering.
 pub fn verifyAuditFile(allocator: std.mem.Allocator, path: []const u8) !usize {
     const content = try std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024 * 1024);
     defer allocator.free(content);
-
-    const trimmed = if (std.mem.endsWith(u8, content, "\n")) content[0 .. content.len - 1] else content;
-    if (trimmed.len == 0) return 0;
+    if (content.len == 0) return 0;
 
     var expected_prev = [_]u8{'0'} ** 64;
     var count: usize = 0;
-    var lines = std.mem.splitScalar(u8, trimmed, '\n');
+    var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |raw_line| {
+        if (lines.peek() == null) break; // trailing "" or uncommitted partial line
+        if (raw_line.len == 0) continue;
         const line = std.mem.trimRight(u8, raw_line, "\r");
         var parts = std.mem.splitScalar(u8, line, '\t');
         const ts_str = parts.next() orelse return AuditError.InvalidAuditFormat;
@@ -207,13 +267,14 @@ pub fn verifyAuditFile(allocator: std.mem.Allocator, path: []const u8) !usize {
 }
 
 /// Opens a file with O_APPEND so concurrent zigpod processes never overwrite each other.
-fn openAppend(dir: std.fs.Dir, name: []const u8) ?std.fs.File {
+/// `readable` requests RDWR (needed by the audit file for tail repair/re-reads).
+fn openAppend(dir: std.fs.Dir, name: []const u8, readable: bool) ?std.fs.File {
     const fd = std.posix.openat(dir.fd, name, .{
-        .ACCMODE = .WRONLY,
+        .ACCMODE = if (readable) .RDWR else .WRONLY,
         .CREAT = true,
         .APPEND = true,
         .CLOEXEC = true,
-    }, 0o644) catch |e| {
+    }, 0o640) catch |e| {
         std.debug.print("zigpod: warning: cannot open log file '{s}': {s}\n", .{ name, @errorName(e) });
         return null;
     };
@@ -340,4 +401,65 @@ test "verifyAuditFile detects single-byte tampering" {
     try tmp.dir.writeFile(.{ .sub_path = "audit.log", .data = content });
 
     try std.testing.expectError(AuditError.AuditTampered, verifyAuditFile(std.testing.allocator, audit_path));
+}
+
+test "incomplete audit tail is skipped by verify and repaired on next init" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir_path);
+
+    {
+        var logger = Logger.init(dir_path, false);
+        logger.echo_stderr = false;
+        logger.info("entry one", .{});
+        logger.deinit();
+    }
+
+    const audit_path = try std.fs.path.join(std.testing.allocator, &.{ dir_path, "audit.log" });
+    defer std.testing.allocator.free(audit_path);
+
+    // Simulate a crash mid-append: a partial line with no trailing newline.
+    {
+        const f = try tmp.dir.openFile("audit.log", .{ .mode = .read_write });
+        defer f.close();
+        try f.seekTo(try f.getEndPos());
+        try f.writeAll("crash-partial-line");
+    }
+
+    // BUG-008: the uncommitted tail must not be reported as tampering.
+    try std.testing.expectEqual(@as(usize, 1), try verifyAuditFile(std.testing.allocator, audit_path));
+
+    // Re-opening repairs (truncates) the partial tail and continues the chain.
+    var logger2 = Logger.init(dir_path, false);
+    logger2.echo_stderr = false;
+    logger2.info("after repair", .{});
+    logger2.deinit();
+    try std.testing.expectEqual(@as(usize, 2), try verifyAuditFile(std.testing.allocator, audit_path));
+}
+
+test "interleaved loggers keep the audit chain consistent (flock + re-read)" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir_path);
+
+    var logger_a = Logger.init(dir_path, false);
+    defer logger_a.deinit();
+    var logger_b = Logger.init(dir_path, false);
+    defer logger_b.deinit();
+    logger_a.echo_stderr = false;
+    logger_b.echo_stderr = false;
+
+    // BUG-009: both loggers initialized before either writes — without
+    // re-reading the chain head under the lock, the second writer would fork
+    // the hash chain and make verification fail.
+    logger_a.info("a one", .{});
+    logger_b.info("b two", .{});
+    logger_a.info("a three", .{});
+    logger_b.info("b four", .{});
+
+    const audit_path = try std.fs.path.join(std.testing.allocator, &.{ dir_path, "audit.log" });
+    defer std.testing.allocator.free(audit_path);
+    try std.testing.expectEqual(@as(usize, 4), try verifyAuditFile(std.testing.allocator, audit_path));
 }

@@ -80,7 +80,17 @@ fn run(gpa_allocator: std.mem.Allocator) u8 {
                     return 1;
                 };
             const count = log.verifyAuditFile(arena, audit_path) catch |e| {
-                stderr.print("zigpod: audit verification failed for '{s}': {s}\n", .{ audit_path, @errorName(e) }) catch {};
+                if (e == error.StreamTooLong) {
+                    stderr.print(
+                        "zigpod: audit file '{s}' exceeds the 64 MiB verification limit\n",
+                        .{audit_path},
+                    ) catch {};
+                } else {
+                    stderr.print(
+                        "zigpod: audit verification failed for '{s}': {s}\n",
+                        .{ audit_path, @errorName(e) },
+                    ) catch {};
+                }
                 return 1;
             };
             stdout.print("audit chain verified ({d} entries, path={s})\n", .{ count, audit_path }) catch {};
@@ -147,7 +157,12 @@ fn dispatch(
                 .HostConfig = host_cfg,
             };
             const id = try pod.createContainer(client, logger, req, r.name);
-            try pod.startContainer(client, logger, id);
+            defer client.allocator.free(id);
+            pod.startContainer(client, logger, id) catch |e| {
+                // BUG-012: never leave behind a container we just created.
+                pod.removeContainer(client, logger, id, true) catch {};
+                return e;
+            };
 
             if (r.detach) {
                 try stdout.print("{s}\n", .{id});
@@ -155,9 +170,16 @@ fn dispatch(
             }
 
             const status = try pod.waitContainer(client, logger, id);
-            try pod.fetchLogs(client, logger, id, stdout);
             if (r.remove) {
+                // BUG-012: honor --rm even when fetching logs fails; the
+                // container has already exited by the time wait returns.
+                pod.fetchLogs(client, logger, id, stdout) catch |e| {
+                    pod.removeContainer(client, logger, id, false) catch {};
+                    return e;
+                };
                 try pod.removeContainer(client, logger, id, false);
+            } else {
+                try pod.fetchLogs(client, logger, id, stdout);
             }
             if (status != 0) {
                 return if (status > 0 and status <= 255) @intCast(status) else 1;

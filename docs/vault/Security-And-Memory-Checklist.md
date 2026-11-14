@@ -28,16 +28,22 @@ status: active
 
 - [ ] `http.Client.request` เรียก `validateRequestTarget(path)` ก่อนเชื่อมต่อ socket
 - [ ] `http.Client.request` ใช้ `waitReadable` (`std.posix.poll`) บังคับ `timeout_ms` ไม่ให้ค้างถาวร
-- [ ] `http.decodeChunked` ใช้ `std.math.add`, ตรวจ `max_response_bytes`, และตรวจ trailer `\r\n`
+- [ ] การอ่าน response ทุก chunk ต้องผ่าน poll (`readAllWithTimeout`) ไม่ใช่เฉพาะ byte แรก (BUG-007)
+- [ ] `waitContainer` / `pullImage` ใช้ `blocking_timeout_ms` ไม่ใช่ default 30s (BUG-007)
+- [ ] `http.decodeChunked` ใช้ `std.math.add` ทุกการคำนวณขนาดรวมทั้ง projected total, ตรวจ `max_response_bytes`, และตรวจ trailer `\r\n` (BUG-010)
 - [ ] `podman_api.zig` เรียก `validateIdentifier` กับทุก `id` และ `name` ที่สร้าง URL
 - [ ] `podman_api.demuxLogs` ใช้ `std.math.add` และ fallback เมื่อ frame ไม่สมบูรณ์
 - [ ] Hardening flags (`-m`/`--memory`, `--pids-limit`, `--read-only`, `--no-new-privileges`) ใช้ checked `std.math.mul` และส่งผ่าน `HostConfig`
+- [ ] Lifecycle `run` มี best-effort cleanup: start fail → force-remove; `--rm` + fetchLogs fail → remove (BUG-012)
 
 ## 3. Logging, Tamper Evidence & Operations
 
 - [ ] บันทึกรายละเอียดระบบลง [system.log](../../system.log) และข้อผิดพลาดลง [error.log](../../error.log)
 - [ ] `audit.log` เชื่อมแต่ละบรรทัดด้วย SHA-256 hash chain และตรวจจับการแก้ไขได้ด้วย `zigpod audit` (`verifyAuditFile`)
-- [ ] `system.log` และ `error.log` ไม่เป็น world-writable (`o+w`)
+- [ ] การเขียน `audit.log` ใช้ `flock` + re-read chain head จากไฟล์ทุกครั้ง กัน multi-process desync (BUG-009)
+- [ ] Partial tail จาก crash ต้องถูก repair ตอน init และ `verifyAuditFile` ต้องไม่รายงานเป็น tampering (BUG-008)
+- [ ] `system.log` และ `error.log` ไม่เป็น world-writable (`o+w`) และ log ใหม่ต้องเป็น `0640` (BUG-013)
+- [ ] Timestamp จากทุกผู้เขียน log (Zig + shell scripts) ต้องเป็น ค.ศ. UTC — สคริปต์ต้อง pin `LC_ALL=C` (BUG-011)
 - [ ] `zigpod demo` ผ่านครบ 14 cases (fail-closed ALLOW/DENY) โดยใช้ `std.testing.allocator` ไม่ leak
 - [ ] CI / `Makefile` / Vault parity ผ่าน `python3 scripts/check-ci-parity.py`, `scripts/smoke.sh`, และ `scripts/graph-query.py`
 - [ ] Release binary (`zig build -Doptimize=ReleaseSafe`) ไม่มี executable stack (`GNU_STACK` ต้องไม่เป็น `RWE`) และไม่มี `RWX` PT_LOAD segment

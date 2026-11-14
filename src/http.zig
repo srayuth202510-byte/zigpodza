@@ -6,6 +6,11 @@ const std = @import("std");
 /// Upper bound on a response body (image pulls stream a lot of progress JSON).
 pub const max_response_bytes = 64 * 1024 * 1024;
 pub const default_timeout_ms: i32 = 30_000;
+/// Long ceiling for endpoints that legitimately stay silent for a long time:
+/// `POST /containers/{id}/wait` answers only when the container exits and
+/// `POST /images/create` streams a pull that can pause for minutes on big
+/// layers (BUG-007). Each socket read still gets poll-enforced separately.
+pub const blocking_timeout_ms: i32 = 12 * 60 * 60 * 1000;
 
 pub const Error = error{
     SocketNotFound,
@@ -49,12 +54,47 @@ fn waitReadable(fd: std.posix.fd_t, timeout_ms: i32) !void {
     if (ready == 0) return Error.Timeout;
 }
 
+/// Reads the full response until EOF, enforcing `timeout_ms` on *every* read
+/// (not just the first byte) so a daemon that stalls mid-response cannot hang
+/// the process forever (BUG-007).
+fn readAllWithTimeout(
+    stream: std.net.Stream,
+    allocator: std.mem.Allocator,
+    max_size: usize,
+    timeout_ms: i32,
+) ![]u8 {
+    var out = std.ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+    var chunk: [16384]u8 = undefined;
+    while (true) {
+        try waitReadable(stream.handle, timeout_ms);
+        const n = try stream.read(&chunk);
+        if (n == 0) break; // EOF: server honored "Connection: close"
+        try out.appendSlice(chunk[0..n]);
+        if (out.items.len > max_size) return error.StreamTooLong;
+    }
+    return out.toOwnedSlice();
+}
+
 pub const Client = struct {
     allocator: std.mem.Allocator,
     socket_path: []const u8,
     timeout_ms: i32 = default_timeout_ms,
 
     pub fn request(self: Client, method: []const u8, path: []const u8, body: ?[]const u8) !Response {
+        return self.requestWithTimeout(method, path, body, self.timeout_ms);
+    }
+
+    /// Same as `request` but with an explicit per-call read timeout. Endpoints
+    /// that block until an external event (container exit, image pull) pass
+    /// `blocking_timeout_ms` instead of the short default (BUG-007).
+    pub fn requestWithTimeout(
+        self: Client,
+        method: []const u8,
+        path: []const u8,
+        body: ?[]const u8,
+        timeout_ms: i32,
+    ) !Response {
         try validateRequestTarget(path);
 
         const stream = std.net.connectUnixSocket(self.socket_path) catch |e| return switch (e) {
@@ -79,8 +119,7 @@ pub const Client = struct {
         }
         try stream.writeAll(req.items);
 
-        try waitReadable(stream.handle, self.timeout_ms);
-        const raw = try stream.reader().readAllAlloc(self.allocator, max_response_bytes);
+        const raw = try readAllWithTimeout(stream, self.allocator, max_response_bytes, timeout_ms);
         defer self.allocator.free(raw);
         return parseResponse(self.allocator, raw);
     }
@@ -140,7 +179,11 @@ fn decodeChunked(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
             if (term_end > data.len) return Error.InvalidResponse;
             break;
         }
-        if (size > max_response_bytes or out.items.len + size > max_response_bytes) {
+        // BUG-010: the projected total must use checked arithmetic too — a
+        // huge `size` combined with already-buffered bytes would overflow a
+        // plain `+` in Debug/ReleaseSafe builds.
+        const projected = std.math.add(usize, out.items.len, size) catch return Error.InvalidResponse;
+        if (size > max_response_bytes or projected > max_response_bytes) {
             return Error.InvalidResponse;
         }
         const data_end = std.math.add(usize, pos, size) catch return Error.InvalidResponse;
@@ -329,4 +372,105 @@ test "Client.request returns Error.Timeout when server does not respond" {
         .timeout_ms = 20,
     };
     try std.testing.expectError(Error.Timeout, client.request("GET", "/v1.40/_ping", null));
+}
+
+const PartialStallCtx = struct {
+    server: *std.net.Server,
+    done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+};
+
+/// BUG-007 regression: sends a complete header plus a partial body, then
+/// stalls without closing the connection. The old implementation blocked
+/// forever inside `readAllAlloc` because the timeout only covered the first
+/// byte; the new per-read poll must raise `Error.Timeout`.
+fn runPartialStallServer(ctx: *PartialStallCtx) void {
+    const conn = ctx.server.accept() catch return;
+    defer conn.stream.close();
+    conn.stream.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nabcd") catch return;
+    while (!ctx.done.load(.acquire)) {
+        std.time.sleep(2 * std.time.ns_per_ms);
+    }
+}
+
+test "Client.request times out when response stream stalls mid-body" {
+    const sock_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "/tmp/zp-http-stall-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer std.testing.allocator.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    var ctx = PartialStallCtx{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, runPartialStallServer, .{&ctx});
+    var joined = false;
+    defer {
+        ctx.done.store(true, .release);
+        if (!joined) thread.join();
+    }
+
+    const client = Client{
+        .allocator = std.testing.allocator,
+        .socket_path = sock_path,
+        .timeout_ms = 30,
+    };
+    try std.testing.expectError(Error.Timeout, client.request("GET", "/v1.40/_ping", null));
+
+    ctx.done.store(true, .release);
+    thread.join();
+    joined = true;
+}
+
+fn runDelayedServer(server: *std.net.Server) void {
+    const conn = server.accept() catch return;
+    defer conn.stream.close();
+    // Drain the request first: closing with unread data pending makes the
+    // kernel send RST instead of a clean FIN.
+    var buf: [4096]u8 = undefined;
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = conn.stream.read(buf[total..]) catch return;
+        if (n == 0) break;
+        total += n;
+        if (std.mem.indexOf(u8, buf[0..total], "\r\n\r\n") != null) break;
+    }
+    std.time.sleep(150 * std.time.ns_per_ms);
+    conn.stream.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") catch {};
+}
+
+test "requestWithTimeout overrides short client default for blocking endpoints" {
+    const sock_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "/tmp/zp-http-delayed-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer std.testing.allocator.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const thread = try std.Thread.spawn(.{}, runDelayedServer, .{&server});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = Client{
+        .allocator = std.testing.allocator,
+        .socket_path = sock_path,
+        .timeout_ms = 30,
+    };
+    // Default timeout would fail; the explicit long timeout must succeed.
+    const resp = try client.requestWithTimeout("GET", "/v1.40/_ping", null, 10_000);
+    defer resp.deinit();
+
+    thread.join();
+    joined = true;
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expectEqualStrings("ok", resp.body);
 }

@@ -54,6 +54,12 @@ fn resolveSocket(allocator: std.mem.Allocator, socket_override: ?[]const u8) ![]
             if (std.mem.startsWith(u8, s, "unix://")) {
                 return allocator.dupe(u8, stripUnixScheme(s));
             }
+            // Do not silently ignore a user-configured remote/other-scheme
+            // host; say so before falling back to auto-detection.
+            std.debug.print(
+                "zigpod: warning: {s}='{s}' is not a unix:// socket; using auto-detected socket instead\n",
+                .{ name, s },
+            );
         }
     }
 

@@ -10,7 +10,10 @@ if [[ "${1:-}" == "--hook" ]]; then
     cat >/dev/null || true
 fi
 
-TIMESTAMP="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+# BUG-011: force the C locale so the timestamp is always Gregorian UTC.
+# Under e.g. LC_TIME=th_TH.UTF-8 a bare `date +%Y` yields the Buddhist Era
+# year, which would mix two calendars inside system.log.
+TIMESTAMP="$(LC_ALL=C date -u '+%Y-%m-%dT%H:%M:%SZ')"
 FAILURES=0
 REPORT=""
 

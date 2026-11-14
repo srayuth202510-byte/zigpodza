@@ -197,7 +197,9 @@ pub fn waitContainer(client: *const http.Client, logger: *log.Logger, id: []cons
     defer client.allocator.free(path);
 
     logger.debug("POST {s}", .{path});
-    const resp = try client.request("POST", path, null);
+    // The daemon holds this response until the container exits, which can
+    // legitimately take hours — use the blocking timeout, not the default (BUG-007).
+    const resp = try client.requestWithTimeout("POST", path, null, http.blocking_timeout_ms);
     defer resp.deinit();
 
     if (!resp.ok()) return logApiFailure(logger, "POST", path, resp);
@@ -298,7 +300,9 @@ pub fn pullImage(client: *const http.Client, logger: *log.Logger, image: []const
     try appendQueryEncoded(&path_buf, image);
 
     logger.info("pulling image {s}", .{image});
-    const resp = try client.request("POST", path_buf.items, null);
+    // Pulls stream progress for minutes on large layers and may pause while
+    // extracting — use the blocking timeout, not the default (BUG-007).
+    const resp = try client.requestWithTimeout("POST", path_buf.items, null, http.blocking_timeout_ms);
     defer resp.deinit();
 
     if (!resp.ok()) return logApiFailure(logger, "POST", path_buf.items, resp);
@@ -502,8 +506,49 @@ test "JSON deserialize ImageSummary list" {
     try std.testing.expectEqualStrings("docker.io/library/alpine:3.20", parsed.value[0].RepoTags.?[0]);
 }
 
-fn readHttpRequest(stream: std.net.Stream, buf: []u8) ![]const u8 {
-    var total: usize = 0;
+fn runDelayedWaitServer(server: *std.net.Server) void {
+    const conn = server.accept() catch return;
+    defer conn.stream.close();
+    var buf: [4096]u8 = undefined;
+    _ = readHttpRequest(conn.stream, &buf) catch return;
+    // BUG-007 regression: the daemon holds /wait until the container exits.
+    // The reply arrives well after the client's short default timeout.
+    std.time.sleep(150 * std.time.ns_per_ms);
+    conn.stream.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\n{\"StatusCode\":0}") catch return;
+}
+
+test "waitContainer uses the blocking timeout when daemon delays response" {
+    const sock_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "/tmp/zp-api-delayed-wait-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer std.testing.allocator.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const thread = try std.Thread.spawn(.{}, runDelayedWaitServer, .{&server});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{
+        .allocator = std.testing.allocator,
+        .socket_path = sock_path,
+        .timeout_ms = 30,
+    };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    const status = try waitContainer(&client, &logger, "abcdef123456");
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(@as(i64, 0), status);
+}
+
+fn readHttpRequest(stream: std.net.Stream, buf: []u8) ![]const u8 {    var total: usize = 0;
     var header_end: ?usize = null;
     var expected_total: ?usize = null;
     while (total < buf.len) {

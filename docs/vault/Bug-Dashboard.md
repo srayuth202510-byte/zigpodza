@@ -19,9 +19,9 @@ status: active
 
 | Metric | Value |
 | :--- | :--- |
-| Tracked Bug Patterns | **6** (6 Guarded) |
+| Tracked Bug Patterns | **13** (13 Guarded) |
 | Zig Source Modules | **8** |
-| Unit & Integration Tests | **39** |
+| Unit & Integration Tests | **44** |
 | Static Security & Memory Gates | **9/9 PASS** |
 
 ## Guard Coverage Map
@@ -45,6 +45,21 @@ flowchart LR
     BUG006["BUG-006"] --> SEC["[[Security-And-Memory-Checklist]]"]
     BUG006 --> scripts_auto_audit_sh["scripts/auto-audit.sh"]
     BUG006 --> _github_workflows_ci_yml[".github/workflows/ci.yml"]
+    BUG007["BUG-007"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG007 --> src_http_zig["src/http.zig"]
+    BUG007 --> src_podman_api_zig["src/podman_api.zig"]
+    BUG008["BUG-008"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG008 --> src_log_zig["src/log.zig"]
+    BUG009["BUG-009"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG009 --> src_log_zig["src/log.zig"]
+    BUG010["BUG-010"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG010 --> src_http_zig["src/http.zig"]
+    BUG011["BUG-011"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG011 --> scripts_auto_audit_sh["scripts/auto-audit.sh"]
+    BUG012["BUG-012"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG012 --> src_main_zig["src/main.zig"]
+    BUG013["BUG-013"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG013 --> src_log_zig["src/log.zig"]
 ```
 
 ## Bug Pattern Registry
@@ -57,18 +72,25 @@ flowchart LR
 | [BUG-004](../../docs/vault/Bug-Playbook.md#L49) | Integer Overflow & OOB Read in Chunked / Frame Decoders | `#bug-pattern` `#security-gate` | [http.zig](../../src/http.zig), [podman_api.zig](../../src/podman_api.zig) | **Guarded** |
 | [BUG-005](../../docs/vault/Bug-Playbook.md#L60) | Path Traversal & CRLF Injection via Container ID / Path | `#bug-pattern` `#security-gate` | [podman_api.zig](../../src/podman_api.zig), [http.zig](../../src/http.zig) | **Guarded** |
 | [BUG-006](../../docs/vault/Bug-Playbook.md#L71) | Missing `ripgrep` (`rg`) on CI Runners Causing `auto-audit.sh` Failure | `#bug-pattern` `#security-gate` | [auto-audit.sh](../../scripts/auto-audit.sh), [ci.yml](../../.github/workflows/ci.yml) | **Guarded** |
+| [BUG-007](../../docs/vault/Bug-Playbook.md#L82) | Half-Enforced Socket Timeout (Wait/Pull Fail Early or Hang Forever) | `#bug-pattern` `#security-gate` | [http.zig](../../src/http.zig), [podman_api.zig](../../src/podman_api.zig) | **Guarded** |
+| [BUG-008](../../docs/vault/Bug-Playbook.md#L95) | Crash-Interrupted Audit Tail Poisons the Whole Hash Chain | `#bug-pattern` `#memory-safety` | [log.zig](../../src/log.zig) | **Guarded** |
+| [BUG-009](../../docs/vault/Bug-Playbook.md#L107) | Concurrent Logger Writers Fork the Audit Hash Chain | `#bug-pattern` `#memory-safety` | [log.zig](../../src/log.zig) | **Guarded** |
+| [BUG-010](../../docs/vault/Bug-Playbook.md#L120) | Unchecked Add in `decodeChunked` Depends on Short-Circuit Order | `#bug-pattern` `#security-gate` | [http.zig](../../src/http.zig) | **Guarded** |
+| [BUG-011](../../docs/vault/Bug-Playbook.md#L129) | Locale-Dependent (Buddhist Era) Timestamps in Shell Scripts | `#bug-pattern` | [auto-audit.sh](../../scripts/auto-audit.sh) | **Guarded** |
+| [BUG-012](../../docs/vault/Bug-Playbook.md#L138) | Missing Cleanup Paths in the `run` Container Lifecycle | `#bug-pattern` `#reliability` | [main.zig](../../src/main.zig) | **Guarded** |
+| [BUG-013](../../docs/vault/Bug-Playbook.md#L150) | World-Readable Log Files | `#bug-pattern` `#security-gate` | [log.zig](../../src/log.zig) | **Guarded** |
 
 ## Module Test & Allocator Coverage
 
 | Module | Lines | Public Decls | Unit Tests | Memory Gate |
 | :--- | ---: | ---: | ---: | :--- |
 | [cli.zig](../../src/cli.zig) | 480 | 11 | 8 | `std.testing.allocator` |
-| [config.zig](../../src/config.zig) | 112 | 4 | 4 | `std.testing.allocator` |
+| [config.zig](../../src/config.zig) | 118 | 4 | 4 | `std.testing.allocator` |
 | [demo.zig](../../src/demo.zig) | 379 | 1 | 1 | `std.testing.allocator` |
-| [http.zig](../../src/http.zig) | 332 | 10 | 9 | `std.testing.allocator` |
-| [log.zig](../../src/log.zig) | 343 | 16 | 5 | `std.testing.allocator` |
-| [main.zig](../../src/main.zig) | 216 | 2 | 0 | `gpa.deinit() != .leak` |
-| [podman_api.zig](../../src/podman_api.zig) | 710 | 21 | 10 | `std.testing.allocator` |
+| [http.zig](../../src/http.zig) | 476 | 12 | 11 | `std.testing.allocator` |
+| [log.zig](../../src/log.zig) | 465 | 16 | 7 | `std.testing.allocator` |
+| [main.zig](../../src/main.zig) | 238 | 2 | 0 | `gpa.deinit() != .leak` |
+| [podman_api.zig](../../src/podman_api.zig) | 755 | 21 | 11 | `std.testing.allocator` |
 | [utils.zig](../../src/utils.zig) | 42 | 3 | 2 | `stack-only (no heap)` |
 
 ## Static Security & Memory Gates
@@ -128,3 +150,52 @@ flowchart LR
 - **Root Cause**: `scripts/auto-audit.sh` เรียก `rg` โดยตรงโดยไม่มี fallback เมื่อไม่มี binary `rg` ทำให้เกิด exit code `127`: ตรวจเชิงบวก (`if rg -q ...`) ล้มเหลวทั้งหมด และตรวจเชิงลบ (`if rg -n ... >/dev/null 2>&1`) ซ่อน stderr จนกลายเป็น false-pass
 - **Fix**: เพิ่ม helper `has_match()` ใน `scripts/auto-audit.sh` ให้ใช้ `rg -q` เป็นหลักและ fallback เป็น `grep -REq` เมื่อไม่มี `rg`; เพิ่ม step ติดตั้ง `ripgrep` ใน `ci.yml`
 - **Prevention**: สคริปต์ตรวจอัตโนมัติที่รันบน CI ต้องตรวจ `command -v <tool>` พร้อม fallback หรือติดตั้ง dependency ใน `ci.yml` ให้ครบ และทดสอบกรณีไม่มีเครื่องมือด้วย
+
+### BUG-007 — Half-Enforced Socket Timeout (Wait/Pull Fail Early or Hang Forever)
+- **Source**: [docs/vault/Bug-Playbook.md:82](../../docs/vault/Bug-Playbook.md#L82) · **Status**: `Guarded`
+- **Symptom**: `zigpod run` แบบ attached ล้มเหลวด้วย `Error.Timeout` เมื่อ container ทำงานเกิน 30 วินาที (Podman `POST /containers/{id}/wait` จะไม่ส่ง response จนกว่า container จะจบ) ในทางกลับกัน หาก daemon ส่งข้อมูลชุดแรกแล้วค้างกลางทาง (เช่น `pull` ระหว่าง network หลุดแต่ยังไม่ปิด connection) `readAllAlloc` จะ block ตลอดกาลโดยไม่มี timeout
+- **Root Cause**: ใน `src/http.zig` เดิม `Client.request` เรียก `waitReadable` (poll) เพียง**ครั้งเดียวก่อน byte แรก** แล้วส่งต่อให้ `readAllAlloc` อ่านจน EOF โดยไม่มีการ poll อีก — timeout ถูกบังคับเฉพาะ "รอ byte แรก" เท่านั้น และ `waitContainer`/`pullImage` ใช้ default timeout 30s ทั้งที่ endpoint เหล่านี้ตั้งใจให้เงียบนาน
+- **Fix**: เพิ่ม `readAllWithTimeout` ใน `src/http.zig` ที่ poll ก่อน**ทุกการอ่าน** (ไม่ใช่แค่ครั้งแรก) จนกว่าจะได้ EOF พร้อม enforce `max_response_bytes`; เพิ่ม `Client.requestWithTimeout` และ `http.blocking_timeout_ms` (12 ชม.) สำหรับ endpoint ที่ block ตาม external event; `waitContainer` และ `pullImage` ใน `src/podman_api.zig` ใช้ `requestWithTimeout(..., blocking_timeout_ms)`; เพิ่มเทส regression: stream ที่ค้างกลาง body ต้องได้ `Error.Timeout` ภายใน timeout สั้น ๆ และ server ที่ตอบช้ากว่า default timeout ต้องผ่านเมื่อใช้ long timeout
+- **Prevention**: ห้ามอ่าน socket โดยไม่ poll ก่อนทุกครั้ง; endpoint ที่ block ตาม external event ต้องประกาศ timeout ของตัวเอง (`blocking_timeout_ms`) ไม่ใช่ยืม default 30s ของ request ทั่วไป
+
+### BUG-008 — Crash-Interrupted Audit Tail Poisons the Whole Hash Chain
+- **Source**: [docs/vault/Bug-Playbook.md:95](../../docs/vault/Bug-Playbook.md#L95) · **Status**: `Guarded`
+- **Symptom**: หากกระบวนการตายกลางการเขียนบรรทัดสุดท้ายของ `audit.log` (partial line ไม่มี `\n`) การรันครั้งถัดไปจะ fallback ไป genesis hash ทำให้ทุก entry ใหม่มี `prev_hash` ไม่ตรงกับท้ายไฟล์ และ `zigpod audit` รายงาน `AuditTampered` **ทั้งไฟล์** แม้ไม่มีใครแก้ไข
+- **Root Cause**: `readLastAuditHash` เดิม parse บรรทัดสุดท้ายแบบไม่แยกแยะ "บรรทัดที่ยังไม่ commit" (hash ไม่ครบ 64 ตัว → genesis) จาก "การ tamper จริง" และ `verifyAuditFile` ถือว่าทุก segment เป็น entry ที่ commit แล้ว
+- **Fix**: เพิ่ม `repairAuditTail` ใน `src/log.zig`: ตอน `Logger.init` ใต้ flock ให้ truncate บรรทัดสุดท้ายที่ไม่สมบูรณ์ออกก่อน append ต่อ; `verifyAuditFile` ข้าม segment สุดท้ายที่ไม่มี `\n` ปิดท้าย (ไม่นับเป็น entry และไม่รายงาน tamper) — บรรทัดกลางไฟล์ที่ malformed ยังคง fail ตามเดิม; เพิ่มเทส: partial tail ต้องไม่ทำ verify ล้มเหลว และ init ครั้งถัดไปต้อง repair แล้วต่อ chain ได้
+- **Prevention**: ระบบ hash-chain ต้องแยกพฤติกรรม "uncommitted tail" (crash) ออกจาก "tampering" เสมอ และต้อง repair ตอน re-open ภายใต้ lock
+
+### BUG-009 — Concurrent Logger Writers Fork the Audit Hash Chain
+- **Source**: [docs/vault/Bug-Playbook.md:107](../../docs/vault/Bug-Playbook.md#L107) · **Status**: `Guarded`
+- **Symptom**: เมื่อรัน zigpod มากกว่าหนึ่ง process พร้อมกัน (เช่น `run` ค้างไว้แล้วเปิดอีก terminal) ทุก process อ่าน `last_hash` เดียวกันตอน init แล้วเขียนแทรกสลับกัน ทำให้ `prev_hash` ของ entry ไม่ตรงกับบรรทัดก่อนหน้าจริง และ `zigpod audit` รายงาน tampered ทั้งไฟล์
+- **Root Cause**: `O_APPEND` (src/log.zig `openAppend`) กัน overwrite ได้ แต่ไม่กัน hash-chain desync: hash ถูกคำนวณจาก state ในหน่วยความจำของแต่ละ process ไม่ใช่ state จริงล่าสุดของไฟล์
+- **Fix**: เพิ่ม `lockAudit`/`unlockAudit` (`std.posix.flock` `LOCK.EX`/`LOCK.UN`) ใน `src/log.zig`; ทุกครั้งที่เขียน audit: lock → re-read chain head จากไฟล์ (`lastHashFromFd`) → คำนวณ hash → append → unlock; `Logger.init` ก็ทำ repair + อ่าน hash ใต้ lock เช่นกัน; เพิ่มเทส: logger สองตัวเขียนสลับกันแล้ว `verifyAuditFile` ต้องผ่านครบทุก entry
+- **Prevention**: โครงสร้าง hash-chained ที่เขียนจากหลาย process ต้องอ่าน state ล่าสุดใต้ exclusive lock ทุกครั้งก่อนคำนวณ hash ถัดไป ห้ามพึ่ง state ในหน่วยความจำ
+
+### BUG-010 — Unchecked Add in `decodeChunked` Depends on Short-Circuit Order
+- **Source**: [docs/vault/Bug-Playbook.md:120](../../docs/vault/Bug-Playbook.md#L120) · **Status**: `Guarded`
+- **Symptom**: ตรวจพบตอน code review: `out.items.len + size > max_response_bytes` ใน `src/http.zig` ใช้ `+` ธรรมดาแทน `std.math.add` — ตอนนี้ปลอดภัยเพราะเงื่อนไข `size > max_response_bytes` ถูกประเมินก่อนแล้ว short-circuit ออก (ยืนยันด้วย repro: chunk size `FFFFFFFFFFFFFFFF` ตัดทิ้งด้วย `InvalidResponse` ไม่ panic) แต่ถ้า refactor สลับลำดับเงื่อนไข จะกลายเป็น integer overflow panic ใน Debug/ReleaseSafe ทันทีเมื่อ chunk ก่อนหน้ามีข้อมูลอยู่แล้ว
+- **Root Cause**: กฎของ BUG-004 ("ทุกขนาด/offset ต้องผ่าน `std.math.add`") ถูกทำให้ "ผ่านแบบบังเอิญ" จาก evaluation order ของ `or` แทนที่จะถูกบังคับด้วย checked arithmetic โดยตรง
+- **Fix**: เปลี่ยนเป็น `const projected = std.math.add(usize, out.items.len, size) catch return Error.InvalidResponse;` ก่อนเช็ค `max_response_bytes`
+- **Prevention**: ห้ามพึ่ง short-circuit order เพื่อกัน integer overflow — คำนวณขนาดที่มาจาก socket ต้องใช้ `std.math.add` ตั้งแต่บรรทัดแรก ไม่ว่าเงื่อนไขข้างเคียงจะ "ช่วย" ก็ตาม
+
+### BUG-011 — Locale-Dependent (Buddhist Era) Timestamps in Shell Scripts
+- **Source**: [docs/vault/Bug-Playbook.md:129](../../docs/vault/Bug-Playbook.md#L129) · **Status**: `Guarded`
+- **Symptom**: ใน `system.log` พบ timestamp สองปฏิทินปนกัน: entry จาก `scripts/auto-audit.sh` เป็นปี พ.ศ. (`2569-...`) ขณะที่ entry จาก Zig Logger เป็น ค.ศ. (`2026-...`) ทำให้ sort/grep ตามเวลาเพี้ยนและ dashboard parse ผิด
+- **Root Cause**: เครื่อง dev ตั้ง `LC_TIME=th_TH.UTF-8` ทำให้ `date -u '+%Y...'` คืนปี Buddhist Era (ปีจริงของระบบเป็น ค.ศ. ถูกต้อง) ส่วน Zig `writeTimestamp` คำนวณจาก epoch เสมอ
+- **Fix**: เปลี่ยนเป็น `TIMESTAMP="$(LC_ALL=C date -u '+%Y-%m-%dT%H:%M:%SZ')"` ใน `scripts/auto-audit.sh`
+- **Prevention**: สคริปต์ที่เขียน log ร่วมกับ runtime ต้อง pin locale (`LC_ALL=C`) เมื่อ format timestamp และต้อง cross-check รูปแบบกับ entry จาก runtime อื่นในไฟล์เดียวกัน
+
+### BUG-012 — Missing Cleanup Paths in the `run` Container Lifecycle
+- **Source**: [docs/vault/Bug-Playbook.md:138](../../docs/vault/Bug-Playbook.md#L138) · **Status**: `Guarded`
+- **Symptom**: (1) `startContainer` ล้มเหลวหลัง `createContainer` สำเร็จ → container ถูกสร้างค้างเป็น orphan (2) `zigpod run --rm` แบบ attached: ถ้า `fetchLogs` ล้มเหลว container ไม่ถูกลบตามที่ผู้ใช้สั่ง (3) `id` ที่ได้จาก `createContainer` ไม่เคยถูก free ใน `dispatch` (ปลอดภัยเพราะ arena แต่ขัด contract "caller frees" ใน [[Architecture-Map]])
+- **Root Cause**: `dispatch` ใน `src/main.zig` ใช้ `try` ตรง ๆ ทุก step โดยไม่มี cleanup path; `AutoRemove` ถูกตั้งเฉพาะเมื่อ detach (เพื่อไม่ให้ daemon ลบ container ก่อน fetchLogs) แต่ไม่มี best-effort removal เมื่อ pipeline สะดุด
+- **Fix**: `startContainer` fail → best-effort `removeContainer(force=true)` ทิ้งก่อนคืน error; `fetchLogs` fail เมื่อมี `--rm` → best-effort `removeContainer` (container จบแล้วหลัง wait) ก่อนคืน error; เพิ่ม `defer client.allocator.free(id)` ให้ตรง contract
+- **Prevention**: lifecycle ที่สร้าง resource บน daemon ต้องมี best-effort cleanup ทุก failure path หลังจุดที่ resource เกิดขึ้น และ ownership ของ allocation ต้องตรงกับเอกสารเสมอ
+
+### BUG-013 — World-Readable Log Files
+- **Source**: [docs/vault/Bug-Playbook.md:150](../../docs/vault/Bug-Playbook.md#L150) · **Status**: `Guarded`
+- **Symptom**: `system.log` / `error.log` / `audit.log` ถูกสร้างด้วย mode `0644` — ผู้ใช้อื่นบนเครื่องอ่านได้ ทั้งที่มี container/image IDs, ชื่อ image และข้อความ error จาก daemon
+- **Root Cause**: `openAppend` ใน `src/log.zig` ใช้ `0o644`; เช็กลิสต์เดิมบังคับแค่ "ไม่ world-writable" จึงไม่มีใครสังเกต
+- **Fix**: ลด mode เป็น `0o640` และ `chmod 640` ไฟล์ที่มีอยู่แล้วใน repository
+- **Prevention**: ไฟล์ log/audit ที่สร้างใหม่ต้องใช้ `0o640` ขึ้นไป (group-readable ได้ แต่ห้าม other-readable/world-writable) และ `security-check.sh` ต้องรายงาน mode ปัจจุบันทุกครั้ง
