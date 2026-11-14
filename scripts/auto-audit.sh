@@ -107,6 +107,13 @@ else
     fail "Missing validateResourceRef() inspect path guard in src/podman_api.zig (see BUG-017)."
 fi
 
+# 5f. Require the exec lifecycle validation (BUG-018)
+if has_match "pub fn createExec\(" "src/podman_api.zig" && has_match "pub fn startExec\(" "src/podman_api.zig" && has_match "try validateIdentifier\(exec_id\)" "src/podman_api.zig"; then
+    pass "createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig."
+else
+    fail "Missing createExec()/startExec() validation in src/podman_api.zig (see BUG-018)."
+fi
+
 # 6. Require checked arithmetic in parsers & decoders
 if has_match "std\.math\.add" "src/http.zig" && has_match "std\.math\.add" "src/podman_api.zig" && has_match "std\.math\.mul" "src/cli.zig"; then
     pass "Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser."

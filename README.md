@@ -121,6 +121,9 @@ zigpod logs demo-alpine
 zigpod inspect demo-alpine
 zigpod inspect alpine:3.20
 
+# Run a command in a live container (exit code is propagated)
+zigpod exec demo-alpine ls -la
+
 # Stop and remove a container
 zigpod stop demo-alpine
 zigpod rm -f demo-alpine
@@ -170,6 +173,7 @@ zig build test
 - Port-publishing validator (`validatePortMapping`), `ExposedPorts`/`PortBindings` JSON serialization และ CLI `-p` parsing (`src/cli.zig`, `src/podman_api.zig`)
 - Network/identity/capability validators (`validateNetworkMode`, `validateWorkdir`, `validateUser`, `validateCapability`) และ CLI `--network`/`-w`/`-u`/`--cap-*` parsing (`src/cli.zig`, `src/podman_api.zig`)
 - Container/image inspect (`inspect` → `GET /containers/{id}/json` แล้ว fallback `GET /images/{name}/json`) พร้อม `validateResourceRef()` ป้องกัน request-line injection (`src/podman_api.zig`)
+- Exec (`exec` → `POST /containers/{id}/exec` + `POST /exec/{id}/start` + `GET /exec/{id}/json`) พร้อม demultiplex output, propagation ของ exit code และ validation ของ exec ID (`src/podman_api.zig`)
 
 ---
 
@@ -186,6 +190,7 @@ zig build test
   - `podman_api.validatePortMapping` (BUG-015) ปฏิเสธพอร์ตนอกช่วง `1..65535`, โปรโตคอลที่ไม่อยู่ใน allow-list (`tcp`/`udp`/`sctp`) และ host address ที่ไม่ใช่ IPv4 literal ก่อนส่งคำขอไปยัง daemon
   - `podman_api.validateNetworkMode` / `validateWorkdir` / `validateUser` / `validateCapability` (BUG-016) จำกัด `--network` เป็น allow-list, บังคับ `--workdir` เป็น absolute traversal-free path, ตรวจรูปแบบ `--user` และปฏิเสธชื่อ capability ที่ไม่ใช่ `ALL`/uppercase ก่อนส่งคำขอไปยัง daemon
   - `podman_api.validateResourceRef` (BUG-017) จำกัด `inspect` target ให้เป็น image/container reference เท่านั้น (ตัด space, control char, `?`, `#`) เพื่อป้องกัน HTTP request-line injection
+  - `podman_api.createExec`/`startExec`/`inspectExec` (BUG-018) ตรวจ container ID, `--user`, `--workdir` และ exec ID ที่ได้จาก daemon ก่อนนำไปประกอบ URL, demultiplex output stream และคืนค่า exit code ของคำสั่ง
 - **Automated Security Check Script**:
 
 ```bash
@@ -257,6 +262,10 @@ zigpod run --rm -m 64m --pids-limit 32 --read-only --no-new-privileges alpine:3.
 #### Inspecting Containers & Images (`inspect`)
 
 `zigpod inspect TARGET` tries `GET /containers/{id}/json` first and falls back to `GET /images/{name}/json` on `404`, printing a stable subset of fields: id, name, image, created, state/exit code, IP address, `WorkingDir`/`User`, `HostConfig` hardening limits (`NetworkMode`, `ReadonlyRootfs`, `Memory`, `PidsLimit`, `AutoRemove`, `CapDrop`/`CapAdd`, `SecurityOpt`), and mounts. `podman_api.validateResourceRef` (BUG-017) accepts image-reference characters (`/`, `:`, `@`) but rejects spaces, control characters, `?`, and `#` so the target cannot alter the HTTP request line.
+
+#### Running Commands in a Live Container (`exec`)
+
+`zigpod exec [OPTIONS] CONTAINER CMD...` creates an exec instance (`POST /containers/{id}/exec`), starts it (`POST /exec/{id}/start`), demultiplexes the Docker stream to stdout/stderr, then reads `GET /exec/{id}/json` and propagates the command's exit code as the CLI exit status. `-e/--env`, `-u/--user`, and `-w/--workdir` are validated with the same validators as `run`; the daemon-allocated exec ID is re-validated with `validateIdentifier` before it is reused in a URL (BUG-018). The start call uses the blocking socket timeout so long-running commands are not cut off. (Interactive `-i`/`-t` TTY handling is Phase 2.)
 
 ### Built-In 14-Case Fail-Closed Self-Test (`zigpod demo`)
 

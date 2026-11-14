@@ -287,13 +287,13 @@ flowchart LR
 
 ### Phase 1: Container Networking, Mounts & Core Subcommands
 
-- [ ] **`run` flags**:
-  - `-p, --publish <HOST:CONTAINER[/proto]>` mapping to `ExposedPorts` and `HostConfig.PortBindings`
-  - `-v, --volume <SRC:DST[:ro]>` with strict **Host Path Policy Validator** (default `:ro` option / block dangerous host paths such as `/`, `/etc`, `/proc`, and Podman socket directories)
-  - `--network <MODE>` (`none`, `bridge`, `host`, `pasta`/`slirp4netns`), `-w, --workdir`, `-u, --user`, and `--cap-drop` / `--cap-add`
+- [x] **`run` flags**:
+  - `-p, --publish <HOST:CONTAINER[/proto]>`: mapping to `ExposedPorts` and `HostConfig.PortBindings` -- DONE (`src/cli.zig`, `src/podman_api.zig`)
+  - `-v, --volume <SRC:DST[:ro]>`: with strict **Host Path Policy Validator** (default `:ro` option / block dangerous host paths such as `/`, `/etc`, `/proc`, and container-engine socket dirs) -- DONE (`src/cli.zig`, `src/podman_api.zig`)
+  - `--network <MODE>` (`none`, `bridge`, `host`, `pasta`/`slirp4netns`), `-w, --workdir`, `-u, --user`, and `--cap-drop` / `--cap-add` -- DONE (`src/cli.zig`, `src/podman_api.zig`)
 - [ ] **Additional subcommands**:
-  - `zigpod exec <CONTAINER> <CMD...>` (`POST /v1.40/containers/{id}/exec` and `/exec/{id}/start`)
-  - `zigpod inspect <CONTAINER|IMAGE>` (inspect state, IP, mounts, exit code, and active hardening limits)
+  - `zigpod exec <CONTAINER> <CMD...>`: (`POST /v1.40/containers/{id}/exec` and `/exec/{id}/start`) -- DONE (`src/podman_api.zig`, `src/cli.zig`)
+  - `zigpod inspect <CONTAINER|IMAGE>`: (inspect state, IP, mounts, exit code, and active hardening limits) -- DONE (`src/podman_api.zig`, `src/cli.zig`)
   - `zigpod stats --no-stream` (display CPU, memory, and PIDs metrics)
 
 ### Phase 2: Streaming HTTP Client & Interactive TTY

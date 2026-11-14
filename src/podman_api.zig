@@ -197,6 +197,32 @@ pub const ImageInspect = struct {
     Architecture: []const u8 = "",
 };
 
+/// Body for `POST /containers/{id}/exec`.
+pub const ExecCreateRequest = struct {
+    AttachStdin: bool = false,
+    AttachStdout: bool = true,
+    AttachStderr: bool = true,
+    Cmd: []const []const u8,
+    Env: ?[]const []const u8 = null,
+    WorkingDir: ?[]const u8 = null,
+    User: ?[]const u8 = null,
+};
+
+pub const ExecCreateResponse = struct {
+    Id: []const u8 = "",
+    Warnings: ?[]const []const u8 = null,
+};
+
+pub const ExecStartRequest = struct {
+    Detach: bool = false,
+    Tty: bool = false,
+};
+
+pub const ExecInspect = struct {
+    Running: bool = false,
+    ExitCode: i64 = 0,
+};
+
 const PullStatusLine = struct {
     status: ?[]const u8 = null,
     id: ?[]const u8 = null,
@@ -832,6 +858,96 @@ fn printImageInspect(writer: anytype, img: ImageInspect) !void {
     if (img.Os.len > 0 or img.Architecture.len > 0) {
         try writer.print("{s:<15}{s}/{s}\n", .{ "Os/Arch:", img.Os, img.Architecture });
     }
+}
+
+/// `POST /containers/{id}/exec`: validates the container and identity fields,
+/// then returns the daemon-allocated exec ID.
+pub fn createExec(client: *const http.Client, logger: *log.Logger, container: []const u8, req: ExecCreateRequest) ![]u8 {
+    try validateIdentifier(container);
+    if (req.User) |u| try validateUser(u);
+    if (req.WorkingDir) |w| try validateWorkdir(w);
+
+    const path = try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/exec", .{ api_prefix, container });
+    defer client.allocator.free(path);
+
+    const body = try std.json.stringifyAlloc(client.allocator, req, .{ .emit_null_optional_fields = false });
+    defer client.allocator.free(body);
+
+    logger.debug("POST {s} body={s}", .{ path, body });
+    const resp = try client.request("POST", path, body);
+    defer resp.deinit();
+    if (!resp.ok()) return logApiFailure(logger, "POST", path, resp);
+
+    const parsed = try std.json.parseFromSlice(ExecCreateResponse, client.allocator, resp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    if (parsed.value.Warnings) |warnings| {
+        for (warnings) |w| logger.warn("exec create warning: {s}", .{w});
+    }
+    if (parsed.value.Id.len == 0) {
+        logger.err("exec create response missing Id for container {s}", .{container});
+        return ApiError.PodmanApiError;
+    }
+    logger.info("created exec {s} on container {s}", .{ parsed.value.Id, container });
+    return client.allocator.dupe(u8, parsed.value.Id);
+}
+
+/// `POST /exec/{id}/start`: streams the multiplexed stdout/stderr to `writer`.
+pub fn startExec(client: *const http.Client, logger: *log.Logger, exec_id: []const u8, writer: anytype) !void {
+    try validateIdentifier(exec_id);
+
+    const path = try std.fmt.allocPrint(client.allocator, "{s}/exec/{s}/start", .{ api_prefix, exec_id });
+    defer client.allocator.free(path);
+
+    const body = try std.json.stringifyAlloc(client.allocator, ExecStartRequest{}, .{});
+    defer client.allocator.free(body);
+
+    logger.debug("POST {s} body={s}", .{ path, body });
+    // A command may legitimately stay silent until it exits; use the blocking
+    // timeout so long-running commands are not cut off (BUG-007).
+    const resp = try client.requestWithTimeout("POST", path, body, http.blocking_timeout_ms);
+    defer resp.deinit();
+    if (!resp.ok()) return logApiFailure(logger, "POST", path, resp);
+
+    try demuxLogs(resp.body, writer);
+}
+
+/// `GET /exec/{id}/json`: returns the exit code of a finished exec instance.
+pub fn inspectExec(client: *const http.Client, logger: *log.Logger, exec_id: []const u8) !ExecInspect {
+    try validateIdentifier(exec_id);
+
+    const path = try std.fmt.allocPrint(client.allocator, "{s}/exec/{s}/json", .{ api_prefix, exec_id });
+    defer client.allocator.free(path);
+
+    logger.debug("GET {s}", .{ path });
+    const resp = try client.request("GET", path, null);
+    defer resp.deinit();
+    if (!resp.ok()) return logApiFailure(logger, "GET", path, resp);
+
+    const parsed = try std.json.parseFromSlice(ExecInspect, client.allocator, resp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    return parsed.value;
+}
+
+/// Runs a command in a live container: create exec → start → inspect, returning
+/// the command's exit code. Output is demultiplexed to `writer`.
+pub fn execCommand(
+    client: *const http.Client,
+    logger: *log.Logger,
+    container: []const u8,
+    req: ExecCreateRequest,
+    writer: anytype,
+) !i64 {
+    const exec_id = try createExec(client, logger, container, req);
+    defer client.allocator.free(exec_id);
+
+    try startExec(client, logger, exec_id, writer);
+    const result = try inspectExec(client, logger, exec_id);
+    logger.info("exec on container {s} finished (exit={d})", .{ container, result.ExitCode });
+    return result.ExitCode;
 }
 
 /// Demultiplexes Docker/Podman attached log frames ([stream_type, 0, 0, 0, size_be32][payload...]).
@@ -1493,6 +1609,87 @@ test "inspect falls back from container to image over mock Unix socket" {
     try std.testing.expectEqual(@as(usize, 2), ctx.matched);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "sha256:deadbeef") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "alpine:3.20") != null);
+}
+
+test "exec command over mock Unix socket streams output and returns exit code" {
+    const sock_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "/tmp/zp-api-exec-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer std.testing.allocator.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const create_json = "{\"Id\":\"exec123\"}";
+    const create_resp = std.fmt.comptimePrint(
+        "HTTP/1.1 201 Created\r\nContent-Length: {d}\r\n\r\n{s}",
+        .{ create_json.len, create_json },
+    );
+    const start_raw = "\x01\x00\x00\x00\x00\x00\x00\x03hi\n";
+    const start_resp = std.fmt.comptimePrint(
+        "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}",
+        .{ start_raw.len, start_raw },
+    );
+    const inspect_json = "{\"Running\":false,\"ExitCode\":7}";
+    const inspect_resp = std.fmt.comptimePrint(
+        "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}",
+        .{ inspect_json.len, inspect_json },
+    );
+
+    const replies = [_]ScriptedReply{
+        .{
+            .expected_prefix = "POST /v1.40/containers/web/exec HTTP/1.1\r\n",
+            .raw_response = create_resp,
+        },
+        .{
+            .expected_prefix = "POST /v1.40/exec/exec123/start HTTP/1.1\r\n",
+            .raw_response = start_resp,
+        },
+        .{
+            .expected_prefix = "GET /v1.40/exec/exec123/json HTTP/1.1\r\n",
+            .raw_response = inspect_resp,
+        },
+    };
+
+    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{
+        .allocator = std.testing.allocator,
+        .socket_path = sock_path,
+    };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    // Validation fails before any socket traffic.
+    try std.testing.expectError(
+        ApiError.InvalidIdentifier,
+        createExec(&client, &logger, "../bad", .{ .Cmd = &.{"ls"} }),
+    );
+    try std.testing.expectError(
+        ApiError.InvalidUser,
+        createExec(&client, &logger, "web", .{ .Cmd = &.{"ls"}, .User = "bad user" }),
+    );
+    try std.testing.expectError(
+        ApiError.InvalidWorkdir,
+        createExec(&client, &logger, "web", .{ .Cmd = &.{"ls"}, .WorkingDir = "relative" }),
+    );
+
+    var out = std.ArrayList(u8).init(std.testing.allocator);
+    defer out.deinit();
+    const code = try execCommand(&client, &logger, "web", .{ .Cmd = &.{"echo", "hi"} }, out.writer());
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(@as(i64, 7), code);
+    try std.testing.expectEqualStrings("hi\n", out.items);
+    try std.testing.expectEqual(replies.len, ctx.matched);
 }
 
 test "ContainerCreateRequest serializes hardening HostConfig fields" {

@@ -29,9 +29,9 @@ flowchart LR
 
 ## Notes
 
-- [[Bug-Dashboard]] — แดชบอร์ดสรุปสถานะบั๊ก (`BUG-001` ถึง `BUG-017`), Coverage ของ Unit Tests ต่อโมดูล และสถานะ Security/Memory Gates
+- [[Bug-Dashboard]] — แดชบอร์ดสรุปสถานะบั๊ก (`BUG-001` ถึง `BUG-018`), Coverage ของ Unit Tests ต่อโมดูล และสถานะ Security/Memory Gates
 - [[Architecture-Map]] — แผนผังโมดูล, เส้นทางข้อมูล, Ownership ของหน่วยความจำ และ Trust Boundaries
-- [[Bug-Playbook]] — คลังบันทึก Bug & Post-mortem (`BUG-001` ถึง `BUG-017`) พร้อมวิธีป้องกันไม่ให้เกิดซ้ำ
+- [[Bug-Playbook]] — คลังบันทึก Bug & Post-mortem (`BUG-001` ถึง `BUG-018`) พร้อมวิธีป้องกันไม่ให้เกิดซ้ำ
 - [[Security-And-Memory-Checklist]] — กฎเหล็กที่ตรวจอัตโนมัติด้วย `scripts/auto-audit.sh` และ `scripts/security-check.sh`
 
 ## Quick Queries for AI (`rg`)

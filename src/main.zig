@@ -134,6 +134,16 @@ fn dispatch(
         .rm => |opts| try pod.removeContainer(client, logger, opts.container, opts.force),
         .logs => |container| try pod.fetchLogs(client, logger, container, stdout),
         .inspect => |target| try pod.inspect(client, logger, target, stdout),
+        .exec => |opts| {
+            const req = pod.ExecCreateRequest{
+                .Cmd = opts.cmd,
+                .Env = if (opts.env.len > 0) opts.env else null,
+                .User = opts.user,
+                .WorkingDir = opts.workdir,
+            };
+            const code = try pod.execCommand(client, logger, opts.container, req, stdout);
+            return if (code > 0 and code <= 255) @intCast(code) else if (code == 0) 0 else 1;
+        },
         .version => try pod.showVersion(client, logger, version, stdout),
         .run => |r| {
             // Validate and classify each -v mount (bind vs named volume).

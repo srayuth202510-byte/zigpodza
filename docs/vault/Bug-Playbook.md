@@ -201,3 +201,14 @@ status: active
   - `inspect()` ตรวจ target ก่อน แล้วลอง `GET /containers/{target}/json` ก่อน ถ้าได้ 404 ค่อย fallback `GET /images/{target}/json`; ถ้าทั้งคู่ไม่พบ → `ApiError.NotFound`
   - เพิ่มเทส DENY (space, `?`, newline, `..`) และเทส container/image rendering; smoke E2E เรียก `inspect` ผ่าน mock socket
 - **Prevention Rule**: ทุก string ที่ถูกแทรกเป็น **URL path segment** (container id, image name, อนาคต `network`/`volume` name) ต้องผ่าน validator ที่อนุญาตเฉพาะอักขระที่ใช้ได้จริง และตัด URL delimiter (`?`, `#`) รวมถึง control char เสมอ
+
+## BUG-018: Exec ID from Daemon Response Reused in URL Without Validation `#bug-pattern` `#security-gate`
+
+- **Symptom**: `zigpod exec` รับ `Id` ของ exec instance จาก daemon แล้วต่อ `/exec/{id}/start` หรือ `/exec/{id}/json` โดยตรง หาก daemon ตอบด้วยค่าที่มี `/`, `..`, `?`, หรือ space จะทำให้ request line ชี้ไป path อื่นบน daemon (เบี่ยงเบนไป `/containers/...` หรือ query string) นอกจากนี้ output stream ที่ไม่ผ่าน demultiplex จะทำให้ผู้ใช้เห็น binary frame header และ exit code ไม่ถูกคืนค่า ทำให้ shell ไม่รู้ว่าคำสั่งล้มเหลว
+- **Root Cause**: เดิม CLI ไม่มี `exec` จึงไม่มีจุดตรวจ; exec ID เป็นค่าที่มาจากภายนอก (daemon response) ซึ่งควรถือเป็น untrusted ในใจเคร่องาน trust boundary เหมือน request body อื่น ๆ
+- **Fix**:
+  - เพิ่ม `createExec()` / `startExec()` / `inspectExec()` ใน [src/podman_api.zig](../../src/podman_api.zig) โดยเรียก `validateIdentifier(exec_id)` ก่อนประกอบทุก path ที่ใช้ exec ID และตรวจ container ID/`--user`/`--workdir` ด้วย validator เดิม
+  - ใช้ `demuxLogs()` กับ response body ของ `/exec/{id}/start` และคืนค่า `ExitCode` จาก `/exec/{id}/json` ไปเป็น process exit status ของ CLI
+  - ใช้ `requestWithTimeout(..., blocking_timeout_ms)` สำหรับ exec start เพื่อไม่ตัดคำสั่งที่รันนาน (BUG-007)
+  - เพิ่มเทส mock socket 3-step lifecycle และเทส DENY ของ container/exec ID + `--user`/`--workdir`; smoke E2E เรียก `exec` ผ่าน mock socket
+- **Prevention Rule**: **ทุกค่าที่มาจาก daemon response** หากถูกนำไปประกอบ URL path ต้องผ่าน validator เสมอ และ response body ของ stream protocol (logs/exec) ต้องผ่าน demultiplex ก่อนแสดงผล พร้อมคืนค่า exit code เพื่อให้ caller ตัดสินใจได้ถูก

@@ -30,6 +30,10 @@ pub const usage =
     \\  stop CONTAINER                 Stop a running container
     \\  rm [-f] CONTAINER              Remove a container (-f: force)
     \\  logs CONTAINER                 Print a container's logs
+    \\  exec [OPTIONS] CONTAINER CMD...  Run a command in a running container
+    \\      -e, --env KEY=VALUE        Set an environment variable (repeatable)
+    \\      -u, --user USER[:GROUP]    Run as user (and optional group)
+    \\      -w, --workdir PATH         Working directory inside the container
     \\  inspect TARGET                 Show container or image details (state, IP, mounts, limits)
     \\  audit [FILE]                   Verify SHA-256 hash chain of audit.log
     \\  demo                           Run 14-case fail-closed ALLOW/DENY self-test suite
@@ -94,6 +98,14 @@ pub const RmOpts = struct {
     force: bool = false,
 };
 
+pub const ExecOpts = struct {
+    container: []const u8,
+    cmd: []const []const u8 = &.{},
+    env: []const []const u8 = &.{},
+    user: ?[]const u8 = null,
+    workdir: ?[]const u8 = null,
+};
+
 pub const Command = union(enum) {
     help,
     client_version,
@@ -108,6 +120,7 @@ pub const Command = union(enum) {
     rm: RmOpts,
     logs: []const u8,
     inspect: []const u8,
+    exec: ExecOpts,
 };
 
 pub const Parsed = struct {
@@ -122,6 +135,9 @@ pub const Parsed = struct {
                 if (r.ports.len > 0) allocator.free(r.ports);
                 if (r.cap_drop.len > 0) allocator.free(r.cap_drop);
                 if (r.cap_add.len > 0) allocator.free(r.cap_add);
+            },
+            .exec => |e| {
+                if (e.env.len > 0) allocator.free(e.env);
             },
             else => {},
         }
@@ -203,6 +219,8 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
         .{ .logs = try single(rest) }
     else if (eql(name, "inspect"))
         .{ .inspect = try single(rest) }
+    else if (eql(name, "exec"))
+        .{ .exec = try parseExec(allocator, rest) }
     else if (eql(name, "audit"))
         try parseAudit(rest)
     else if (eql(name, "demo"))
@@ -502,6 +520,41 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
     return opts;
 }
 
+/// Parses `exec [OPTIONS] CONTAINER CMD...`. Flags must precede the container
+/// name; everything after it is the command, like docker.
+fn parseExec(allocator: std.mem.Allocator, args: []const []const u8) ParseError!ExecOpts {
+    var opts = ExecOpts{ .container = "" };
+    var env = std.ArrayList([]const u8).init(allocator);
+    errdefer env.deinit();
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (eql(a, "-e") or eql(a, "--env")) {
+            try env.append(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--env=")) {
+            try env.append(a["--env=".len..]);
+        } else if (eql(a, "-u") or eql(a, "--user")) {
+            opts.user = try parseUserSpec(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--user=")) {
+            opts.user = try parseUserSpec(a["--user=".len..]);
+        } else if (eql(a, "-w") or eql(a, "--workdir")) {
+            opts.workdir = try parseWorkdir(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--workdir=")) {
+            opts.workdir = try parseWorkdir(a["--workdir=".len..]);
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else break;
+    }
+    if (i >= args.len) return error.MissingArgument;
+    opts.container = args[i];
+    opts.cmd = args[i + 1 ..];
+    opts.env = try env.toOwnedSlice();
+    errdefer allocator.free(opts.env);
+    if (opts.cmd.len == 0) return error.MissingArgument;
+    return opts;
+}
+
 // ---------------------------------------------------------------- tests
 
 fn testParse(args: []const []const u8) !Parsed {
@@ -744,6 +797,47 @@ test "parse rejects malformed publish specs without leaking allocations" {
     try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "run", "-p" }));
     // A parsed port mapping must be freed when a later error aborts the parse.
     try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "run", "-p", "8080:80" }));
+}
+
+test "parse exec command with env, user, and workdir" {
+    const alloc = std.testing.allocator;
+    var parsed = try parse(alloc, &.{
+        "exec",
+        "-e",
+        "A=1",
+        "--env=B=2",
+        "-u",
+        "1000:1000",
+        "--workdir=/work",
+        "web",
+        "sh",
+        "-c",
+        "echo hi",
+    });
+    defer parsed.deinit(alloc);
+
+    const e = parsed.command.exec;
+    try std.testing.expectEqualStrings("web", e.container);
+    try std.testing.expectEqual(@as(usize, 3), e.cmd.len);
+    try std.testing.expectEqualStrings("echo hi", e.cmd[2]);
+    try std.testing.expectEqual(@as(usize, 2), e.env.len);
+    try std.testing.expectEqualStrings("A=1", e.env[0]);
+    try std.testing.expectEqualStrings("B=2", e.env[1]);
+    try std.testing.expectEqualStrings("1000:1000", e.user.?);
+    try std.testing.expectEqualStrings("/work", e.workdir.?);
+}
+
+test "parse exec rejects malformed specs without leaking allocations" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "exec" }));
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "exec", "web" }));
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "exec", "-e", "A=1" }));
+    try std.testing.expectError(error.UnknownFlag, parse(alloc, &.{ "exec", "--bogus", "web", "ls" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "exec", "-u", "bad user", "web", "ls" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "exec", "-w", "relative", "web", "ls" }));
+    try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "exec", "-e" }));
+    // A parsed env slice must be freed when a later error aborts the parse.
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "exec", "-e", "A=1", "web" }));
 }
 
 test "parse run network, workdir, user, and capability flags" {

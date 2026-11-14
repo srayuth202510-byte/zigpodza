@@ -93,9 +93,9 @@ def reply(conn, status, body=b""):
     hdr = f"HTTP/1.1 {status}\r\nContent-Length: {len(body)}\r\n\r\n".encode("ascii")
     conn.sendall(hdr + body)
 
-# Expect 7 requests: create, start, wait, logs, delete (--rm), ps -a, inspect
+# Expect 10 requests: create, start, wait, logs, delete (--rm), ps -a, inspect, exec-create, exec-start, exec-inspect
 with open(req_path, "wb") as out:
-    for step in range(7):
+    for step in range(10):
         conn, _ = srv.accept()
         try:
             req = read_req(conn)
@@ -103,9 +103,9 @@ with open(req_path, "wb") as out:
             out.flush()
             if b"/containers/create" in req:
                 reply(conn, "201 Created", b'{"Id":"smoke1234567890ab"}')
-            elif b"/start " in req:
+            elif req.startswith(b"POST ") and b"/containers/" in req and b"/start" in req:
                 reply(conn, "204 No Content")
-            elif b"/wait " in req:
+            elif req.startswith(b"POST ") and b"/containers/" in req and b"/wait" in req:
                 reply(conn, "200 OK", b'{"StatusCode":0}')
             elif b"/logs" in req:
                 reply(conn, "200 OK", b"\x01\x00\x00\x00\x00\x00\x00\x03ok\n")
@@ -113,8 +113,14 @@ with open(req_path, "wb") as out:
                 reply(conn, "204 No Content")
             elif b"/containers/json" in req:
                 reply(conn, "200 OK", b'[{"Id":"smoke1234567890ab","Image":"alpine:3.20","Status":"Up","Names":["/smoke"]}]')
-            elif b"/json" in req and b"/containers/" in req:
+            elif req.startswith(b"GET ") and b"/json" in req and b"/containers/" in req:
                 reply(conn, "200 OK", b'{"Id":"smoke1234567890ab","Name":"/smoke","Image":"alpine:3.20","State":{"Status":"exited","Running":false,"ExitCode":0},"Config":{"WorkingDir":"/work","User":"1000:1000"},"HostConfig":{"Memory":67108864,"PidsLimit":32,"ReadonlyRootfs":true,"NetworkMode":"none","CapDrop":["ALL"],"CapAdd":["NET_BIND_SERVICE"]},"NetworkSettings":{"IPAddress":"10.88.0.2"},"Mounts":[{"Type":"bind","Source":"/srv/data","Destination":"/data","RW":false}]}')
+            elif req.startswith(b"POST ") and b"/containers/" in req and b"/exec" in req:
+                reply(conn, "201 Created", b'{"Id":"exec123"}')
+            elif req.startswith(b"POST ") and b"/exec/" in req and b"/start" in req:
+                reply(conn, "200 OK", b"\x01\x00\x00\x00\x00\x00\x00\x0Ahello-exec\n")
+            elif req.startswith(b"GET ") and b"/exec/" in req and b"/json" in req:
+                reply(conn, "200 OK", b'{"Running":false,"ExitCode":0}')
             else:
                 reply(conn, "404 Not Found", b'{"message":"unexpected"}')
         finally:
@@ -153,6 +159,9 @@ INSPECT_OUT=$("$BIN" --socket "$SOCK" inspect smoke1234567890ab)
 echo "$INSPECT_OUT" | grep -q "10.88.0.2"
 echo "$INSPECT_OUT" | grep -q "NetworkMode:"
 echo "$INSPECT_OUT" | grep -q "/srv/data -> /data (bind, ro)"
+
+EXEC_OUT=$("$BIN" --socket "$SOCK" exec smoke1234567890ab echo hello-exec)
+echo "$EXEC_OUT" | grep -q "hello-exec"
 
 # Adversarial input must fail closed before reaching daemon.
 if "$BIN" --socket "$SOCK" rm ../evil >/dev/null 2>&1; then

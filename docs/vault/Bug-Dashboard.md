@@ -19,9 +19,9 @@ status: active
 
 | Metric | Value |
 | :--- | :--- |
-| Tracked Bug Patterns | **17** (17 Guarded) |
+| Tracked Bug Patterns | **18** (18 Guarded) |
 | Zig Source Modules | **8** |
-| Unit & Integration Tests | **60** |
+| Unit & Integration Tests | **63** |
 | Static Security & Memory Gates | **9/9 PASS** |
 
 ## Guard Coverage Map
@@ -70,6 +70,8 @@ flowchart LR
     BUG016 --> src_cli_zig["src/cli.zig"]
     BUG017["BUG-017"] --> SEC["[[Security-And-Memory-Checklist]]"]
     BUG017 --> src_podman_api_zig["src/podman_api.zig"]
+    BUG018["BUG-018"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG018 --> src_podman_api_zig["src/podman_api.zig"]
 ```
 
 ## Bug Pattern Registry
@@ -93,18 +95,19 @@ flowchart LR
 | [BUG-015](../../docs/vault/Bug-Playbook.md#L171) | Port Publishing Without a Fail-Closed Port Policy | `#bug-pattern` `#security-gate` | [podman_api.zig](../../src/podman_api.zig), [cli.zig](../../src/cli.zig) | **Guarded** |
 | [BUG-016](../../docs/vault/Bug-Playbook.md#L183) | Unvalidated Network/Identity/Capability Flags | `#bug-pattern` `#security-gate` | [podman_api.zig](../../src/podman_api.zig), [cli.zig](../../src/cli.zig) | **Guarded** |
 | [BUG-017](../../docs/vault/Bug-Playbook.md#L195) | Inspect Target Not Validated Before URL Path Assembly | `#bug-pattern` `#security-gate` | [podman_api.zig](../../src/podman_api.zig) | **Guarded** |
+| [BUG-018](../../docs/vault/Bug-Playbook.md#L205) | Exec ID from Daemon Response Reused in URL Without Validation | `#bug-pattern` `#security-gate` | [podman_api.zig](../../src/podman_api.zig) | **Guarded** |
 
 ## Module Test & Allocator Coverage
 
 | Module | Lines | Public Decls | Unit Tests | Memory Gate |
 | :--- | ---: | ---: | ---: | :--- |
-| [cli.zig](../../src/cli.zig) | 832 | 13 | 14 | `std.testing.allocator` |
+| [cli.zig](../../src/cli.zig) | 926 | 14 | 16 | `std.testing.allocator` |
 | [config.zig](../../src/config.zig) | 118 | 4 | 4 | `std.testing.allocator` |
 | [demo.zig](../../src/demo.zig) | 379 | 1 | 1 | `std.testing.allocator` |
 | [http.zig](../../src/http.zig) | 476 | 12 | 11 | `std.testing.allocator` |
 | [log.zig](../../src/log.zig) | 465 | 16 | 7 | `std.testing.allocator` |
-| [main.zig](../../src/main.zig) | 311 | 2 | 0 | `gpa.deinit() != .leak` |
-| [podman_api.zig](../../src/podman_api.zig) | 1517 | 46 | 21 | `std.testing.allocator` |
+| [main.zig](../../src/main.zig) | 321 | 2 | 0 | `gpa.deinit() != .leak` |
+| [podman_api.zig](../../src/podman_api.zig) | 1714 | 54 | 22 | `std.testing.allocator` |
 | [utils.zig](../../src/utils.zig) | 42 | 3 | 2 | `stack-only (no heap)` |
 
 ## Static Security & Memory Gates
@@ -241,3 +244,10 @@ flowchart LR
 - **Root Cause**: เดิม CLI ไม่มี subcommand `inspect` จึงไม่มีจุดตรวจ; image reference มีอักขระ `/`, `:`, `@` ตามปกติ แต่ก็ยังต้องตัดอักขระที่สามารถเปลี่ยนโครงสร้าง HTTP request line ออกไป
 - **Fix**: เพิ่ม `podman_api.validateResourceRef()` ใน `src/podman_api.zig`: อนุญาต alphanumeric, `-`, `_`, `.`, `:`, `/`, `@` และยาว 1..256; ปฏิเสธ `.`/`..` และ space/control char/`?`/`#`; `inspect()` ตรวจ target ก่อน แล้วลอง `GET /containers/{target}/json` ก่อน ถ้าได้ 404 ค่อย fallback `GET /images/{target}/json`; ถ้าทั้งคู่ไม่พบ → `ApiError.NotFound`; เพิ่มเทส DENY (space, `?`, newline, `..`) และเทส container/image rendering; smoke E2E เรียก `inspect` ผ่าน mock socket
 - **Prevention**: ทุก string ที่ถูกแทรกเป็น **URL path segment** (container id, image name, อนาคต `network`/`volume` name) ต้องผ่าน validator ที่อนุญาตเฉพาะอักขระที่ใช้ได้จริง และตัด URL delimiter (`?`, `#`) รวมถึง control char เสมอ
+
+### BUG-018 — Exec ID from Daemon Response Reused in URL Without Validation
+- **Source**: [docs/vault/Bug-Playbook.md:205](../../docs/vault/Bug-Playbook.md#L205) · **Status**: `Guarded`
+- **Symptom**: `zigpod exec` รับ `Id` ของ exec instance จาก daemon แล้วต่อ `/exec/{id}/start` หรือ `/exec/{id}/json` โดยตรง หาก daemon ตอบด้วยค่าที่มี `/`, `..`, `?`, หรือ space จะทำให้ request line ชี้ไป path อื่นบน daemon (เบี่ยงเบนไป `/containers/...` หรือ query string) นอกจากนี้ output stream ที่ไม่ผ่าน demultiplex จะทำให้ผู้ใช้เห็น binary frame header และ exit code ไม่ถูกคืนค่า ทำให้ shell ไม่รู้ว่าคำสั่งล้มเหลว
+- **Root Cause**: เดิม CLI ไม่มี `exec` จึงไม่มีจุดตรวจ; exec ID เป็นค่าที่มาจากภายนอก (daemon response) ซึ่งควรถือเป็น untrusted ในใจเคร่องาน trust boundary เหมือน request body อื่น ๆ
+- **Fix**: เพิ่ม `createExec()` / `startExec()` / `inspectExec()` ใน `src/podman_api.zig` โดยเรียก `validateIdentifier(exec_id)` ก่อนประกอบทุก path ที่ใช้ exec ID และตรวจ container ID/`--user`/`--workdir` ด้วย validator เดิม; ใช้ `demuxLogs()` กับ response body ของ `/exec/{id}/start` และคืนค่า `ExitCode` จาก `/exec/{id}/json` ไปเป็น process exit status ของ CLI; ใช้ `requestWithTimeout(..., blocking_timeout_ms)` สำหรับ exec start เพื่อไม่ตัดคำสั่งที่รันนาน (BUG-007); เพิ่มเทส mock socket 3-step lifecycle และเทส DENY ของ container/exec ID + `--user`/`--workdir`; smoke E2E เรียก `exec` ผ่าน mock socket
+- **Prevention**: **ทุกค่าที่มาจาก daemon response** หากถูกนำไปประกอบ URL path ต้องผ่าน validator เสมอ และ response body ของ stream protocol (logs/exec) ต้องผ่าน demultiplex ก่อนแสดงผล พร้อมคืนค่า exit code เพื่อให้ caller ตัดสินใจได้ถูก
