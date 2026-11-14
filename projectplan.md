@@ -282,7 +282,9 @@ Feel free to ask for any specific command implementation, deeper error‑handlin
 flowchart LR
     P1["Phase 1: Core CLI & Mount/Net Flags"] --> P2["Phase 2: Streaming HTTP & Interactive TTY"]
     P2 --> P3["Phase 3: Policy Engine & AI Sandbox Profile"]
-    P3 --> P4["Phase 4: Image Build, Pods & Static Releases"]
+    P3 --> P4["Phase 4: Process/Volume/Network & Live Stats"]
+    P4 --> P5["Phase 5: Lifecycle, System & --json Output"]
+    P5 --> P6["Phase 6: Deep Balor Security & Advanced CLI"]
 ```
 
 ### Phase 1: Container Networking, Mounts & Core Subcommands
@@ -312,10 +314,49 @@ flowchart LR
 - [x] **Audit & Balor Toolkit Integration**:
   - Add `zigpod audit --json` structured output and `DENY` event telemetry for `balorsh` (`loganalyst` / `blueteam`) automated auditing -- DONE (`src/log.zig`, `src/cli.zig`, `src/main.zig`)
 
-### Phase 4: Image Build, Native Pod Commands & Multi-Arch Releases
+### Phase 4: Process Control, Volume/Network Subcommands, Live Stats & Fuzz Testing
 
-- [ ] **`zigpod build -t <TAG> <DIR>`**: Archive build context with `Containerfile`/`Dockerfile` into a tar stream for `POST /v1.40/build`
-- [ ] **Podman Native Pod Management (`zigpod pod`)**: Integrate Libpod API (`/v4.0.0/libpod/pods/...`) for `pod create`, `pod ps`, `pod stop`, and `pod rm`
-- [ ] **Fuzz Testing & Static Release Pipeline**:
-  - Add fuzz/property tests for `decodeChunked`, `demuxLogs`, `parseMemoryBytes`, and `verifyAuditFile`
-  - Configure `build.zig` and `.github/workflows/ci.yml` to publish statically linked `x86_64-linux-musl` and `aarch64-linux-musl` binaries with SHA-256 checksums
+- [x] **Process, Volume & Network Subcommands**:
+  - `zigpod kill [-s SIGNAL] <CONTAINER>` with strict allow-listed signal validation (`validateSignal`) -- DONE (`src/podman_api.zig`, `src/cli.zig`, `src/main.zig`)
+  - `zigpod top <CONTAINER>` process table inspection -- DONE (`src/podman_api.zig`, `src/podman_types.zig`, `src/cli.zig`, `src/main.zig`)
+  - `zigpod volume ls|create|rm|inspect [NAME]` and `zigpod network ls|inspect [NAME]` -- DONE (`src/podman_api.zig`, `src/podman_types.zig`, `src/cli.zig`, `src/main.zig`)
+- [x] **Live Streaming Container Stats**:
+  - `zigpod stats [CONTAINER]` (`stream=true`) real-time streaming table via `Client.streamRequest` -- DONE (`src/podman_api.zig`, `src/main.zig`)
+- [x] **Deterministic PRNG Fuzz & Property Testing**:
+  - Property/fuzz tests for `decodeChunked`, `demuxLogs`, `parseMemoryBytes`, and `verifyAuditFile` using `std.Random.DefaultPrng(0x5A16_90D2_2026_F00D)` and `std.testing.allocator` -- DONE (`src/http.zig`, `src/podman_api.zig`, `src/cli.zig`, `src/log.zig`)
+
+### Phase 5: Lifecycle Management, System Maintenance & Structured JSON Output
+
+- [x] **Lifecycle & Image Management Subcommands**:
+  - `zigpod start <CONTAINER>`, `zigpod restart [-t SECS] <CONTAINER>`, `zigpod pause <CONTAINER>`, `zigpod unpause <CONTAINER>`, `zigpod rename <CONTAINER> <NEW_NAME>`, and `zigpod rmi [-f] <IMAGE>` -- DONE (`src/podman_api.zig`, `src/cli.zig`, `src/main.zig`)
+- [x] **System Maintenance Subcommands**:
+  - `zigpod system ping`, `zigpod system df`, and `zigpod system prune [-f]` -- DONE (`src/podman_api.zig`, `src/podman_types.zig`, `src/cli.zig`, `src/main.zig`)
+- [x] **Structured `--json` Output Mode**:
+  - `zigpod ps [-a] --json`, `zigpod images --json`, `zigpod inspect --json <NAME|ID>`, and `zigpod stats [--no-stream] --json [CONTAINER]` for SIEM, `jq`, and `balorsh` automation -- DONE (`src/podman_api.zig`, `src/podman_types.zig`, `src/cli.zig`, `src/main.zig`)
+
+### Phase 6: Deep Balor (`balorsh`) Security Integration & Advanced Observation/Policy Tooling
+
+#### 🛡️ 6A. Balor Toolkit (`balorsh` v1.2.0) Security Integration
+- [ ] **1. AI Log Analyst & Blue-Team Pipeline (`scripts/balor-security-audit.sh` & `scripts/security-check.sh`)**:
+  - Connect `zigpod audit --json`, `audit.log`, `system.log`, and `error.log` (including structured `DENY` telemetry from `--profile=sandbox`, path traversal, capability, port, and volume blocks) directly to `balorsh llm` (`balor:loganalyst` and `balor:blueteam` Seneca Cybersecurity personas on Ollama)
+  - Generate automated **Incident & Threat Reports** in `/opt/balorsh/data/llm/logs/` (or project report output) with actionable `zigpod-policy.json` hardening recommendations, plus deterministic offline rule-based analysis when Ollama is not running
+- [ ] **2. Container Attack-Surface & Vulnerability Scanner (`networkscan` + `webexploit`)**:
+  - Extract live container IP addresses and published host/container ports (`-p`) automatically from `zigpod inspect --json <CONTAINER>`
+  - Feed discovered endpoints into Balor's `networkscan` (`nmap -F`, `-sV -sC`, `--script vuln`) and `webexploit` (`whatweb`, `nikto`, `gobuster`, `ffuf`) stacks to audit exposed container services, then optionally pipe XML/text scan results into `balor:blueteam`
+- [ ] **3. Purple-Team Policy Review & Red-Team Adversarial Suite (`purpleteam` / `redteam`)**:
+  - Audit `zigpod inspect --json <CONTAINER>` (`HostConfig.CapDrop`, `CapAdd`, `ReadonlyRootfs`, `SecurityOpt`, `PidsLimit`, `Memory`, `Mounts`) against `zigpod-policy.json` using `balor:purpleteam` / `balor:redteam` to detect privilege escalation or container-escape risks
+  - Expand `zigpod demo` (`src/demo.zig`) with adversarial Red-Team/Blue-Team test vectors and JSON security report export
+- [ ] **4. Environment & Image Secret/Hash Hygiene (`password` stack — `hashid`)**:
+  - Inspect container `-e KEY=VALUE` flags and `Config.Env` from `zigpod inspect --json` for accidental password hashes, tokens, or credentials, integrating with `balorsh password` (`hashid`) and fail-closed policy warnings/blocks
+
+#### ⚙️ 6B. Advanced CLI, Runtime Config & Release Tooling
+- [ ] **Container & Daemon Observation (`port`, `wait`, `diff`, `events`)**:
+  - `zigpod port <CONTAINER> [PRIVATE_PORT[/PROTO]]`, `zigpod wait <CONTAINER>`, `zigpod diff <CONTAINER>`, and `zigpod events [--since TS] [--until TS] [--json]`
+- [ ] **Image Tagging & Container Checkpointing (`tag`, `history`, `commit`)**:
+  - `zigpod tag <SRC_IMAGE> <TARGET_IMAGE>`, `zigpod history [--json] <IMAGE>`, and `zigpod commit [-m MSG] [-a AUTHOR] <CONTAINER> <REPO[:TAG]>`
+- [ ] **Runtime Config & Policy CLI (`zigpod.toml` & `zigpod policy`)**:
+  - Pure-Zig parser for `zigpod.toml` in `src/config.zig` and `zigpod policy check|show [--json]` pre-flight dry-run inspector
+- [ ] **Shell Tab-Completion, Image Build, Native Pods & Static Releases**:
+  - `zigpod completion bash|zsh|fish`
+  - `zigpod build -t <TAG> <DIR>` (`POST /v1.40/build`) and `zigpod pod create|ps|stop|rm`
+  - Static multi-arch release binaries (`x86_64-linux-musl` & `aarch64-linux-musl`) with SHA-256 checksums
