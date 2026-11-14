@@ -227,4 +227,10 @@ python3 scripts/graph-query.py update
 python3 scripts/graph-query.py query "memory"
 python3 scripts/graph-query.py explain verifyAuditFile
 python3 scripts/graph-query.py path BUG-002 cli.zig
+
+# Bug Tracking Dashboard (CLI / Obsidian Note / Web UI)
+make bugs            # terminal summary of tracked bugs, module tests, and security gates
+make dashboard       # update docs/vault/Bug-Dashboard.md & .zig-cache/bug-dashboard.html
+make dashboard-serve # start local web UI on http://127.0.0.1:8765
+python3 scripts/bug-dashboard.py summary --json
 ```

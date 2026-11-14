@@ -1,4 +1,4 @@
-.PHONY: help build test test-adv demo e2e check-ci verify ci query path explain graph-update debug-test clean
+.PHONY: help build test test-adv demo e2e check-ci verify ci query path explain graph-update bugs dashboard dashboard-serve debug-test clean
 .DEFAULT_GOAL := help
 
 ZIG ?= zig
@@ -39,6 +39,15 @@ path: ## Find shortest knowledge path (usage: make path A=BUG-002 B=cli.zig)
 explain: ## Inspect a node and its citations (usage: make explain NODE=verifyAuditFile)
 	@test -n "$(NODE)" || (echo "Usage: make explain NODE=<id-or-symbol>" >&2; exit 2)
 	$(PYTHON) ./scripts/graph-query.py explain "$(NODE)"
+
+bugs: ## Show terminal bug & security dashboard
+	$(PYTHON) ./scripts/bug-dashboard.py summary
+
+dashboard: ## Generate Obsidian Bug-Dashboard.md and HTML dashboard
+	$(PYTHON) ./scripts/bug-dashboard.py generate
+
+dashboard-serve: ## Serve interactive web bug dashboard on http://127.0.0.1:8765
+	$(PYTHON) ./scripts/bug-dashboard.py serve
 
 debug-test: ## Run Zig test binary directly for detailed diagnostics
 	$(ZIG) test src/main.zig

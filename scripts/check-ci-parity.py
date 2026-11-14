@@ -20,10 +20,12 @@ REQUIRED_FILES = [
     "scripts/security-check.sh",
     "scripts/smoke.sh",
     "scripts/graph-query.py",
+    "scripts/bug-dashboard.py",
     "scripts/check-ci-parity.py",
     "docs/vault/00-Index.md",
     "docs/vault/Architecture-Map.md",
     "docs/vault/Bug-Playbook.md",
+    "docs/vault/Bug-Dashboard.md",
     "docs/vault/Security-And-Memory-Checklist.md",
     "src/main.zig",
     "src/cli.zig",
@@ -40,6 +42,7 @@ EXECUTABLES = [
     "scripts/security-check.sh",
     "scripts/smoke.sh",
     "scripts/graph-query.py",
+    "scripts/bug-dashboard.py",
     "scripts/check-ci-parity.py",
 ]
 
@@ -57,6 +60,9 @@ MAKEFILE_TARGETS = [
     "path",
     "explain",
     "graph-update",
+    "bugs",
+    "dashboard",
+    "dashboard-serve",
     "debug-test",
     "clean",
 ]
