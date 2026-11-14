@@ -37,6 +37,7 @@ status: active
 - [ ] Host bind mounts (`-v`) ผ่าน `podman_api.makeMount()` → `validateHostPath()` (fail-closed: บล็อก `/`, `/etc`, `/proc`, `/sys`, `/dev`, `/boot`, `/run`, `/var/run`, `/var/lib/docker`, `/var/lib/containers`, `/root`) และ default เป็น read-only (BUG-014)
 - [ ] Sensitive `/etc` allow-list (`localtime`, `timezone`, `hosts`, `resolv.conf`, `nsswitch.conf`, `hostname`) ต้อง mount แบบ read-only เท่านั้น
 - [ ] Container mount target ผ่าน `validateContainerPath()` (absolute, traversal-free) และ `createContainer` re-validate `Mounts` แบบ defense-in-depth
+- [ ] Published ports (`-p`) ผ่าน `podman_api.makePortMapping()` → `validatePortMapping()` (fail-closed: port `1..65535`, proto `tcp`/`udp`/`sctp`, host address ต้องเป็น IPv4 literal) และ `createContainer` re-validate `ExposedPorts` แบบ defense-in-depth (BUG-015)
 - [ ] Lifecycle `run` มี best-effort cleanup: start fail → force-remove; `--rm` + fetchLogs fail → remove (BUG-012)
 
 ## 3. Logging, Tamper Evidence & Operations

@@ -86,6 +86,13 @@ else
     fail "Missing validateHostPath() host mount policy in src/podman_api.zig (see BUG-014)."
 fi
 
+# 5c. Require the fail-closed port-publishing policy (BUG-015)
+if has_match "pub fn validatePortMapping\(" "src/podman_api.zig" && has_match "try validatePortMapping\(" "src/podman_api.zig"; then
+    pass "validatePortMapping() fail-closed port policy enforced in src/podman_api.zig."
+else
+    fail "Missing validatePortMapping() port policy in src/podman_api.zig (see BUG-015)."
+fi
+
 # 6. Require checked arithmetic in parsers & decoders
 if has_match "std\.math\.add" "src/http.zig" && has_match "std\.math\.add" "src/podman_api.zig" && has_match "std\.math\.mul" "src/cli.zig"; then
     pass "Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser."

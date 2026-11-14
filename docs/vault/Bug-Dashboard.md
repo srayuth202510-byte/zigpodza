@@ -19,9 +19,9 @@ status: active
 
 | Metric | Value |
 | :--- | :--- |
-| Tracked Bug Patterns | **14** (14 Guarded) |
+| Tracked Bug Patterns | **15** (15 Guarded) |
 | Zig Source Modules | **8** |
-| Unit & Integration Tests | **49** |
+| Unit & Integration Tests | **53** |
 | Static Security & Memory Gates | **9/9 PASS** |
 
 ## Guard Coverage Map
@@ -62,6 +62,9 @@ flowchart LR
     BUG013 --> src_log_zig["src/log.zig"]
     BUG014["BUG-014"] --> SEC["[[Security-And-Memory-Checklist]]"]
     BUG014 --> src_podman_api_zig["src/podman_api.zig"]
+    BUG015["BUG-015"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG015 --> src_podman_api_zig["src/podman_api.zig"]
+    BUG015 --> src_cli_zig["src/cli.zig"]
 ```
 
 ## Bug Pattern Registry
@@ -82,18 +85,19 @@ flowchart LR
 | [BUG-012](../../docs/vault/Bug-Playbook.md#L138) | Missing Cleanup Paths in the `run` Container Lifecycle | `#bug-pattern` `#reliability` | [main.zig](../../src/main.zig) | **Guarded** |
 | [BUG-013](../../docs/vault/Bug-Playbook.md#L150) | World-Readable Log Files | `#bug-pattern` `#security-gate` | [log.zig](../../src/log.zig) | **Guarded** |
 | [BUG-014](../../docs/vault/Bug-Playbook.md#L159) | Host Bind Mount Without a Fail-Closed Path Policy | `#bug-pattern` `#security-gate` | [podman_api.zig](../../src/podman_api.zig) | **Guarded** |
+| [BUG-015](../../docs/vault/Bug-Playbook.md#L171) | Port Publishing Without a Fail-Closed Port Policy | `#bug-pattern` `#security-gate` | [podman_api.zig](../../src/podman_api.zig), [cli.zig](../../src/cli.zig) | **Guarded** |
 
 ## Module Test & Allocator Coverage
 
 | Module | Lines | Public Decls | Unit Tests | Memory Gate |
 | :--- | ---: | ---: | ---: | :--- |
-| [cli.zig](../../src/cli.zig) | 559 | 12 | 10 | `std.testing.allocator` |
+| [cli.zig](../../src/cli.zig) | 674 | 13 | 12 | `std.testing.allocator` |
 | [config.zig](../../src/config.zig) | 118 | 4 | 4 | `std.testing.allocator` |
 | [demo.zig](../../src/demo.zig) | 379 | 1 | 1 | `std.testing.allocator` |
 | [http.zig](../../src/http.zig) | 476 | 12 | 11 | `std.testing.allocator` |
 | [log.zig](../../src/log.zig) | 465 | 16 | 7 | `std.testing.allocator` |
-| [main.zig](../../src/main.zig) | 255 | 2 | 0 | `gpa.deinit() != .leak` |
-| [podman_api.zig](../../src/podman_api.zig) | 947 | 26 | 14 | `std.testing.allocator` |
+| [main.zig](../../src/main.zig) | 276 | 2 | 0 | `gpa.deinit() != .leak` |
+| [podman_api.zig](../../src/podman_api.zig) | 1087 | 33 | 16 | `std.testing.allocator` |
 | [utils.zig](../../src/utils.zig) | 42 | 3 | 2 | `stack-only (no heap)` |
 
 ## Static Security & Memory Gates
@@ -209,3 +213,10 @@ flowchart LR
 - **Root Cause**: เดิม CLI ไม่รองรับ `-v` จึงไม่มีจุดตรวจ; การเพิ่ม mount โดยไม่มี policy จะเปิดช่องโหว่ path traversal + dangerous-host-path ทันที (จัดอยู่ในคลาสเดียวกับ BUG-005 แต่เป็นฝั่ง host filesystem)
 - **Fix**: เพิ่ม `podman_api.makeMount()` + `validateHostPath()` / `validateVolumeName()` / `validateContainerPath()` ใน `src/podman_api.zig`: source/target ต้องเป็น absolute, ห้าม `..`/`.`/`//`/trailing-slash/control-char, ยาว ≤ 4096; บล็อก subtree ของ `/`, `/etc`, `/proc`, `/sys`, `/dev`, `/boot`, `/run`, `/var/run`, `/var/lib/docker`, `/var/lib/containers`, `/root`; default เป็น read-only; allow-list ของ `/etc` (`localtime`, `timezone`, `hosts`, `resolv.conf`, `nsswitch.conf`, `hostname`) ต้อง `:ro` เท่านั้น; `createContainer` re-validate `Mounts` แบบ defense-in-depth ก่อน stringify JSON; เพิ่มเทส DENY ครบ (traversal, dangerous roots, rw-on-`/etc`) และ smoke E2E ตรวจว่า `-v /etc:/data` ถูกปฏิเสธก่อนถึง daemon
 - **Prevention**: ทุก field ที่อ้างถึง **path บน host** (mounts, volumes, อนาคต `build` context / `--env-file`) ต้องผ่าน validator แบบ fail-closed ที่ absolute+no-traversal+denylist และ default เป็นสิทธิ์ต่ำสุด (read-only) เสมอ — ห้าม serialize ค่าดิบลง request
+
+### BUG-015 — Port Publishing Without a Fail-Closed Port Policy
+- **Source**: [docs/vault/Bug-Playbook.md:171](../../docs/vault/Bug-Playbook.md#L171) · **Status**: `Guarded`
+- **Symptom**: ระหว่างทำ Phase 1 (`-p`/`--publish`) หากส่ง port mapping เข้าไปใน `ExposedPorts`/`HostConfig.PortBindings` ตรง ๆ จะสามารถประกาศพอร์ตนอกช่วง (`0`, `>65535`) ที่ daemon ตีความเป็นค่าอื่น, ใส่ protocol แปลกปลอม, หรือใส่ host address ที่ไม่ใช่ IP จริง (เช่น hostname ภายนอก) ทำให้เกิด binding ที่คาดไม่ถึงและขยาย attack surface โดยไม่ตั้งใจ
+- **Root Cause**: เดิม CLI ไม่รองรับ `-p` จึงไม่มีจุดตรวจ; การ parse port string แบบหลวมแล้ว serialize ดิบจะเกิด mismatch ระหว่างสิ่งที่ผู้ใช้ตั้งใจกับสิ่งที่ daemon bind (จัดอยู่ในคลาสเดียวกับ BUG-005/014 แต่เป็นฝั่ง network surface)
+- **Fix**: เพิ่ม `podman_api.makePortMapping()` + `validatePortMapping()` ใน `src/podman_api.zig`: container/host port ต้องอยู่ใน `1..65535`, proto allow-list `tcp`/`udp`/`sctp`, host address (ถ้ามี) ต้องผ่าน `std.net.Address.parseIp4`; `src/cli.zig` parse เฉพาะรูปแบบ `CONTAINER`, `CONTAINER/proto`, `HOST:CONTAINER[/proto]`, `IPV4:HOST:CONTAINER[/proto]`; เกิน 3 field หรือ port 0/เกินช่วง/proto แปลก → `InvalidValue`; `ExposedPorts`/`PortBindings` serialize ด้วย custom `jsonStringify` โดย bind เฉพาะ entry ที่มี host port และใช้ `HostPort` เป็น string ตาม Docker schema; `createContainer` re-validate `ExposedPorts` แบบ defense-in-depth ก่อน stringify JSON; เพิ่มเทส DENY ครบ (port 0, proto แปลก, IP ผิดรูป) และ smoke E2E ตรวจว่า `-p 0:80` ถูกปฏิเสธก่อนถึง daemon
+- **Prevention**: ทุก field ที่อ้างถึง **network endpoint** (ports, อนาคต `--network`, `--hostname`) ต้องผ่าน validator แบบ allow-list (range + protocol + IP literal) และตรวจซ้ำในชั้น API (defense-in-depth) ก่อน serialize — ห้าม serialize ค่าดิบลง request

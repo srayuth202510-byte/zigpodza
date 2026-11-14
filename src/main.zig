@@ -135,22 +135,6 @@ fn dispatch(
         .logs => |container| try pod.fetchLogs(client, logger, container, stdout),
         .version => try pod.showVersion(client, logger, version, stdout),
         .run => |r| {
-            // Defer removal until after fetchLogs when attached so output is not lost.
-            const auto_remove = r.detach and r.remove;
-            const has_host_cfg = auto_remove or
-                r.read_only or
-                r.no_new_privileges or
-                r.memory != null or
-                r.pids_limit != null;
-            const sec_opts: []const []const u8 = &.{"no-new-privileges"};
-            const host_cfg: ?pod.HostConfig = if (has_host_cfg) .{
-                .AutoRemove = auto_remove,
-                .ReadonlyRootfs = r.read_only,
-                .Memory = r.memory,
-                .PidsLimit = r.pids_limit,
-                .SecurityOpt = if (r.no_new_privileges) sec_opts else null,
-            } else null;
-
             // Validate and classify each -v mount (bind vs named volume).
             var mount_buf = std.ArrayList(pod.Mount).init(client.allocator);
             defer mount_buf.deinit();
@@ -158,10 +142,43 @@ fn dispatch(
                 try mount_buf.append(try pod.makeMount(v.source, v.destination, v.readonly));
             }
 
+            // Validate each published port mapping.
+            var port_buf = std.ArrayList(pod.PortMapping).init(client.allocator);
+            defer port_buf.deinit();
+            for (r.ports) |p| {
+                try port_buf.append(try pod.makePortMapping(p.host_ip, p.host_port, p.container_port, p.proto));
+            }
+            var has_binding = false;
+            for (port_buf.items) |p| {
+                if (p.host_port != null) {
+                    has_binding = true;
+                    break;
+                }
+            }
+
+            // Defer removal until after fetchLogs when attached so output is not lost.
+            const auto_remove = r.detach and r.remove;
+            const has_host_cfg = auto_remove or
+                r.read_only or
+                r.no_new_privileges or
+                r.memory != null or
+                r.pids_limit != null or
+                has_binding;
+            const sec_opts: []const []const u8 = &.{"no-new-privileges"};
+            const host_cfg: ?pod.HostConfig = if (has_host_cfg) .{
+                .AutoRemove = auto_remove,
+                .ReadonlyRootfs = r.read_only,
+                .Memory = r.memory,
+                .PidsLimit = r.pids_limit,
+                .SecurityOpt = if (r.no_new_privileges) sec_opts else null,
+                .PortBindings = if (has_binding) .{ .ports = port_buf.items } else null,
+            } else null;
+
             const req = pod.ContainerCreateRequest{
                 .Image = r.image,
                 .Cmd = if (r.cmd.len > 0) r.cmd else null,
                 .Env = if (r.env.len > 0) r.env else null,
+                .ExposedPorts = if (port_buf.items.len > 0) .{ .ports = port_buf.items } else null,
                 .Mounts = if (mount_buf.items.len > 0) mount_buf.items else null,
                 .HostConfig = host_cfg,
             };
@@ -234,6 +251,10 @@ fn reportFailure(logger: *log.Logger, cmd: cli.Command, socket_path: []const u8,
         ),
         pod.ApiError.InvalidMountTarget => logger.err(
             "Rejected invalid container mount target (must be an absolute, traversal-free path).",
+            .{},
+        ),
+        pod.ApiError.InvalidPort => logger.err(
+            "Rejected invalid port mapping. Use [IP:]HOST:CONTAINER[/tcp|udp|sctp] with ports 1-65535 and an IPv4 host address.",
             .{},
         ),
         pod.ApiError.PodmanApiError => {

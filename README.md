@@ -101,6 +101,9 @@ zigpod run --rm -v /srv/data:/data -v /srv/cache:/cache:rw alpine:3.20 ls /data
 # Mount a Podman-managed named volume
 zigpod run --rm -v myvol:/var/lib/data alpine:3.20 ls /var/lib/data
 
+# Publish container ports (TCP by default, repeatable, IPv4 host address optional)
+zigpod run --rm -p 8080:80 -p 127.0.0.1:9000:9000/udp alpine:3.20 sleep 1
+
 # Run a container in the background with a name
 zigpod run -d --name demo-alpine alpine:3.20 sleep 60
 
@@ -157,6 +160,7 @@ zig build test
 - Helper formatting (`src/utils.zig`)
 - Container ID/name validation, Docker stream log demultiplexing, JSON response deserialization และ mock Unix-socket end-to-end lifecycle (`src/podman_api.zig`)
 - Host bind-mount policy validator (`validateHostPath`), bind/volume mount classification และ `Mounts` JSON serialization (`src/podman_api.zig`)
+- Port-publishing validator (`validatePortMapping`), `ExposedPorts`/`PortBindings` JSON serialization และ CLI `-p` parsing (`src/cli.zig`, `src/podman_api.zig`)
 
 ---
 
@@ -170,6 +174,7 @@ zig build test
   - `http.decodeChunked` ใช้ checked arithmetic (`std.math.add`) และตรวจสอบ CRLF trailer ของทุก chunk เพื่อป้องกัน integer overflow และ out-of-bounds read
   - `podman_api.validateIdentifier` ป้องกัน path traversal (`..`, `/`) และ query/header injection บน container ID และ name
   - `podman_api.validateHostPath` (BUG-014) บังคับ **fail-closed host mount policy**: บล็อกการ bind-mount `/`, `/etc`, `/proc`, `/sys`, `/dev`, `/boot`, `/run`, `/var/run`, `/var/lib/docker`, `/var/lib/containers`, `/root` และบังคับ default `:ro` สำหรับ sensitive paths
+  - `podman_api.validatePortMapping` (BUG-015) ปฏิเสธพอร์ตนอกช่วง `1..65535`, โปรโตคอลที่ไม่อยู่ใน allow-list (`tcp`/`udp`/`sctp`) และ host address ที่ไม่ใช่ IPv4 literal ก่อนส่งคำขอไปยัง daemon
 - **Automated Security Check Script**:
 
 ```bash
@@ -200,6 +205,7 @@ Apply defense-in-depth limits in `HostConfig` when launching containers:
 - `--read-only`: Mount the container root filesystem read-only (`ReadonlyRootfs`)
 - `--no-new-privileges`: Set `SecurityOpt: ["no-new-privileges"]`
 - `-v, --volume SRC:DST[:ro|rw]`: Bind-mount a host path or named volume (repeatable, default **read-only**)
+- `-p, --publish [IP:]HOST:CONTAINER[/tcp|udp|sctp]`: Publish a container port (repeatable)
 
 ```bash
 zigpod run --rm -m 64m --pids-limit 32 --read-only --no-new-privileges alpine:3.20 echo ok
@@ -214,6 +220,14 @@ zigpod run --rm -m 64m --pids-limit 32 --read-only --no-new-privileges alpine:3.
 - Bind mounts default to **read-only**; pass `:rw` to opt out.
 - The following host subtrees are always rejected: `/`, `/etc` (except a read-only allow-list of `/etc/localtime`, `/etc/timezone`, `/etc/hosts`, `/etc/resolv.conf`, `/etc/nsswitch.conf`, `/etc/hostname`), `/proc`, `/sys`, `/dev`, `/boot`, `/run`, `/var/run`, `/var/lib/docker`, `/var/lib/containers`, and `/root`.
 - Sensitive allow-listed `/etc` files may only be mounted read-only (`:rw` is rejected).
+
+#### Port Publishing Policy (`-p`)
+
+`podman_api.validatePortMapping` (BUG-015) validates every `-p` mapping **before** any request reaches the daemon:
+
+- Accepted forms: `CONTAINER`, `CONTAINER/proto`, `HOST:CONTAINER[/proto]`, and `IPV4:HOST:CONTAINER[/proto]` (the host address must be a valid IPv4 literal).
+- Container and host ports must be in `1..65535`; the protocol allow-list is `tcp` (default), `udp`, and `sctp`.
+- Container ports are emitted in `ExposedPorts` (`{"80/tcp":{}}`); mappings with an explicit host port also populate `HostConfig.PortBindings` (`{"80/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]}`).
 
 ### Built-In 14-Case Fail-Closed Self-Test (`zigpod demo`)
 

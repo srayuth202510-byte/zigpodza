@@ -11,6 +11,7 @@ pub const ApiError = error{
     InvalidIdentifier,
     InvalidHostPath,
     InvalidMountTarget,
+    InvalidPort,
 };
 
 pub const HostConfig = struct {
@@ -19,6 +20,7 @@ pub const HostConfig = struct {
     Memory: ?i64 = null,
     PidsLimit: ?i64 = null,
     SecurityOpt: ?[]const []const u8 = null,
+    PortBindings: ?PortBindings = null,
 };
 
 /// A bind mount or named-volume mount, serialized into the container-create
@@ -30,10 +32,65 @@ pub const Mount = struct {
     ReadOnly: bool = true,
 };
 
+/// A validated port mapping. `host_ip`/`host_port` are null when only a
+/// container port is exposed.
+pub const PortMapping = struct {
+    host_ip: ?[]const u8 = null,
+    host_port: ?u16 = null,
+    container_port: u16,
+    proto: []const u8 = "tcp",
+};
+
+/// Serializes the Docker `ExposedPorts` object: `{"80/tcp":{},...}`.
+pub const ExposedPorts = struct {
+    ports: []const PortMapping,
+
+    pub fn jsonStringify(self: ExposedPorts, jw: anytype) !void {
+        try jw.beginObject();
+        for (self.ports) |p| {
+            var key_buf: [16]u8 = undefined;
+            const key = std.fmt.bufPrint(&key_buf, "{d}/{s}", .{ p.container_port, p.proto }) catch unreachable;
+            try jw.objectField(key);
+            try jw.beginObject();
+            try jw.endObject();
+        }
+        try jw.endObject();
+    }
+};
+
+/// Serializes the Docker `HostConfig.PortBindings` object, skipping entries
+/// without an explicit host port: `{"80/tcp":[{"HostPort":"8080"}],...}`.
+pub const PortBindings = struct {
+    ports: []const PortMapping,
+
+    pub fn jsonStringify(self: PortBindings, jw: anytype) !void {
+        try jw.beginObject();
+        for (self.ports) |p| {
+            const host_port = p.host_port orelse continue;
+            var key_buf: [16]u8 = undefined;
+            const key = std.fmt.bufPrint(&key_buf, "{d}/{s}", .{ p.container_port, p.proto }) catch unreachable;
+            try jw.objectField(key);
+            try jw.beginArray();
+            try jw.beginObject();
+            if (p.host_ip) |ip| {
+                try jw.objectField("HostIp");
+                try jw.write(ip);
+            }
+            try jw.objectField("HostPort");
+            var port_buf: [8]u8 = undefined;
+            try jw.write(std.fmt.bufPrint(&port_buf, "{d}", .{host_port}) catch unreachable);
+            try jw.endObject();
+            try jw.endArray();
+        }
+        try jw.endObject();
+    }
+};
+
 pub const ContainerCreateRequest = struct {
     Image: []const u8,
     Cmd: ?[]const []const u8 = null,
     Env: ?[]const []const u8 = null,
+    ExposedPorts: ?ExposedPorts = null,
     Mounts: ?[]const Mount = null,
     HostConfig: ?HostConfig = null,
 };
@@ -189,6 +246,39 @@ fn validateMount(m: Mount) ApiError!void {
     try validateContainerPath(m.Target);
 }
 
+/// Validates a published port: container/host ports are 1..65535, the protocol
+/// is tcp/udp/sctp, and any host address must be a valid IPv4 literal (BUG-015).
+pub fn validatePortMapping(p: PortMapping) ApiError!void {
+    if (p.container_port == 0) return ApiError.InvalidPort;
+    if (p.host_port) |hp| {
+        if (hp == 0) return ApiError.InvalidPort;
+    }
+    if (!(std.mem.eql(u8, p.proto, "tcp") or std.mem.eql(u8, p.proto, "udp") or std.mem.eql(u8, p.proto, "sctp"))) {
+        return ApiError.InvalidPort;
+    }
+    if (p.host_ip) |ip| {
+        _ = std.net.Address.parseIp4(ip, 0) catch return ApiError.InvalidPort;
+    }
+}
+
+/// Validates and constructs a `PortMapping` (defense-in-depth re-check used by
+/// `main` before the request is serialized).
+pub fn makePortMapping(
+    host_ip: ?[]const u8,
+    host_port: ?u16,
+    container_port: u16,
+    proto: []const u8,
+) ApiError!PortMapping {
+    const mapping = PortMapping{
+        .host_ip = host_ip,
+        .host_port = host_port,
+        .container_port = container_port,
+        .proto = proto,
+    };
+    try validatePortMapping(mapping);
+    return mapping;
+}
+
 fn appendQueryEncoded(out: *std.ArrayList(u8), s: []const u8) !void {
     for (s) |c| {
         if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
@@ -221,6 +311,9 @@ pub fn createContainer(
     // constructed `Mount` values by hand (BUG-014).
     if (cfg.Mounts) |mounts| {
         for (mounts) |m| try validateMount(m);
+    }
+    if (cfg.ExposedPorts) |exposed| {
+        for (exposed.ports) |p| try validatePortMapping(p);
     }
 
     var path_buf = std.ArrayList(u8).init(client.allocator);
@@ -605,6 +698,46 @@ test "ContainerCreateRequest serializes bind mounts" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"ReadOnly\":false") != null);
 }
 
+test "validatePortMapping and makePortMapping reject invalid ports" {
+    try validatePortMapping(.{ .container_port = 80 });
+    try validatePortMapping(.{ .host_ip = "127.0.0.1", .host_port = 8080, .container_port = 80, .proto = "udp" });
+
+    try std.testing.expectError(ApiError.InvalidPort, validatePortMapping(.{ .container_port = 0 }));
+    try std.testing.expectError(ApiError.InvalidPort, validatePortMapping(.{ .container_port = 80, .host_port = 0 }));
+    try std.testing.expectError(ApiError.InvalidPort, validatePortMapping(.{ .container_port = 80, .proto = "icmp" }));
+    try std.testing.expectError(ApiError.InvalidPort, validatePortMapping(.{ .container_port = 80, .host_ip = "not-an-ip" }));
+    try std.testing.expectError(ApiError.InvalidPort, validatePortMapping(.{ .container_port = 80, .host_ip = "1.2.3.4.5" }));
+
+    const m = try makePortMapping("10.0.0.1", 9000, 9000, "sctp");
+    try std.testing.expectEqualStrings("10.0.0.1", m.host_ip.?);
+    try std.testing.expectEqual(@as(?u16, 9000), m.host_port);
+    try std.testing.expectError(ApiError.InvalidPort, makePortMapping(null, null, 0, "tcp"));
+}
+
+test "ExposedPorts and PortBindings serialize to Docker JSON" {
+    const alloc = std.testing.allocator;
+    const ports = [_]PortMapping{
+        .{ .host_port = 8080, .container_port = 80 },
+        .{ .host_port = 53, .container_port = 53, .proto = "udp" },
+        .{ .host_ip = "127.0.0.1", .host_port = 9000, .container_port = 9000 },
+        .{ .container_port = 3000 },
+    };
+    const req = ContainerCreateRequest{
+        .Image = "alpine:3.20",
+        .ExposedPorts = .{ .ports = &ports },
+        .HostConfig = .{ .PortBindings = .{ .ports = &ports } },
+    };
+    const json = try std.json.stringifyAlloc(alloc, req, .{ .emit_null_optional_fields = false });
+    defer alloc.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"ExposedPorts\":{\"80/tcp\":{},\"53/udp\":{},\"9000/tcp\":{},\"3000/tcp\":{}}") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        json,
+        "\"PortBindings\":{\"80/tcp\":[{\"HostPort\":\"8080\"}],\"53/udp\":[{\"HostPort\":\"53\"}],\"9000/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"9000\"}]}",
+    ) != null);
+}
+
 test "demuxLogs handles multiplexed docker stream frames and zero-length frame" {    const frame = [_]u8{
         1, 0, 0, 0, 0, 0, 0, 6, 'h', 'e', 'l', 'l', 'o', '\n',
         1, 0, 0, 0, 0, 0, 0, 0,
@@ -849,6 +982,13 @@ test "end-to-end container lifecycle over mock Unix socket has zero memory leaks
     try std.testing.expectError(
         ApiError.InvalidHostPath,
         createContainer(&client, &logger, .{ .Image = "alpine:3.20", .Mounts = &bad_mounts }, null),
+    );
+
+    // Invalid published ports also fail closed before any socket traffic.
+    const bad_ports = [_]PortMapping{.{ .container_port = 0 }};
+    try std.testing.expectError(
+        ApiError.InvalidPort,
+        createContainer(&client, &logger, .{ .Image = "alpine:3.20", .ExposedPorts = .{ .ports = &bad_ports } }, null),
     );
 
     const id = try createContainer(&client, &logger, .{

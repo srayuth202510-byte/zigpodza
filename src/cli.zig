@@ -14,6 +14,7 @@ pub const usage =
     \\      --name NAME                Assign a name to the container
     \\      -e, --env KEY=VALUE        Set an environment variable (repeatable)
     \\      -v, --volume SRC:DST[:ro|rw]  Bind mount a host path (default: read-only)
+    \\      -p, --publish [IP:]HOST:CONTAINER[/proto]  Publish a container port (repeatable)
     \\      -m, --memory BYTES         Memory limit (e.g., 64m, 1g, 1048576)
     \\      --pids-limit N             Limit container PIDs
     \\      --read-only                Mount container root filesystem as read-only
@@ -53,11 +54,21 @@ pub const Volume = struct {
     readonly: bool = true,
 };
 
+/// Parsed `-p`/`--publish` mapping. `host_ip` (IPv4) and `host_port` are null
+/// when the user only exposes a container port.
+pub const PortMapping = struct {
+    host_ip: ?[]const u8 = null,
+    host_port: ?u16 = null,
+    container_port: u16,
+    proto: []const u8 = "tcp",
+};
+
 pub const RunOpts = struct {
     image: []const u8,
     cmd: []const []const u8 = &.{},
     env: []const []const u8 = &.{},
     volumes: []const Volume = &.{},
+    ports: []const PortMapping = &.{},
     name: ?[]const u8 = null,
     detach: bool = false,
     remove: bool = false,
@@ -96,6 +107,7 @@ pub const Parsed = struct {
             .run => |r| {
                 if (r.env.len > 0) allocator.free(r.env);
                 if (r.volumes.len > 0) allocator.free(r.volumes);
+                if (r.ports.len > 0) allocator.free(r.ports);
             },
             else => {},
         }
@@ -300,12 +312,56 @@ fn parseVolumeSpec(spec: []const u8) ParseError!Volume {
     return .{ .source = source, .destination = destination, .readonly = readonly };
 }
 
+fn parsePortNumber(s: []const u8) ParseError!u16 {
+    if (s.len == 0) return error.InvalidValue;
+    const n = std.fmt.parseInt(u16, s, 10) catch return error.InvalidValue;
+    if (n == 0) return error.InvalidValue;
+    return n;
+}
+
+/// Parses `[IP:]HOST:CONTAINER[/proto]` or `CONTAINER[/proto]`. Only IPv4 host
+/// addresses are accepted. The port policy is re-checked by `podman_api.makePortMapping`.
+fn parsePortSpec(spec: []const u8) ParseError!PortMapping {
+    if (spec.len == 0) return error.InvalidValue;
+
+    var base = spec;
+    var proto: []const u8 = "tcp";
+    if (std.mem.lastIndexOfScalar(u8, spec, '/')) |slash| {
+        proto = spec[slash + 1 ..];
+        base = spec[0..slash];
+        if (!(eql(proto, "tcp") or eql(proto, "udp") or eql(proto, "sctp"))) return error.InvalidValue;
+    }
+
+    var it = std.mem.splitScalar(u8, base, ':');
+    const f0 = it.next() orelse return error.InvalidValue;
+    const f1 = it.next();
+    const f2 = it.next();
+    if (it.next() != null) return error.InvalidValue; // more than three fields
+
+    var mapping = PortMapping{ .container_port = 0, .proto = proto };
+    if (f2) |container| {
+        // IP:HOST:CONTAINER — host address must be a valid IPv4 literal.
+        _ = std.net.Address.parseIp4(f0, 0) catch return error.InvalidValue;
+        mapping.host_ip = f0;
+        mapping.host_port = try parsePortNumber(f1.?);
+        mapping.container_port = try parsePortNumber(container);
+    } else if (f1) |container| {
+        mapping.host_port = try parsePortNumber(f0);
+        mapping.container_port = try parsePortNumber(container);
+    } else {
+        mapping.container_port = try parsePortNumber(f0);
+    }
+    return mapping;
+}
+
 fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!RunOpts {
     var opts = RunOpts{ .image = "" };
     var env = std.ArrayList([]const u8).init(allocator);
     errdefer env.deinit();
     var volumes = std.ArrayList(Volume).init(allocator);
     errdefer volumes.deinit();
+    var ports = std.ArrayList(PortMapping).init(allocator);
+    errdefer ports.deinit();
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -334,6 +390,10 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
             try volumes.append(try parseVolumeSpec(try takeValue(args, &i)));
         } else if (std.mem.startsWith(u8, a, "--volume=")) {
             try volumes.append(try parseVolumeSpec(a["--volume=".len..]));
+        } else if (eql(a, "-p") or eql(a, "--publish")) {
+            try ports.append(try parsePortSpec(try takeValue(args, &i)));
+        } else if (std.mem.startsWith(u8, a, "--publish=")) {
+            try ports.append(try parsePortSpec(a["--publish=".len..]));
         } else if (isFlag(a)) {
             return error.UnknownFlag;
         } else break; // first positional = IMAGE; everything after is the command
@@ -344,6 +404,8 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
     opts.env = try env.toOwnedSlice();
     errdefer allocator.free(opts.env);
     opts.volumes = try volumes.toOwnedSlice();
+    errdefer allocator.free(opts.volumes);
+    opts.ports = try ports.toOwnedSlice();
     return opts;
 }
 
@@ -532,6 +594,59 @@ test "parse rejects malformed volume specs without leaking allocations" {
     try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "run", "-v" }));
     // A parsed volume must be freed when a later error aborts the parse.
     try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "run", "-v", "/src:/dst" }));
+}
+
+test "parse run publish port mappings" {
+    const alloc = std.testing.allocator;
+    var parsed = try parse(alloc, &.{
+        "run",
+        "-p",
+        "8080:80",
+        "--publish",
+        "53:53/udp",
+        "--publish=127.0.0.1:9000:9000",
+        "--publish",
+        "3000",
+        "alpine:3.20",
+    });
+    defer parsed.deinit(alloc);
+
+    const r = parsed.command.run;
+    try std.testing.expectEqual(@as(usize, 4), r.ports.len);
+
+    try std.testing.expect(r.ports[0].host_ip == null);
+    try std.testing.expectEqual(@as(?u16, 8080), r.ports[0].host_port);
+    try std.testing.expectEqual(@as(u16, 80), r.ports[0].container_port);
+    try std.testing.expectEqualStrings("tcp", r.ports[0].proto);
+
+    try std.testing.expectEqual(@as(?u16, 53), r.ports[1].host_port);
+    try std.testing.expectEqual(@as(u16, 53), r.ports[1].container_port);
+    try std.testing.expectEqualStrings("udp", r.ports[1].proto);
+
+    try std.testing.expectEqualStrings("127.0.0.1", r.ports[2].host_ip.?);
+    try std.testing.expectEqual(@as(?u16, 9000), r.ports[2].host_port);
+    try std.testing.expectEqual(@as(u16, 9000), r.ports[2].container_port);
+
+    try std.testing.expect(r.ports[3].host_port == null);
+    try std.testing.expectEqual(@as(u16, 3000), r.ports[3].container_port);
+    try std.testing.expectEqualStrings("alpine:3.20", r.image);
+}
+
+test "parse rejects malformed publish specs without leaking allocations" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "-p", "0:80", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "-p", "8080:0", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "-p", "70000:80", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "-p", "abc:80", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "-p", "1.2.3.4.5:80:80", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "-p", "1:2:3:4", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "-p", "8080:80/bogus", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "-p", "8080:80/", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "-p", ":80", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--publish=", "alpine" }));
+    try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "run", "-p" }));
+    // A parsed port mapping must be freed when a later error aborts the parse.
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "run", "-p", "8080:80" }));
 }
 
 test "parse demo and audit subcommands" {

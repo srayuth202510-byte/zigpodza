@@ -89,3 +89,5 @@
 2026-11-14T04:16:08Z [ERROR] Rejected unsafe host path or volume name. Bind mounts must be absolute, traversal-free, and may not target /, /etc, /proc, /sys, /dev, /boot, /run, /root, or container-engine state; sensitive /etc files are read-only.
 2026-11-14T04:17:19Z [INFO] auto-audit passed (hook=false)
 2026-11-14T04:17:21Z [INFO] auto-audit passed (hook=false)
+2026-11-14T04:23:12Z [INFO] auto-audit passed (hook=false)
+2026-11-14T04:23:33Z [INFO] auto-audit passed (hook=false)
