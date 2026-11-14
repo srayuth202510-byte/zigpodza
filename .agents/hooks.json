@@ -1,0 +1,16 @@
+{
+  "auto-audit": {
+    "PostToolUse": [
+      {
+        "matcher": "edit_file|write_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "../scripts/auto-audit.sh --hook",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}
