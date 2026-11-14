@@ -29,10 +29,8 @@ pub fn createPod(client: *const http.Client, logger: *log.Logger, name: []const 
     defer client.allocator.free(req_body);
 
     logger.debug("POST {s}", .{path});
-    std.debug.print("DBG: before createPod request", .{});
     const resp = try client.request("POST", path, req_body);
     defer resp.deinit();
-    std.debug.print("DBG: createPod response ok={}", .{resp.ok()});
 
     if (!resp.ok()) return logApiFailure(logger, "POST", path, resp);
 

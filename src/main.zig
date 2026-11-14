@@ -497,6 +497,8 @@ test {
     _ = http;
     _ = log;
     _ = pod;
+    _ = pods;
+    _ = build_mod;
     _ = policy;
     _ = @import("utils.zig");
     std.testing.refAllDecls(@This());

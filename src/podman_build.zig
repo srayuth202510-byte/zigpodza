@@ -9,6 +9,7 @@ const validate = @import("podman_validate.zig");
 const th = @import("podman_test_helpers.zig");
 
 const api_prefix = validate.api_prefix;
+const validateHostPath = validate.validateHostPath;
 const validateResourceRef = validate.validateResourceRef;
 const appendQueryEncoded = validate.appendQueryEncoded;
 const logApiFailure = validate.logApiFailure;
@@ -64,11 +65,7 @@ fn writeTarHeader(out: *std.ArrayList(u8), name: []const u8, size: u64, typeflag
 
     var sum: u64 = 0;
     for (hdr) |c| sum += c;
-    var cbuf: [16]u8 = undefined;
-    const cs = std.fmt.bufPrint(&cbuf, "{o}", .{sum}) catch return error.TarHeader;
-    const cs_len: usize = cs.len;
-    for (0..cs_len) |i| hdr[148 + i] = cs[i];
-    hdr[148 + cs_len] = 0;
+    _ = std.fmt.bufPrint(hdr[148..155], "{o:0>6}\x00", .{sum}) catch return error.TarHeader;
     hdr[155] = ' ';
 
     try out.appendSlice(&hdr);
@@ -89,6 +86,18 @@ const Entry = struct {
     size: u64,
     linkname: []u8,
 };
+
+fn validateBuildSymlinkTarget(target: []const u8) ApiError!void {
+    if (target.len == 0 or target.len > 100) return ApiError.InvalidHostPath;
+    if (target[0] == '/') return ApiError.InvalidHostPath;
+    for (target) |c| {
+        if (c < 0x20 or c == 0x7f) return ApiError.InvalidHostPath;
+    }
+    var segs = std.mem.splitScalar(u8, target, '/');
+    while (segs.next()) |seg| {
+        if (std.mem.eql(u8, seg, "..")) return ApiError.InvalidHostPath;
+    }
+}
 
 fn collectEntries(alloc: std.mem.Allocator, dir: std.fs.Dir) ![]Entry {
     var list = std.ArrayList(Entry).init(alloc);
@@ -112,8 +121,11 @@ fn collectEntries(alloc: std.mem.Allocator, dir: std.fs.Dir) ![]Entry {
         var linkname: []u8 = &.{};
         if (kind == .sym_link) {
             var lbuf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-            linkname = try alloc.dupe(u8, try dir.readLink(w.basename, &lbuf));
+            const raw_link = try dir.readLink(w.path, &lbuf);
+            try validateBuildSymlinkTarget(raw_link);
+            linkname = try alloc.dupe(u8, raw_link);
         }
+        errdefer if (linkname.len > 0) alloc.free(linkname);
         try list.append(.{
             .name = try alloc.dupe(u8, w.path),
             .kind = kind,
@@ -133,8 +145,17 @@ fn collectEntries(alloc: std.mem.Allocator, dir: std.fs.Dir) ![]Entry {
 /// Serializes a directory into a ustar archive (deterministic: sorted names,
 /// mtime 0). `out` must be owned by the caller and starts empty.
 pub fn tarBuildContext(alloc: std.mem.Allocator, ctx_dir: []const u8, out: *std.ArrayList(u8)) !void {
+    if (ctx_dir.len == 0) return ApiError.InvalidHostPath;
+    if (std.mem.startsWith(u8, ctx_dir, "/")) {
+        try validateHostPath(ctx_dir, false);
+    }
+
     var dir = std.fs.cwd().openDir(ctx_dir, .{ .iterate = true }) catch return ApiError.NotFound;
     defer dir.close();
+
+    const real_ctx = dir.realpathAlloc(alloc, ".") catch return ApiError.InvalidHostPath;
+    defer alloc.free(real_ctx);
+    try validateHostPath(real_ctx, false);
 
     const entries = try collectEntries(alloc, dir);
     defer {
@@ -146,7 +167,8 @@ pub fn tarBuildContext(alloc: std.mem.Allocator, ctx_dir: []const u8, out: *std.
     }
 
     const size_check = std.math.mul(usize, entries.len + 1, tar_block) catch return ApiError.BuildContextTooLarge;
-    try out.ensureTotalCapacity(out.items.len + size_check);
+    const total_cap = std.math.add(usize, out.items.len, size_check) catch return ApiError.BuildContextTooLarge;
+    try out.ensureTotalCapacity(total_cap);
 
     for (entries) |e| {
         const tname = if (e.kind == .directory)
@@ -162,6 +184,8 @@ pub fn tarBuildContext(alloc: std.mem.Allocator, ctx_dir: []const u8, out: *std.
                     else => return err,
                 };
                 defer alloc.free(content);
+                const projected = std.math.add(usize, out.items.len, tar_block + content.len) catch return ApiError.BuildContextTooLarge;
+                if (projected > max_build_context_bytes) return ApiError.BuildContextTooLarge;
                 try writeTarHeader(out, tname, content.len, '0', "");
                 try out.appendSlice(content);
                 try writePad(out, content.len);
@@ -194,10 +218,17 @@ pub fn buildImage(
     writer: anytype,
 ) !void {
     try validateResourceRef(tag);
+    if (ctx_dir.len == 0) return ApiError.InvalidHostPath;
+    if (std.mem.startsWith(u8, ctx_dir, "/")) {
+        try validateHostPath(ctx_dir, false);
+    }
 
     // Fail-closed: refuse to build without a Dockerfile/Containerfile in the context.
     var dir = std.fs.cwd().openDir(ctx_dir, .{}) catch return ApiError.NotFound;
     defer dir.close();
+    const real_ctx = dir.realpathAlloc(client.allocator, ".") catch return ApiError.InvalidHostPath;
+    defer client.allocator.free(real_ctx);
+    try validateHostPath(real_ctx, false);
     const has_dockerfile = dir.access("Dockerfile", .{}) catch null;
     const has_containerfile = dir.access("Containerfile", .{}) catch null;
     if (has_dockerfile == null and has_containerfile == null) return ApiError.MissingDockerfile;
@@ -218,7 +249,8 @@ pub fn buildImage(
 
     if (!resp.ok()) return logApiFailure(logger, "POST", path_buf.items, resp);
 
-    var image_id: []const u8 = "";
+    var image_id: ?[]u8 = null;
+    defer if (image_id) |id| client.allocator.free(id);
     var lines = std.mem.splitScalar(u8, resp.body, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
@@ -238,16 +270,20 @@ pub fn buildImage(
             return ApiError.BuildFailed;
         }
         if (ev.value.aux) |aux| {
-            if (aux.ID.len > 0) image_id = aux.ID;
+            if (aux.ID.len > 0) {
+                const duped = try client.allocator.dupe(u8, aux.ID);
+                if (image_id) |old| client.allocator.free(old);
+                image_id = duped;
+            }
         }
         if (ev.value.stream) |s| {
             try writer.writeAll(s);
         }
     }
 
-    if (image_id.len > 0) {
-        try writer.print("=> image {s}\n", .{image_id});
-        logger.info("built image {s} ({s})", .{ tag, image_id });
+    if (image_id) |id| {
+        try writer.print("=> image {s}\n", .{id});
+        logger.info("built image {s} ({s})", .{ tag, id });
     } else {
         logger.info("built image {s}", .{tag});
     }
@@ -263,6 +299,7 @@ test "tarBuildContext emits deterministic ustar and round-trips via std.tar" {
     try tmp.dir.writeFile(.{ .sub_path = "Dockerfile", .data = "FROM alpine:3.20\n" });
     try tmp.dir.makePath("assets");
     try tmp.dir.writeFile(.{ .sub_path = "assets/hello.txt", .data = "hi" });
+    try tmp.dir.symLink("hello.txt", "assets/link", .{});
 
     const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(dir_path);
@@ -288,12 +325,16 @@ test "tarBuildContext emits deterministic ustar and round-trips via std.tar" {
         names.deinit();
     }
     var seen_hello_data = false;
+    var seen_link = false;
     while (try iter.next()) |f| {
         try names.append(try alloc.dupe(u8, f.name));
         if (std.mem.eql(u8, f.name, "assets/hello.txt")) {
             var data: [2]u8 = undefined;
-            const nread = try fbs.reader().readAll(&data);
+            const nread = try f.reader().readAll(&data);
             seen_hello_data = nread == 2 and std.mem.eql(u8, &data, "hi");
+        }
+        if (std.mem.eql(u8, f.name, "assets/link") and f.kind == .sym_link) {
+            seen_link = std.mem.eql(u8, f.link_name, "hello.txt");
         }
     }
     var has_dockerfile = false;
@@ -308,6 +349,7 @@ test "tarBuildContext emits deterministic ustar and round-trips via std.tar" {
     try std.testing.expect(has_assets_dir);
     try std.testing.expect(has_hello);
     try std.testing.expect(seen_hello_data);
+    try std.testing.expect(seen_link);
 
     var tar_buf2 = std.ArrayList(u8).init(alloc);
     defer tar_buf2.deinit();
@@ -406,6 +448,24 @@ test "buildImage fail-closed: bad tag, missing context, and missing Dockerfile" 
     try std.testing.expect(e_bad);
     e_bad = false;
     buildImage(&client, &logger, "ok:1.0", dir_path, sink.writer()) catch |e| { e_bad = e == ApiError.MissingDockerfile; };
+    try std.testing.expect(e_bad);
+    e_bad = false;
+    buildImage(&client, &logger, "ok:1.0", "/etc", sink.writer()) catch |e| { e_bad = e == ApiError.InvalidHostPath; };
+    try std.testing.expect(e_bad);
+    e_bad = false;
+    buildImage(&client, &logger, "ok:1.0", "/root", sink.writer()) catch |e| { e_bad = e == ApiError.InvalidHostPath; };
+    try std.testing.expect(e_bad);
+
+    try tmp.dir.writeFile(.{ .sub_path = "Dockerfile", .data = "FROM alpine:3.20\n" });
+    try tmp.dir.symLink("/etc/shadow", "escape_abs", .{});
+    e_bad = false;
+    buildImage(&client, &logger, "ok:1.0", dir_path, sink.writer()) catch |e| { e_bad = e == ApiError.InvalidHostPath; };
+    try std.testing.expect(e_bad);
+    try tmp.dir.deleteFile("escape_abs");
+
+    try tmp.dir.symLink("../outside", "escape_rel", .{});
+    e_bad = false;
+    buildImage(&client, &logger, "ok:1.0", dir_path, sink.writer()) catch |e| { e_bad = e == ApiError.InvalidHostPath; };
     try std.testing.expect(e_bad);
 }
 

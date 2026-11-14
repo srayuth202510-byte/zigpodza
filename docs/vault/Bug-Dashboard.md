@@ -19,7 +19,7 @@ status: active
 
 | Metric | Value |
 | :--- | :--- |
-| Tracked Bug Patterns | **20** (20 Guarded) |
+| Tracked Bug Patterns | **22** (22 Guarded) |
 | Zig Source Modules | **22** |
 | Unit & Integration Tests | **165** |
 | Static Security & Memory Gates | **9/9 PASS** |
@@ -77,6 +77,12 @@ flowchart LR
     BUG019 --> src_log_zig["src/log.zig"]
     BUG020["BUG-020"] --> SEC["[[Security-And-Memory-Checklist]]"]
     BUG020 --> src_main_zig["src/main.zig"]
+    BUG021["BUG-021"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG021 --> src_podman_validate_zig["src/podman_validate.zig"]
+    BUG021 --> src_demo_zig["src/demo.zig"]
+    BUG022["BUG-022"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG022 --> src_podman_build_zig["src/podman_build.zig"]
+    BUG022 --> scripts_balor_security_audit_sh["scripts/balor-security-audit.sh"]
 ```
 
 ## Bug Pattern Registry
@@ -103,6 +109,8 @@ flowchart LR
 | [BUG-018](../../docs/vault/Bug-Playbook.md#L205) | Exec ID from Daemon Response Reused in URL Without Validation | `#bug-pattern` `#security-gate` | [podman_api.zig](../../src/podman_api.zig) | **Guarded** |
 | [BUG-019](../../docs/vault/Bug-Playbook.md#L217) | Sandbox Profile Without Pre-Flight Policy Guardrails & DENY Telemetry | `#bug-pattern` `#security-gate` | [policy.zig](../../src/policy.zig), [log.zig](../../src/log.zig) | **Guarded** |
 | [BUG-020](../../docs/vault/Bug-Playbook.md#L227) | Premature `deinit()` of Parsed Policy Before `TmpfsBounds` Serialization (Use-After-Free) | `#bug-pattern` `#memory-leak` | [main.zig](../../src/main.zig) | **Guarded** |
+| [BUG-021](../../docs/vault/Bug-Playbook.md#L236) | Traversal Path Segments Allowed in `validateResourceRef` | `#bug-pattern` `#security-gate` | [podman_validate.zig](../../src/podman_validate.zig), [demo.zig](../../src/demo.zig) | **Guarded** |
+| [BUG-022](../../docs/vault/Bug-Playbook.md#L245) | Unreferenced Submodule Tests, `buildImage` Use-After-Free / Context Escape & Audit DENY Parser Mismatch | `#bug-pattern` `#memory-safety` `#security-gate` | [podman_build.zig](../../src/podman_build.zig), [balor-security-audit.sh](../../scripts/balor-security-audit.sh), [main.zig](../../src/main.zig), [podman_api.zig](../../src/podman_api.zig), [auto-audit.sh](../../scripts/auto-audit.sh) | **Guarded** |
 
 ## Module Test & Allocator Coverage
 
@@ -118,12 +126,12 @@ flowchart LR
 | [http_parser.zig](../../src/http_parser.zig) | 258 | 2 | 8 | `std.testing.allocator` |
 | [http_types.zig](../../src/http_types.zig) | 263 | 18 | 11 | `std.testing.allocator` |
 | [log.zig](../../src/log.zig) | 711 | 20 | 9 | `std.testing.allocator` |
-| [main.zig](../../src/main.zig) | 720 | 2 | 2 | `gpa.deinit() != .leak` |
-| [podman_api.zig](../../src/podman_api.zig) | 1546 | 99 | 11 | `std.testing.allocator` |
-| [podman_build.zig](../../src/podman_build.zig) | 456 | 4 | 5 | `std.testing.allocator` |
+| [main.zig](../../src/main.zig) | 722 | 2 | 2 | `gpa.deinit() != .leak` |
+| [podman_api.zig](../../src/podman_api.zig) | 1547 | 99 | 11 | `std.testing.allocator` |
+| [podman_build.zig](../../src/podman_build.zig) | 516 | 4 | 5 | `std.testing.allocator` |
 | [podman_images.zig](../../src/podman_images.zig) | 421 | 7 | 2 | `std.testing.allocator` |
 | [podman_logs.zig](../../src/podman_logs.zig) | 838 | 10 | 8 | `std.testing.allocator` |
-| [podman_pods.zig](../../src/podman_pods.zig) | 132 | 4 | 1 | `std.testing.allocator` |
+| [podman_pods.zig](../../src/podman_pods.zig) | 130 | 4 | 1 | `std.testing.allocator` |
 | [podman_system.zig](../../src/podman_system.zig) | 1035 | 15 | 5 | `std.testing.allocator` |
 | [podman_test_helpers.zig](../../src/podman_test_helpers.zig) | 54 | 4 | 0 | `MISSING` |
 | [podman_types.zig](../../src/podman_types.zig) | 870 | 57 | 32 | `std.testing.allocator` |
@@ -286,3 +294,17 @@ flowchart LR
 - **Root Cause**: ใน `src/main.zig` ตัวแปร `var loaded_pol: ?std.json.Parsed(policy.Policy) = null;` และ `defer if (loaded_pol) |lp| lp.deinit();` ถูกประกาศอยู่ภายในบล็อกย่อย `if (r.profile == .sandbox or r.policy_path != null) { ... }` ทำให้ `lp.deinit()` ทำงานทันทีที่ออกจากบล็อก `if` ก่อนที่ `tmpfs_bounds.tmp_options` (ซึ่งชี้ไปยัง slice ใน `loaded_pol`) จะถูกอ่านตอนเรียก `pod.createContainer`
 - **Fix**: ย้ายการประกาศ `var loaded_pol` และ `defer if (loaded_pol) |lp| lp.deinit();` ออกมาไว้ที่ scope ของแขนง `.run => |r_orig|` ใน `src/main.zig` คู่กับ `var tmpfs_bounds` เพื่อให้ lifetime ของ `loaded_pol` ครอบคลุมจนจบการเรียก `pod.createContainer`; เพิ่ม unit test เรียก `dispatch()` โดยตรงด้วย `std.testing.allocator` สำหรับ `--profile=sandbox` และเส้นทาง cleanup ของ `BUG-012`
 - **Prevention**: ห้ามเก็บ slice ที่อ้างอิงข้อมูลใน `std.json.Parsed(T)` ข้ามขอบเขตบล็อกที่มี `defer parsed.deinit()` และต้องมี unit test ที่เรียกฟังก์ชัน orchestration (`dispatch`) ด้วย `std.testing.allocator` เสมอเพื่อไม่ให้ `ArenaAllocator` บดบังปัญหา Use-After-Free
+
+### BUG-021 — Traversal Path Segments Allowed in `validateResourceRef`
+- **Source**: [docs/vault/Bug-Playbook.md:236](../../docs/vault/Bug-Playbook.md#L236) · **Status**: `Guarded`
+- **Symptom**: `validateResourceRef` เดิมอนุญาตอักขระ `/` และ `.` สำหรับ image reference (เช่น `docker.io/library/alpine:3.20`) และปฏิเสธเฉพาะเมื่อค่าทั้งสตริงเท่ากับ `"."` หรือ `".."` ทำให้ค่าที่มี segment `..` คั่นด้วย `/` (เช่น `web/../../etc/shadow`) ผ่านการตรวจและหลุดออกจาก API prefix ได้
+- **Root Cause**: การเช็ก `std.mem.eql(u8, ref, "..")` ตรวจเฉพาะสตริงทั้งก้อน ไม่ได้แยกตรวจแต่ละ path segment หลัง split ด้วย `/`
+- **Fix**: เพิ่มการวนตรวจทุก segment จาก `std.mem.splitScalar(u8, ref, '/')` ใน `src/podman_validate.zig` หากพบ segment ที่เท่ากับ `".."` ให้คืน `ApiError.InvalidIdentifier` ทันที; เพิ่ม unit test และ red-team case ใน `src/demo.zig`
+- **Prevention**: ทุก validator ที่อนุญาต `/` ใน resource reference ต้อง split ตรวจห้าม segment `".."` เสมอ
+
+### BUG-022 — Unreferenced Submodule Tests, `buildImage` Use-After-Free / Context Escape & Audit DENY Parser Mismatch
+- **Source**: [docs/vault/Bug-Playbook.md:245](../../docs/vault/Bug-Playbook.md#L245) · **Status**: `Guarded`
+- **Symptom**: (1) `zig build test` ข้ามการรันเทส 38 เคสใน `podman_build.zig`, `podman_pods.zig`, และ `podman_types.zig` (2) `buildImage` ใน `src/podman_build.zig` เก็บ `image_id = aux.ID` ข้าม `defer ev.deinit()` (Use-After-Free) และไม่ตรวจ `validateHostPath` กับ `ctx_dir`/symlink (3) `scripts/balor-security-audit.sh` เช็ก `level == "DENY"` แทน `msg.startswith("DENY rule=")` ทำให้นับ `denies=0` เสมอ และไม่ validate `HostIp`/`HostPort` ก่อนส่งเข้า scanner
+- **Root Cause**: (1) `test { ... }` ใน `src/main.zig` และ `src/podman_api.zig` ไม่ได้อ้างอิง `_ = pods; _ = build_mod; _ = types;` (2) `aux.ID` ชี้ไปยัง arena ของ `std.json.Parsed` ที่ถูก free ท้ายรอบลูป (3) `Logger.deny()` บันทึกด้วย level `ERROR` พร้อม prefix `DENY rule=` ใน message
+- **Fix**: เพิ่ม `_ = pods; _ = build_mod;` ใน `src/main.zig` และ `_ = types;` ใน `src/podman_api.zig` พร้อมเกตตรวจใน `scripts/auto-audit.sh`; ใน `src/podman_build.zig`: `dupe` ค่า `aux.ID` ด้วย `client.allocator`, บังคับ `validateHostPath` บน `ctx_dir` (ทั้งค่าที่ส่งมาและ `realpathAlloc`), และบล็อก symlink ที่เป็น absolute หรือมี `..`; ใน `scripts/balor-security-audit.sh`: นับ `DENY` จาก `msg.startswith("DENY rule=")` และ validate `HostIp` (IPv4) / `HostPort` (`1..65535`) ก่อนเพิ่มเข้า `endpoints`
+- **Prevention**: ทุกโมดูลที่เพิ่มใหม่ต้องถูกอ้างอิงใน `test { ... }` ของ root test tree และตรวจด้วย `scripts/auto-audit.sh` เสมอ

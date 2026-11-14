@@ -58,7 +58,7 @@ else
 fi
 
 # 4. Require std.testing.allocator in every heap-allocating module
-for mod in src/main.zig src/cli.zig src/cli_specs.zig src/config.zig src/http.zig src/http_parser.zig src/podman_api.zig src/podman_validate.zig src/podman_logs.zig src/podman_images.zig src/podman_system.zig src/log.zig src/policy.zig; do
+for mod in src/main.zig src/cli.zig src/cli_specs.zig src/config.zig src/http.zig src/http_parser.zig src/podman_api.zig src/podman_build.zig src/podman_pods.zig src/podman_validate.zig src/podman_logs.zig src/podman_images.zig src/podman_system.zig src/log.zig src/policy.zig; do
     if has_match "std\.testing\.allocator" "$mod"; then
         pass "std.testing.allocator present in $mod."
     else
@@ -66,7 +66,12 @@ for mod in src/main.zig src/cli.zig src/cli_specs.zig src/config.zig src/http.zi
     fi
 done
 
-# 5. Require input/protocol validation gates
+# 4b. Require root test blocks to reference all submodules (BUG-022)
+if has_match "_ = pods;" "src/main.zig" && has_match "_ = build_mod;" "src/main.zig" && has_match "_ = types;" "src/podman_api.zig"; then
+    pass "Root test blocks reference pods, build_mod, and types (BUG-022)."
+else
+    fail "Missing submodule reference in test blocks of src/main.zig or src/podman_api.zig (see BUG-022)."
+fi
 if has_match "try validateRequestTarget\(" "src/http.zig"; then
     pass "validateRequestTarget() enforced in src/http.zig."
 else

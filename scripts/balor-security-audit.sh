@@ -111,6 +111,7 @@ TMP_REPORT="$(mktemp)"
 
 python3 - "$ROOT_DIR" "$JSON_OUT" "$QUIET" "$INSPECT_FILE" "$BALOR_AVAILABLE" "$TMP_EP" "${ENV_ITEMS[@]+"${ENV_ITEMS[@]}"}" > "$TMP_REPORT" <<'PYEOF'
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -118,6 +119,7 @@ import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
+log_dir = Path(os.environ.get("ZIGPOD_LOG_DIR") or root)
 json_out = sys.argv[2] == "true"
 quiet = sys.argv[3] == "true"
 inspect_path = sys.argv[4]
@@ -138,7 +140,7 @@ def add_finding(severity: str, category: str, title: str, detail: str, rec: str 
 
 # --- 6A.1: Log & Policy Audit ---
 audit_stats = {"total": 0, "deny": 0, "error": 0, "malformed": 0, "recent_denies": []}
-audit_file = root / "audit.log"
+audit_file = log_dir / "audit.log"
 if audit_file.is_file():
     for raw in audit_file.read_text(encoding="utf-8", errors="replace").splitlines():
         if not raw.strip():
@@ -149,10 +151,10 @@ if audit_file.is_file():
             audit_stats["malformed"] += 1
             continue
         ts, level, _prev_h, _cur_h, msg = parts
-        if level == "DENY":
+        if level == "DENY" or msg.startswith("DENY rule="):
             audit_stats["deny"] += 1
             audit_stats["recent_denies"].append({"ts": ts, "msg": msg})
-        elif level == "ERROR":
+        if level == "ERROR":
             audit_stats["error"] += 1
     audit_stats["recent_denies"] = audit_stats["recent_denies"][-10:]
     if audit_stats["malformed"] > 0:
@@ -163,7 +165,7 @@ if audit_file.is_file():
         )
 
 error_lines = 0
-error_file = root / "error.log"
+error_file = log_dir / "error.log"
 if error_file.is_file():
     error_lines = sum(1 for l in error_file.read_text(encoding="utf-8", errors="replace").splitlines() if l.strip())
 
@@ -252,12 +254,25 @@ if inspect_path:
             ips.add(net["IPAddress"])
     hc = insp.get("HostConfig") or {}
     pb = hc.get("PortBindings") or {}
+    import ipaddress
     for cport, bindings in pb.items():
         if isinstance(bindings, list):
             for b in bindings:
                 hip = (b.get("HostIp") or "127.0.0.1") if isinstance(b, dict) else "127.0.0.1"
-                hport = (b.get("HostPort") or "") if isinstance(b, dict) else ""
-                endpoints.append({"host_ip": hip, "host_port": hport, "container_port": cport, "container_ips": sorted(ips)})
+                hport = str(b.get("HostPort") or "") if isinstance(b, dict) else ""
+                try:
+                    ipaddress.IPv4Address(hip)
+                    port_num = int(hport, 10)
+                    if not (1 <= port_num <= 65535):
+                        raise ValueError("port out of range")
+                except ValueError:
+                    add_finding(
+                        "HIGH", "attack-surface", "Malformed or unsafe PortBindings entry",
+                        f"Rejected invalid HostIp='{hip}' or HostPort='{hport}' for {cport}.",
+                        "Ensure PortBindings use valid IPv4 literals and ports 1..65535.",
+                    )
+                    continue
+                endpoints.append({"host_ip": hip, "host_port": str(port_num), "container_port": cport, "container_ips": sorted(ips)})
     if endpoints:
         add_finding("INFO", "attack-surface", f"Discovered {len(endpoints)} published port(s)", json.dumps(endpoints), "Audit exposed ports with `balorsh networkscan` / `webexploit`.")
 

@@ -232,3 +232,22 @@ status: active
   - ย้ายการประกาศ `var loaded_pol` และ `defer if (loaded_pol) |lp| lp.deinit();` ออกมาไว้ที่ scope ของแขนง `.run => |r_orig|` ใน [src/main.zig](../../src/main.zig) คู่กับ `var tmpfs_bounds` เพื่อให้ lifetime ของ `loaded_pol` ครอบคลุมจนจบการเรียก `pod.createContainer`
   - เพิ่ม unit test เรียก `dispatch()` โดยตรงด้วย `std.testing.allocator` สำหรับ `--profile=sandbox` และเส้นทาง cleanup ของ `BUG-012`
 - **Prevention Rule**: ห้ามเก็บ slice ที่อ้างอิงข้อมูลใน `std.json.Parsed(T)` ข้ามขอบเขตบล็อกที่มี `defer parsed.deinit()` และต้องมี unit test ที่เรียกฟังก์ชัน orchestration (`dispatch`) ด้วย `std.testing.allocator` เสมอเพื่อไม่ให้ `ArenaAllocator` บดบังปัญหา Use-After-Free
+
+## BUG-021: Traversal Path Segments Allowed in `validateResourceRef` `#bug-pattern` `#security-gate`
+
+- **Symptom**: `validateResourceRef` เดิมอนุญาตอักขระ `/` และ `.` สำหรับ image reference (เช่น `docker.io/library/alpine:3.20`) และปฏิเสธเฉพาะเมื่อค่าทั้งสตริงเท่ากับ `"."` หรือ `".."` ทำให้ค่าที่มี segment `..` คั่นด้วย `/` (เช่น `web/../../etc/shadow`) ผ่านการตรวจและหลุดออกจาก API prefix ได้
+- **Root Cause**: การเช็ก `std.mem.eql(u8, ref, "..")` ตรวจเฉพาะสตริงทั้งก้อน ไม่ได้แยกตรวจแต่ละ path segment หลัง split ด้วย `/`
+- **Fix**:
+  - เพิ่มการวนตรวจทุก segment จาก `std.mem.splitScalar(u8, ref, '/')` ใน [src/podman_validate.zig](../../src/podman_validate.zig) หากพบ segment ที่เท่ากับ `".."` ให้คืน `ApiError.InvalidIdentifier` ทันที
+  - เพิ่ม unit test และ red-team case ใน [src/demo.zig](../../src/demo.zig)
+- **Prevention Rule**: ทุก validator ที่อนุญาต `/` ใน resource reference ต้อง split ตรวจห้าม segment `".."` เสมอ
+
+## BUG-022: Unreferenced Submodule Tests, `buildImage` Use-After-Free / Context Escape & Audit DENY Parser Mismatch `#bug-pattern` `#memory-safety` `#security-gate`
+
+- **Symptom**: (1) `zig build test` ข้ามการรันเทส 38 เคสใน `podman_build.zig`, `podman_pods.zig`, และ `podman_types.zig` (2) `buildImage` ใน `src/podman_build.zig` เก็บ `image_id = aux.ID` ข้าม `defer ev.deinit()` (Use-After-Free) และไม่ตรวจ `validateHostPath` กับ `ctx_dir`/symlink (3) `scripts/balor-security-audit.sh` เช็ก `level == "DENY"` แทน `msg.startswith("DENY rule=")` ทำให้นับ `denies=0` เสมอ และไม่ validate `HostIp`/`HostPort` ก่อนส่งเข้า scanner
+- **Root Cause**: (1) `test { ... }` ใน `src/main.zig` และ `src/podman_api.zig` ไม่ได้อ้างอิง `_ = pods; _ = build_mod; _ = types;` (2) `aux.ID` ชี้ไปยัง arena ของ `std.json.Parsed` ที่ถูก free ท้ายรอบลูป (3) `Logger.deny()` บันทึกด้วย level `ERROR` พร้อม prefix `DENY rule=` ใน message
+- **Fix**:
+  - เพิ่ม `_ = pods; _ = build_mod;` ใน [src/main.zig](../../src/main.zig) และ `_ = types;` ใน [src/podman_api.zig](../../src/podman_api.zig) พร้อมเกตตรวจใน [scripts/auto-audit.sh](../../scripts/auto-audit.sh)
+  - ใน [src/podman_build.zig](../../src/podman_build.zig): `dupe` ค่า `aux.ID` ด้วย `client.allocator`, บังคับ `validateHostPath` บน `ctx_dir` (ทั้งค่าที่ส่งมาและ `realpathAlloc`), และบล็อก symlink ที่เป็น absolute หรือมี `..`
+  - ใน [scripts/balor-security-audit.sh](../../scripts/balor-security-audit.sh): นับ `DENY` จาก `msg.startswith("DENY rule=")` และ validate `HostIp` (IPv4) / `HostPort` (`1..65535`) ก่อนเพิ่มเข้า `endpoints`
+- **Prevention Rule**: ทุกโมดูลที่เพิ่มใหม่ต้องถูกอ้างอิงใน `test { ... }` ของ root test tree และตรวจด้วย `scripts/auto-audit.sh` เสมอ

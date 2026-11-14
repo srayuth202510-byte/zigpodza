@@ -729,6 +729,7 @@ fn pumpBidirectional(
 // ---------------------------------------------------------------- tests
 
 test {
+    _ = types;
     _ = validate;
     _ = logs;
     _ = images;

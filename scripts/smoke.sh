@@ -265,5 +265,6 @@ BALOR_JSON=$("$ROOT_DIR/scripts/balor-security-audit.sh" --offline --inspect-jso
 echo "$BALOR_JSON" | grep -q '"github-token"'
 echo "$BALOR_JSON" | grep -q '"purple-team"'
 echo "$BALOR_JSON" | grep -q '"attack-surface"'
+echo "$BALOR_JSON" | grep -q '"DENY rule=policy.max_memory_bytes'
 
 echo "[PASS] Compiled binary E2E, mock Podman hardening, and audit tampering detection passed."
