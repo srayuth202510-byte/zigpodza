@@ -35,6 +35,7 @@ pub const usage =
     \\      -u, --user USER[:GROUP]    Run as user (and optional group)
     \\      -w, --workdir PATH         Working directory inside the container
     \\  inspect TARGET                 Show container or image details (state, IP, mounts, limits)
+    \\  stats [--no-stream] [-a] [CONTAINER...]  Display CPU, memory, and PIDs metrics
     \\  audit [FILE]                   Verify SHA-256 hash chain of audit.log
     \\  demo                           Run 14-case fail-closed ALLOW/DENY self-test suite
     \\  version                        Show client and server versions
@@ -106,6 +107,12 @@ pub const ExecOpts = struct {
     workdir: ?[]const u8 = null,
 };
 
+pub const StatsOpts = struct {
+    no_stream: bool = false,
+    all: bool = false,
+    containers: []const []const u8 = &.{},
+};
+
 pub const Command = union(enum) {
     help,
     client_version,
@@ -121,6 +128,7 @@ pub const Command = union(enum) {
     logs: []const u8,
     inspect: []const u8,
     exec: ExecOpts,
+    stats: StatsOpts,
 };
 
 pub const Parsed = struct {
@@ -138,6 +146,9 @@ pub const Parsed = struct {
             },
             .exec => |e| {
                 if (e.env.len > 0) allocator.free(e.env);
+            },
+            .stats => |s| {
+                if (s.containers.len > 0) allocator.free(s.containers);
             },
             else => {},
         }
@@ -221,6 +232,8 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
         .{ .inspect = try single(rest) }
     else if (eql(name, "exec"))
         .{ .exec = try parseExec(allocator, rest) }
+    else if (eql(name, "stats"))
+        .{ .stats = try parseStats(allocator, rest) }
     else if (eql(name, "audit"))
         try parseAudit(rest)
     else if (eql(name, "demo"))
@@ -552,6 +565,27 @@ fn parseExec(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
     opts.env = try env.toOwnedSlice();
     errdefer allocator.free(opts.env);
     if (opts.cmd.len == 0) return error.MissingArgument;
+    return opts;
+}
+
+/// Parses `stats [--no-stream] [-a|--all] [CONTAINER...]`.
+fn parseStats(allocator: std.mem.Allocator, args: []const []const u8) ParseError!StatsOpts {
+    var containers = std.ArrayList([]const u8).init(allocator);
+    errdefer containers.deinit();
+
+    var opts = StatsOpts{};
+    for (args) |a| {
+        if (eql(a, "--no-stream")) {
+            opts.no_stream = true;
+        } else if (eql(a, "-a") or eql(a, "--all")) {
+            opts.all = true;
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else {
+            try containers.append(a);
+        }
+    }
+    opts.containers = try containers.toOwnedSlice();
     return opts;
 }
 
@@ -923,4 +957,30 @@ test "parse demo and audit subcommands" {
     }
 
     try std.testing.expectError(error.TooManyArguments, parse(alloc, &.{ "audit", "a.log", "b.log" }));
+}
+
+test "parse stats subcommand with --no-stream, -a, and containers" {
+    const alloc = std.testing.allocator;
+
+    var p1 = try parse(alloc, &.{ "stats", "--no-stream" });
+    defer p1.deinit(alloc);
+    try std.testing.expect(p1.command.stats.no_stream);
+    try std.testing.expect(!p1.command.stats.all);
+    try std.testing.expectEqual(@as(usize, 0), p1.command.stats.containers.len);
+
+    var p2 = try parse(alloc, &.{ "stats", "--no-stream", "-a", "web", "db" });
+    defer p2.deinit(alloc);
+    try std.testing.expect(p2.command.stats.no_stream);
+    try std.testing.expect(p2.command.stats.all);
+    try std.testing.expectEqual(@as(usize, 2), p2.command.stats.containers.len);
+    try std.testing.expectEqualStrings("web", p2.command.stats.containers[0]);
+    try std.testing.expectEqualStrings("db", p2.command.stats.containers[1]);
+
+    var p3 = try parse(alloc, &.{ "stats", "web", "--no-stream" });
+    defer p3.deinit(alloc);
+    try std.testing.expect(p3.command.stats.no_stream);
+    try std.testing.expectEqual(@as(usize, 1), p3.command.stats.containers.len);
+    try std.testing.expectEqualStrings("web", p3.command.stats.containers[0]);
+
+    try std.testing.expectError(error.UnknownFlag, parse(alloc, &.{ "stats", "web", "--bogus" }));
 }

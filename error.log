@@ -85,3 +85,295 @@ error: the following build command failed with exit code 1:
 /home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0xd3052c4d -Zb9f6ac0a378a2523 test
 2026-11-14T04:16:08Z [ERROR] Rejected unsafe host path or volume name. Bind mounts must be absolute, traversal-free, and may not target /, /etc, /proc, /sys, /dev, /boot, /run, /root, or container-engine state; sensitive /etc files are read-only.
 2026-11-14T04:16:08Z [ERROR] Rejected unsafe host path or volume name. Bind mounts must be absolute, traversal-free, and may not target /, /etc, /proc, /sys, /dev, /boot, /run, /root, or container-engine state; sensitive /etc files are read-only.
+2026-11-14T05:02:42Z [ERROR] auto-audit detected 1 failure(s):
+OK: No 'page_allocator' usage in src/.
+OK: GPA leak check is enforced.
+OK: No BUG-001 AccessDenied mismatch in src/http.zig.
+OK: std.testing.allocator present in src/cli.zig.
+OK: std.testing.allocator present in src/config.zig.
+OK: std.testing.allocator present in src/http.zig.
+OK: std.testing.allocator present in src/podman_api.zig.
+OK: std.testing.allocator present in src/log.zig.
+OK: validateRequestTarget() enforced in src/http.zig.
+OK: validateIdentifier() enforced in src/podman_api.zig.
+OK: validateHostPath() fail-closed host mount policy enforced in src/podman_api.zig.
+OK: validatePortMapping() fail-closed port policy enforced in src/podman_api.zig.
+OK: validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_api.zig.
+OK: validateResourceRef() inspect path guard enforced in src/podman_api.zig.
+OK: createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig.
+OK: Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser.
+OK: Timeout poll, HostConfig hardening, audit hash-chain verification, and 14-case demo present.
+OK: Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable.
+FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)...
+test
++- run test
+   +- zig test Debug native 1 errors
+src/main.zig:128:5: error: switch must handle all possibilities
+src/cli.zig:131:5: note: unhandled enumeration value: 'stats'
+src/cli.zig:116:21: note: enum '@typeInfo(cli.Command).Union.tag_type.?' declared here
+error: the following command failed with 1 compilation errors:
+/home/mitsword/.local/opt/zig-0.13.0/zig test -ODebug -Mroot=/home/mitsword/เอกสาร/zigpodza/src/main.zig --cache-dir /home/mitsword/เอกสาร/zigpodza/.zig-cache --global-cache-dir /home/mitsword/.cache/zig --name test --listen=- 
+Build Summary: 0/3 steps succeeded; 1 failed (disable with --summary none)
+test transitive failure
++- run test transitive failure
+   +- zig test Debug native 1 errors
+error: the following build command failed with exit code 1:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0xe39428be -Z8fe45e66559243b6 test
+2026-11-14T05:02:46Z [ERROR] auto-audit detected 1 failure(s):
+OK: No 'page_allocator' usage in src/.
+OK: GPA leak check is enforced.
+OK: No BUG-001 AccessDenied mismatch in src/http.zig.
+OK: std.testing.allocator present in src/cli.zig.
+OK: std.testing.allocator present in src/config.zig.
+OK: std.testing.allocator present in src/http.zig.
+OK: std.testing.allocator present in src/podman_api.zig.
+OK: std.testing.allocator present in src/log.zig.
+OK: validateRequestTarget() enforced in src/http.zig.
+OK: validateIdentifier() enforced in src/podman_api.zig.
+OK: validateHostPath() fail-closed host mount policy enforced in src/podman_api.zig.
+OK: validatePortMapping() fail-closed port policy enforced in src/podman_api.zig.
+OK: validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_api.zig.
+OK: validateResourceRef() inspect path guard enforced in src/podman_api.zig.
+OK: createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig.
+OK: Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser.
+OK: Timeout poll, HostConfig hardening, audit hash-chain verification, and 14-case demo present.
+OK: Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable.
+FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)...
+test
++- run test
+   +- zig test Debug native 1 errors
+src/main.zig:128:5: error: switch must handle all possibilities
+src/cli.zig:131:5: note: unhandled enumeration value: 'stats'
+src/cli.zig:116:21: note: enum '@typeInfo(cli.Command).Union.tag_type.?' declared here
+error: the following command failed with 1 compilation errors:
+/home/mitsword/.local/opt/zig-0.13.0/zig test -ODebug -Mroot=/home/mitsword/เอกสาร/zigpodza/src/main.zig --cache-dir /home/mitsword/เอกสาร/zigpodza/.zig-cache --global-cache-dir /home/mitsword/.cache/zig --name test --listen=- 
+Build Summary: 0/3 steps succeeded; 1 failed (disable with --summary none)
+test transitive failure
++- run test transitive failure
+   +- zig test Debug native 1 errors
+error: the following build command failed with exit code 1:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0x7e1d420a -Z84ae36e82bf4b16d test
+2026-11-14T05:02:47Z [ERROR] auto-audit detected 1 failure(s):
+OK: No 'page_allocator' usage in src/.
+OK: GPA leak check is enforced.
+OK: No BUG-001 AccessDenied mismatch in src/http.zig.
+OK: std.testing.allocator present in src/cli.zig.
+OK: std.testing.allocator present in src/config.zig.
+OK: std.testing.allocator present in src/http.zig.
+OK: std.testing.allocator present in src/podman_api.zig.
+OK: std.testing.allocator present in src/log.zig.
+OK: validateRequestTarget() enforced in src/http.zig.
+OK: validateIdentifier() enforced in src/podman_api.zig.
+OK: validateHostPath() fail-closed host mount policy enforced in src/podman_api.zig.
+OK: validatePortMapping() fail-closed port policy enforced in src/podman_api.zig.
+OK: validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_api.zig.
+OK: validateResourceRef() inspect path guard enforced in src/podman_api.zig.
+OK: createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig.
+OK: Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser.
+OK: Timeout poll, HostConfig hardening, audit hash-chain verification, and 14-case demo present.
+OK: Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable.
+FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)...
+test
++- run test
+   +- zig test Debug native 1 errors
+src/cli.zig:236:25: error: use of undeclared identifier 'parseStats'
+error: the following command failed with 1 compilation errors:
+/home/mitsword/.local/opt/zig-0.13.0/zig test -ODebug -Mroot=/home/mitsword/เอกสาร/zigpodza/src/main.zig --cache-dir /home/mitsword/เอกสาร/zigpodza/.zig-cache --global-cache-dir /home/mitsword/.cache/zig --name test --listen=- 
+Build Summary: 0/3 steps succeeded; 1 failed (disable with --summary none)
+test transitive failure
++- run test transitive failure
+   +- zig test Debug native 1 errors
+error: the following build command failed with exit code 1:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0xf9899867 -Z21034144ecc11416 test
+2026-11-14T05:02:47Z [ERROR] auto-audit detected 1 failure(s):
+OK: No 'page_allocator' usage in src/.
+OK: GPA leak check is enforced.
+OK: No BUG-001 AccessDenied mismatch in src/http.zig.
+OK: std.testing.allocator present in src/cli.zig.
+OK: std.testing.allocator present in src/config.zig.
+OK: std.testing.allocator present in src/http.zig.
+OK: std.testing.allocator present in src/podman_api.zig.
+OK: std.testing.allocator present in src/log.zig.
+OK: validateRequestTarget() enforced in src/http.zig.
+OK: validateIdentifier() enforced in src/podman_api.zig.
+OK: validateHostPath() fail-closed host mount policy enforced in src/podman_api.zig.
+OK: validatePortMapping() fail-closed port policy enforced in src/podman_api.zig.
+OK: validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_api.zig.
+OK: validateResourceRef() inspect path guard enforced in src/podman_api.zig.
+OK: createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig.
+OK: Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser.
+OK: Timeout poll, HostConfig hardening, audit hash-chain verification, and 14-case demo present.
+OK: Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable.
+FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)...
+test
++- run test
+   +- zig test Debug native 1 errors
+src/main.zig:128:5: error: switch must handle all possibilities
+src/cli.zig:131:5: note: unhandled enumeration value: 'stats'
+src/cli.zig:116:21: note: enum '@typeInfo(cli.Command).Union.tag_type.?' declared here
+error: the following command failed with 1 compilation errors:
+/home/mitsword/.local/opt/zig-0.13.0/zig test -ODebug -Mroot=/home/mitsword/เอกสาร/zigpodza/src/main.zig --cache-dir /home/mitsword/เอกสาร/zigpodza/.zig-cache --global-cache-dir /home/mitsword/.cache/zig --name test --listen=- 
+Build Summary: 0/3 steps succeeded; 1 failed (disable with --summary none)
+test transitive failure
++- run test transitive failure
+   +- zig test Debug native 1 errors
+error: the following build command failed with exit code 1:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0x5164c005 -Z004a354c77ea0bc9 test
+2026-11-14T05:02:48Z [ERROR] auto-audit detected 1 failure(s):
+OK: No 'page_allocator' usage in src/.
+OK: GPA leak check is enforced.
+OK: No BUG-001 AccessDenied mismatch in src/http.zig.
+OK: std.testing.allocator present in src/cli.zig.
+OK: std.testing.allocator present in src/config.zig.
+OK: std.testing.allocator present in src/http.zig.
+OK: std.testing.allocator present in src/podman_api.zig.
+OK: std.testing.allocator present in src/log.zig.
+OK: validateRequestTarget() enforced in src/http.zig.
+OK: validateIdentifier() enforced in src/podman_api.zig.
+OK: validateHostPath() fail-closed host mount policy enforced in src/podman_api.zig.
+OK: validatePortMapping() fail-closed port policy enforced in src/podman_api.zig.
+OK: validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_api.zig.
+OK: validateResourceRef() inspect path guard enforced in src/podman_api.zig.
+OK: createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig.
+OK: Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser.
+OK: Timeout poll, HostConfig hardening, audit hash-chain verification, and 14-case demo present.
+OK: Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable.
+FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)...
+test
++- run test
+   +- zig test Debug native 1 errors
+src/main.zig:128:5: error: switch must handle all possibilities
+src/cli.zig:131:5: note: unhandled enumeration value: 'stats'
+src/cli.zig:116:21: note: enum '@typeInfo(cli.Command).Union.tag_type.?' declared here
+error: the following command failed with 1 compilation errors:
+/home/mitsword/.local/opt/zig-0.13.0/zig test -ODebug -Mroot=/home/mitsword/เอกสาร/zigpodza/src/main.zig --cache-dir /home/mitsword/เอกสาร/zigpodza/.zig-cache --global-cache-dir /home/mitsword/.cache/zig --name test --listen=- 
+Build Summary: 0/3 steps succeeded; 1 failed (disable with --summary none)
+test transitive failure
++- run test transitive failure
+   +- zig test Debug native 1 errors
+error: the following build command failed with exit code 1:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0x3fb141b8 -Zf0a1f0ad2506db82 test
+2026-11-14T05:03:28Z [ERROR] auto-audit detected 1 failure(s):
+OK: No 'page_allocator' usage in src/.
+OK: GPA leak check is enforced.
+OK: No BUG-001 AccessDenied mismatch in src/http.zig.
+OK: std.testing.allocator present in src/cli.zig.
+OK: std.testing.allocator present in src/config.zig.
+OK: std.testing.allocator present in src/http.zig.
+OK: std.testing.allocator present in src/podman_api.zig.
+OK: std.testing.allocator present in src/log.zig.
+OK: validateRequestTarget() enforced in src/http.zig.
+OK: validateIdentifier() enforced in src/podman_api.zig.
+OK: validateHostPath() fail-closed host mount policy enforced in src/podman_api.zig.
+OK: validatePortMapping() fail-closed port policy enforced in src/podman_api.zig.
+OK: validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_api.zig.
+OK: validateResourceRef() inspect path guard enforced in src/podman_api.zig.
+OK: createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig.
+OK: Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser.
+OK: Timeout poll, HostConfig hardening, audit hash-chain verification, and 14-case demo present.
+OK: Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable.
+FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)...
+test
++- run test
+   +- zig test Debug native 1 errors
+src/main.zig:128:5: error: switch must handle all possibilities
+src/cli.zig:131:5: note: unhandled enumeration value: 'stats'
+src/cli.zig:116:21: note: enum '@typeInfo(cli.Command).Union.tag_type.?' declared here
+error: the following command failed with 1 compilation errors:
+/home/mitsword/.local/opt/zig-0.13.0/zig test -ODebug -Mroot=/home/mitsword/เอกสาร/zigpodza/src/main.zig --cache-dir /home/mitsword/เอกสาร/zigpodza/.zig-cache --global-cache-dir /home/mitsword/.cache/zig --name test --listen=- 
+Build Summary: 0/3 steps succeeded; 1 failed (disable with --summary none)
+test transitive failure
++- run test transitive failure
+   +- zig test Debug native 1 errors
+error: the following build command failed with exit code 1:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0xead0ebb -Z848abbd565afc230 test
+2026-11-14T05:03:42Z [ERROR] auto-audit detected 1 failure(s):
+OK: No 'page_allocator' usage in src/.
+OK: GPA leak check is enforced.
+OK: No BUG-001 AccessDenied mismatch in src/http.zig.
+OK: std.testing.allocator present in src/cli.zig.
+OK: std.testing.allocator present in src/config.zig.
+OK: std.testing.allocator present in src/http.zig.
+OK: std.testing.allocator present in src/podman_api.zig.
+OK: std.testing.allocator present in src/log.zig.
+OK: validateRequestTarget() enforced in src/http.zig.
+OK: validateIdentifier() enforced in src/podman_api.zig.
+OK: validateHostPath() fail-closed host mount policy enforced in src/podman_api.zig.
+OK: validatePortMapping() fail-closed port policy enforced in src/podman_api.zig.
+OK: validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_api.zig.
+OK: validateResourceRef() inspect path guard enforced in src/podman_api.zig.
+OK: createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig.
+OK: Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser.
+OK: Timeout poll, HostConfig hardening, audit hash-chain verification, and 14-case demo present.
+OK: Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable.
+FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)...
+test
++- run test
+   +- zig test Debug native 1 errors
+src/main.zig:128:5: error: switch must handle all possibilities
+src/cli.zig:131:5: note: unhandled enumeration value: 'stats'
+src/cli.zig:116:21: note: enum '@typeInfo(cli.Command).Union.tag_type.?' declared here
+error: the following command failed with 1 compilation errors:
+/home/mitsword/.local/opt/zig-0.13.0/zig test -ODebug -Mroot=/home/mitsword/เอกสาร/zigpodza/src/main.zig --cache-dir /home/mitsword/เอกสาร/zigpodza/.zig-cache --global-cache-dir /home/mitsword/.cache/zig --name test --listen=- 
+Build Summary: 0/3 steps succeeded; 1 failed (disable with --summary none)
+test transitive failure
++- run test transitive failure
+   +- zig test Debug native 1 errors
+error: the following build command failed with exit code 1:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0x1c077ab9 -Zbeeaeed62eb7a077 test
+2026-11-14T05:03:48Z [ERROR] auto-audit detected 1 failure(s):
+OK: No 'page_allocator' usage in src/.
+OK: GPA leak check is enforced.
+OK: No BUG-001 AccessDenied mismatch in src/http.zig.
+OK: std.testing.allocator present in src/cli.zig.
+OK: std.testing.allocator present in src/config.zig.
+OK: std.testing.allocator present in src/http.zig.
+OK: std.testing.allocator present in src/podman_api.zig.
+OK: std.testing.allocator present in src/log.zig.
+OK: validateRequestTarget() enforced in src/http.zig.
+OK: validateIdentifier() enforced in src/podman_api.zig.
+OK: validateHostPath() fail-closed host mount policy enforced in src/podman_api.zig.
+OK: validatePortMapping() fail-closed port policy enforced in src/podman_api.zig.
+OK: validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_api.zig.
+OK: validateResourceRef() inspect path guard enforced in src/podman_api.zig.
+OK: createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig.
+OK: Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser.
+OK: Timeout poll, HostConfig hardening, audit hash-chain verification, and 14-case demo present.
+OK: Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable.
+FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)...
+test
++- run test failure
+Segmentation fault at address 0x7f6904513221
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/mem.zig:1146:73: 0x10a5c2a in trimLeft__anon_5896 (test)
+    while (begin < slice.len and indexOfScalar(T, values_to_strip, slice[begin]) != null) : (begin += 1) {}
+                                                                        ^
+/home/mitsword/เอกสาร/zigpodza/src/podman_api.zig:1039:34: 0x10cde4c in formatStatsRow__anon_7781 (test)
+    const name = std.mem.trimLeft(u8, s.name, "/");
+                                 ^
+/home/mitsword/เอกสาร/zigpodza/src/podman_api.zig:1138:27: 0x10cf930 in statsContainers__anon_7774 (test)
+        try formatStatsRow(writer, c.Id, parsed.value);
+                          ^
+/home/mitsword/เอกสาร/zigpodza/src/podman_api.zig:2026:24: 0x10d0270 in test.statsContainers fetches metrics via mock Unix socket and enforces identifier guard (test)
+    try statsContainers(&client, &logger, &.{}, false, out1.writer());
+                       ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:95:29: 0x10d9fc3 in mainServer (test)
+                test_fn.func() catch |err| switch (err) {
+                            ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:35:26: 0x1087e9e in main (test)
+        return mainServer() catch @panic("internal test runner failure");
+                         ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/start.zig:514:22: 0x1087539 in posixCallMainAndExit (test)
+            root.main();
+                     ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/start.zig:266:5: 0x10870a1 in _start (test)
+    asm volatile (switch (native_arch) {
+    ^
+???:?:?: 0x1 in ??? (???)
+Unwind information for `???:0x1` was not available, trace may be incomplete
+error: while executing test 'podman_api.test.statsContainers fetches metrics via mock Unix socket and enforces identifier guard', the following command terminated with signal 6 (expected exited with code 0):
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/c3bb3e1ee216efb8d36b7c3c76fe5a8d/test --listen=- 
+Build Summary: 1/3 steps succeeded; 1 failed; 67/67 tests passed (disable with --summary none)
+test transitive failure
++- run test failure
+error: the following build command failed with exit code 1:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0xfe7e3173 -Z9440b442414aaa31 test

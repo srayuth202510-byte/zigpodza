@@ -103,3 +103,39 @@
 2026-11-14T04:56:54Z [INFO] auto-audit passed (hook=false)
 2026-11-14T04:57:05Z [INFO] auto-audit passed (hook=false)
 2026-11-14T04:57:05Z [INFO] auto-audit passed (hook=false)
+2026-11-14T05:02:42Z [ERROR] auto-audit detected 1 failure(s) (hook=true)
+2026-11-14T05:02:46Z [ERROR] auto-audit detected 1 failure(s) (hook=true)
+2026-11-14T05:02:47Z [ERROR] auto-audit detected 1 failure(s) (hook=true)
+2026-11-14T05:02:47Z [ERROR] auto-audit detected 1 failure(s) (hook=true)
+2026-11-14T05:02:48Z [ERROR] auto-audit detected 1 failure(s) (hook=true)
+2026-11-14T05:03:28Z [ERROR] auto-audit detected 1 failure(s) (hook=true)
+2026-11-14T05:03:42Z [ERROR] auto-audit detected 1 failure(s) (hook=true)
+2026-11-14T05:03:48Z [ERROR] auto-audit detected 1 failure(s) (hook=true)
+2026-11-14T05:04:49Z [INFO] auto-audit passed (hook=true)
+2026-11-14T05:04:52Z [INFO] auto-audit passed (hook=true)
+2026-11-14T05:04:55Z [INFO] auto-audit passed (hook=true)
+2026-11-14T05:04:56Z [INFO] auto-audit passed (hook=true)
+2026-11-14T05:04:58Z [INFO] auto-audit passed (hook=true)
+2026-11-14T05:05:04Z [INFO] auto-audit passed (hook=false)
+2026-11-14T05:05:04Z [INFO] auto-audit passed (hook=false)
+2026-11-14T05:05:11Z [INFO] auto-audit passed (hook=false)
+2026-11-14T05:05:28Z [INFO] auto-audit passed (hook=false)
+2026-11-14T05:05:52Z [INFO] zigpod 0.1.0 command=stats socket=/tmp/zp-dbg.sock
+2026-11-14T05:05:52Z [DEBUG] GET /v1.40/containers/json?all=false
+2026-11-14T05:05:52Z [DEBUG] GET /v1.40/containers/smoke1234567890ab/stats?stream=false
+2026-11-14T05:05:52Z [INFO] fetched stats for 1 container(s)
+2026-11-14T05:06:31Z [INFO] zigpod 0.1.0 command=stats socket=/tmp/zp-dbg2.sock
+2026-11-14T05:06:31Z [DEBUG] GET /v1.40/containers/json?all=false
+2026-11-14T05:06:31Z [DEBUG] GET /v1.40/containers/smoke1234567890ab/stats?stream=false
+2026-11-14T05:06:31Z [INFO] fetched stats for 1 container(s)
+2026-11-14T05:06:56Z [INFO] zigpod 0.1.0 command=stats socket=/tmp/zp-dbg3.sock
+2026-11-14T05:06:56Z [DEBUG] GET /v1.40/containers/json?all=false
+2026-11-14T05:06:56Z [DEBUG] GET /v1.40/containers/smoke1234567890ab/stats?stream=false
+2026-11-14T05:06:56Z [INFO] fetched stats for 1 container(s)
+2026-11-14T05:07:28Z [INFO] auto-audit passed (hook=false)
+2026-11-14T05:07:43Z [INFO] auto-audit passed (hook=true)
+2026-11-14T05:07:50Z [INFO] auto-audit passed (hook=false)
+2026-11-14T05:07:51Z [INFO] auto-audit passed (hook=false)
+2026-11-14T05:07:57Z [INFO] auto-audit passed (hook=false)
+2026-11-14T05:08:07Z [INFO] auto-audit passed (hook=false)
+2026-11-14T05:08:15Z [INFO] auto-audit passed (hook=false)

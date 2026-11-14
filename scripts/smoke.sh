@@ -93,9 +93,9 @@ def reply(conn, status, body=b""):
     hdr = f"HTTP/1.1 {status}\r\nContent-Length: {len(body)}\r\n\r\n".encode("ascii")
     conn.sendall(hdr + body)
 
-# Expect 10 requests: create, start, wait, logs, delete (--rm), ps -a, inspect, exec-create, exec-start, exec-inspect
+# Expect 12 requests: create, start, wait, logs, delete (--rm), ps -a, inspect, exec-create, exec-start, exec-inspect, stats-list, stats-one
 with open(req_path, "wb") as out:
-    for step in range(10):
+    for step in range(12):
         conn, _ = srv.accept()
         try:
             req = read_req(conn)
@@ -113,7 +113,9 @@ with open(req_path, "wb") as out:
                 reply(conn, "204 No Content")
             elif b"/containers/json" in req:
                 reply(conn, "200 OK", b'[{"Id":"smoke1234567890ab","Image":"alpine:3.20","Status":"Up","Names":["/smoke"]}]')
-            elif req.startswith(b"GET ") and b"/json" in req and b"/containers/" in req:
+            elif req.startswith(b"GET ") and b"/stats?stream=false" in req:
+                reply(conn, "200 OK", b'{"id":"smoke1234567890ab","name":"/smoke","cpu_stats":{"cpu_usage":{"total_usage":200000000},"system_cpu_usage":2000000000,"online_cpus":2},"precpu_stats":{"cpu_usage":{"total_usage":100000000},"system_cpu_usage":1000000000},"memory_stats":{"usage":67108864,"limit":268435456,"stats":{"inactive_file":16777216}},"pids_stats":{"current":12}}')
+            elif req.startswith(b"GET ") and b"/json HTTP/1.1" in req and b"/containers/" in req:
                 reply(conn, "200 OK", b'{"Id":"smoke1234567890ab","Name":"/smoke","Image":"alpine:3.20","State":{"Status":"exited","Running":false,"ExitCode":0},"Config":{"WorkingDir":"/work","User":"1000:1000"},"HostConfig":{"Memory":67108864,"PidsLimit":32,"ReadonlyRootfs":true,"NetworkMode":"none","CapDrop":["ALL"],"CapAdd":["NET_BIND_SERVICE"]},"NetworkSettings":{"IPAddress":"10.88.0.2"},"Mounts":[{"Type":"bind","Source":"/srv/data","Destination":"/data","RW":false}]}')
             elif req.startswith(b"POST ") and b"/containers/" in req and b"/exec" in req:
                 reply(conn, "201 Created", b'{"Id":"exec123"}')
@@ -162,6 +164,11 @@ echo "$INSPECT_OUT" | grep -q "/srv/data -> /data (bind, ro)"
 
 EXEC_OUT=$("$BIN" --socket "$SOCK" exec smoke1234567890ab echo hello-exec)
 echo "$EXEC_OUT" | grep -q "hello-exec"
+
+STATS_OUT=$("$BIN" --socket "$SOCK" stats --no-stream)
+echo "$STATS_OUT" | grep -q "20.00%"
+echo "$STATS_OUT" | grep -q "48.0 MB / 256.0 MB"
+echo "$STATS_OUT" | grep -q "12"
 
 # Adversarial input must fail closed before reaching daemon.
 if "$BIN" --socket "$SOCK" rm ../evil >/dev/null 2>&1; then

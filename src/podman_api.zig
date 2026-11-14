@@ -950,6 +950,195 @@ pub fn execCommand(
     return result.ExitCode;
 }
 
+pub const ContainerStats = struct {
+    id: []const u8 = "",
+    name: []const u8 = "",
+    cpu_stats: ?CpuStats = null,
+    precpu_stats: ?CpuStats = null,
+    memory_stats: ?MemoryStats = null,
+    pids_stats: ?PidsStats = null,
+
+    pub const CpuStats = struct {
+        cpu_usage: ?CpuUsage = null,
+        system_cpu_usage: ?u64 = null,
+        online_cpus: ?u32 = null,
+    };
+
+    pub const CpuUsage = struct {
+        total_usage: ?u64 = null,
+        percpu_usage: ?[]const u64 = null,
+    };
+
+    pub const MemoryStats = struct {
+        usage: ?u64 = null,
+        limit: ?u64 = null,
+        stats: ?MemoryDetail = null,
+    };
+
+    pub const MemoryDetail = struct {
+        cache: ?u64 = null,
+        inactive_file: ?u64 = null,
+    };
+
+    pub const PidsStats = struct {
+        current: ?u64 = null,
+    };
+};
+
+/// Computes Docker-compatible CPU percentage from `cpu_stats` and `precpu_stats`.
+pub fn computeCpuPercent(s: ContainerStats) f64 {
+    const cpu = s.cpu_stats orelse return 0.0;
+    const pre = s.precpu_stats orelse return 0.0;
+    const cur_total = (cpu.cpu_usage orelse return 0.0).total_usage orelse return 0.0;
+    const pre_total = (pre.cpu_usage orelse return 0.0).total_usage orelse 0;
+    const cur_sys = cpu.system_cpu_usage orelse return 0.0;
+    const pre_sys = pre.system_cpu_usage orelse 0;
+
+    if (cur_total <= pre_total or cur_sys <= pre_sys) return 0.0;
+
+    const cpu_delta = cur_total - pre_total;
+    const sys_delta = cur_sys - pre_sys;
+
+    const online_cpus: u32 = blk: {
+        if (cpu.online_cpus) |n| {
+            if (n > 0) break :blk n;
+        }
+        if (cpu.cpu_usage) |usage| {
+            if (usage.percpu_usage) |percpu| {
+                if (percpu.len > 0) break :blk @intCast(@min(percpu.len, std.math.maxInt(u32)));
+            }
+        }
+        break :blk 1;
+    };
+
+    return (@as(f64, @floatFromInt(cpu_delta)) / @as(f64, @floatFromInt(sys_delta))) *
+        @as(f64, @floatFromInt(online_cpus)) * 100.0;
+}
+
+/// Computes effective memory usage (subtracting page cache / inactive_file) and percentage of limit.
+pub fn computeMemoryUsage(ms_opt: ?ContainerStats.MemoryStats) struct { used: u64, limit: u64, percent: f64 } {
+    const ms = ms_opt orelse return .{ .used = 0, .limit = 0, .percent = 0.0 };
+    const raw_usage = ms.usage orelse 0;
+    const reclaimable: u64 = if (ms.stats) |st| (st.inactive_file orelse st.cache orelse 0) else 0;
+    const used = if (raw_usage > reclaimable) raw_usage - reclaimable else 0;
+    const limit = ms.limit orelse 0;
+    const percent: f64 = if (limit > 0)
+        (@as(f64, @floatFromInt(used)) / @as(f64, @floatFromInt(limit))) * 100.0
+    else
+        0.0;
+    return .{ .used = used, .limit = limit, .percent = percent };
+}
+
+fn formatSizeU64(buf: []u8, bytes: u64) []const u8 {
+    const clamped: i64 = if (bytes > std.math.maxInt(i64)) std.math.maxInt(i64) else @intCast(bytes);
+    return utils.formatSize(buf, clamped);
+}
+
+fn formatStatsRow(writer: anytype, fallback_id: []const u8, s: ContainerStats) !void {
+    const id = if (s.id.len > 0) s.id else fallback_id;
+    const name = std.mem.trimLeft(u8, s.name, "/");
+    const cpu_pct = computeCpuPercent(s);
+    const mem = computeMemoryUsage(s.memory_stats);
+    const pids: u64 = if (s.pids_stats) |p| p.current orelse 0 else 0;
+
+    var cpu_buf: [24]u8 = undefined;
+    const cpu_str = std.fmt.bufPrint(&cpu_buf, "{d:.2}%", .{cpu_pct}) catch "0.00%";
+
+    var used_buf: [32]u8 = undefined;
+    var limit_buf: [32]u8 = undefined;
+    const used_str = formatSizeU64(&used_buf, mem.used);
+    const limit_str = if (mem.limit > 0) formatSizeU64(&limit_buf, mem.limit) else "--";
+    var mem_col_buf: [68]u8 = undefined;
+    const mem_col = std.fmt.bufPrint(&mem_col_buf, "{s} / {s}", .{ used_str, limit_str }) catch "?";
+
+    var mem_pct_buf: [24]u8 = undefined;
+    const mem_pct_str = std.fmt.bufPrint(&mem_pct_buf, "{d:.2}%", .{mem.percent}) catch "0.00%";
+
+    try writer.print("{s:<14} {s:<20} {s:<9} {s:<24} {s:<9} {d}\n", .{
+        utils.shortId(id),
+        name,
+        cpu_str,
+        mem_col,
+        mem_pct_str,
+        pids,
+    });
+}
+
+fn fetchAndPrintStats(
+    client: *const http.Client,
+    logger: *log.Logger,
+    id: []const u8,
+    writer: anytype,
+) !void {
+    try validateIdentifier(id);
+
+    const path = try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/stats?stream=false", .{ api_prefix, id });
+    defer client.allocator.free(path);
+
+    logger.debug("GET {s}", .{path});
+    const resp = try client.request("GET", path, null);
+    defer resp.deinit();
+    if (!resp.ok()) return logApiFailure(logger, "GET", path, resp);
+
+    const parsed = try std.json.parseFromSlice(ContainerStats, client.allocator, resp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    try formatStatsRow(writer, id, parsed.value);
+}
+
+/// Fetches a one-shot (`stream=false`) snapshot of CPU, memory, and PIDs metrics
+/// for the specified containers (or all running/listed containers when empty).
+pub fn statsContainers(
+    client: *const http.Client,
+    logger: *log.Logger,
+    containers: []const []const u8,
+    all: bool,
+    writer: anytype,
+) !void {
+    if (containers.len > 0) {
+        // Validate every target before opening any socket connection.
+        for (containers) |c| try validateIdentifier(c);
+
+        try writer.print("{s:<14} {s:<20} {s:<9} {s:<24} {s:<9} {s}\n", .{
+            "CONTAINER ID", "NAME", "CPU %", "MEM USAGE / LIMIT", "MEM %", "PIDS",
+        });
+        for (containers) |c| {
+            try fetchAndPrintStats(client, logger, c, writer);
+        }
+        logger.info("fetched stats for {d} container(s)", .{containers.len});
+        return;
+    }
+
+    const list_path = try std.fmt.allocPrint(
+        client.allocator,
+        "{s}/containers/json?all={s}",
+        .{ api_prefix, if (all) "true" else "false" },
+    );
+    defer client.allocator.free(list_path);
+
+    logger.debug("GET {s}", .{list_path});
+    const list_resp = try client.request("GET", list_path, null);
+    defer list_resp.deinit();
+    if (!list_resp.ok()) return logApiFailure(logger, "GET", list_path, list_resp);
+
+    const list_parsed = try std.json.parseFromSlice([]ContainerSummary, client.allocator, list_resp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer list_parsed.deinit();
+
+    // Defense-in-depth: validate daemon-returned IDs before assembling /stats paths.
+    for (list_parsed.value) |c| try validateIdentifier(c.Id);
+
+    try writer.print("{s:<14} {s:<20} {s:<9} {s:<24} {s:<9} {s}\n", .{
+        "CONTAINER ID", "NAME", "CPU %", "MEM USAGE / LIMIT", "MEM %", "PIDS",
+    });
+    for (list_parsed.value) |c| {
+        try fetchAndPrintStats(client, logger, c.Id, writer);
+    }
+    logger.info("fetched stats for {d} container(s)", .{list_parsed.value.len});
+}
+
 /// Demultiplexes Docker/Podman attached log frames ([stream_type, 0, 0, 0, size_be32][payload...]).
 /// Falls back to writing `raw` verbatim when the payload is plain text (e.g., TTY containers).
 pub fn demuxLogs(raw: []const u8, writer: anytype) !void {
@@ -1711,4 +1900,144 @@ test "ContainerCreateRequest serializes hardening HostConfig fields" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"Memory\":67108864") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"PidsLimit\":32") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"SecurityOpt\":[\"no-new-privileges\"]") != null);
+}
+
+test "computeCpuPercent and computeMemoryUsage handle normal and boundary cases" {
+    const s = ContainerStats{
+        .cpu_stats = .{
+            .cpu_usage = .{ .total_usage = 200_000_000 },
+            .system_cpu_usage = 2_000_000_000,
+            .online_cpus = 4,
+        },
+        .precpu_stats = .{
+            .cpu_usage = .{ .total_usage = 100_000_000 },
+            .system_cpu_usage = 1_000_000_000,
+        },
+        .memory_stats = .{
+            .usage = 100 * 1024 * 1024,
+            .limit = 512 * 1024 * 1024,
+            .stats = .{ .inactive_file = 36 * 1024 * 1024 },
+        },
+    };
+    // (100M / 1000M) * 4 * 100 = 40.0%
+    try std.testing.expectApproxEqAbs(@as(f64, 40.0), computeCpuPercent(s), 0.001);
+
+    const mem = computeMemoryUsage(s.memory_stats);
+    try std.testing.expectEqual(@as(u64, 64 * 1024 * 1024), mem.used);
+    try std.testing.expectEqual(@as(u64, 512 * 1024 * 1024), mem.limit);
+    try std.testing.expectApproxEqAbs(@as(f64, 12.5), mem.percent, 0.001);
+
+    // Underflow / zero / missing stats must return 0 safely without panic.
+    const empty = ContainerStats{};
+    try std.testing.expectEqual(@as(f64, 0.0), computeCpuPercent(empty));
+    const zero_mem = computeMemoryUsage(null);
+    try std.testing.expectEqual(@as(u64, 0), zero_mem.used);
+    try std.testing.expectEqual(@as(f64, 0.0), zero_mem.percent);
+
+    const underflow = ContainerStats{
+        .cpu_stats = .{
+            .cpu_usage = .{ .total_usage = 50 },
+            .system_cpu_usage = 100,
+        },
+        .precpu_stats = .{
+            .cpu_usage = .{ .total_usage = 100 },
+            .system_cpu_usage = 200,
+        },
+        .memory_stats = .{
+            .usage = 100,
+            .limit = 0,
+            .stats = .{ .cache = 200 },
+        },
+    };
+    try std.testing.expectEqual(@as(f64, 0.0), computeCpuPercent(underflow));
+    const umem = computeMemoryUsage(underflow.memory_stats);
+    try std.testing.expectEqual(@as(u64, 0), umem.used);
+    try std.testing.expectEqual(@as(f64, 0.0), umem.percent);
+}
+
+test "statsContainers fetches metrics via mock Unix socket and enforces identifier guard" {
+    const sock_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "/tmp/zp-stats-test-{d}.sock",
+        .{std.time.milliTimestamp()},
+    );
+    defer std.testing.allocator.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const list_json = "[{\"Id\":\"abcdef1234567890\",\"Image\":\"alpine:3.20\",\"Status\":\"Up\",\"Names\":[\"/web\"]}]";
+    const list_resp = std.fmt.comptimePrint(
+        "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}",
+        .{ list_json.len, list_json },
+    );
+    const stats_json =
+        "{\"id\":\"abcdef1234567890\",\"name\":\"/web\"," ++
+        "\"cpu_stats\":{\"cpu_usage\":{\"total_usage\":200000000},\"system_cpu_usage\":2000000000,\"online_cpus\":2}," ++
+        "\"precpu_stats\":{\"cpu_usage\":{\"total_usage\":100000000},\"system_cpu_usage\":1000000000}," ++
+        "\"memory_stats\":{\"usage\":67108864,\"limit\":268435456,\"stats\":{\"inactive_file\":16777216}}," ++
+        "\"pids_stats\":{\"current\":12}}";
+    const stats_resp = std.fmt.comptimePrint(
+        "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}",
+        .{ stats_json.len, stats_json },
+    );
+
+    const replies = [_]ScriptedReply{
+        .{
+            .expected_prefix = "GET /v1.40/containers/json?all=false HTTP/1.1\r\n",
+            .raw_response = list_resp,
+        },
+        .{
+            .expected_prefix = "GET /v1.40/containers/abcdef1234567890/stats?stream=false HTTP/1.1\r\n",
+            .raw_response = stats_resp,
+        },
+        .{
+            .expected_prefix = "GET /v1.40/containers/web/stats?stream=false HTTP/1.1\r\n",
+            .raw_response = stats_resp,
+        },
+    };
+
+    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{
+        .allocator = std.testing.allocator,
+        .socket_path = sock_path,
+    };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    // Invalid identifier must be rejected before any socket traffic.
+    var bad_out = std.ArrayList(u8).init(std.testing.allocator);
+    defer bad_out.deinit();
+    try std.testing.expectError(
+        ApiError.InvalidIdentifier,
+        statsContainers(&client, &logger, &.{"../bad"}, false, bad_out.writer()),
+    );
+
+    // 1) All running containers (empty list -> GET /containers/json -> GET /stats?stream=false)
+    var out1 = std.ArrayList(u8).init(std.testing.allocator);
+    defer out1.deinit();
+    try statsContainers(&client, &logger, &.{}, false, out1.writer());
+    try std.testing.expect(std.mem.indexOf(u8, out1.items, "CONTAINER ID") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out1.items, "abcdef123456") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out1.items, "web") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out1.items, "20.00%") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out1.items, "48.0 MB / 256.0 MB") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out1.items, "18.75%") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out1.items, "12") != null);
+
+    // 2) Explicit container name
+    var out2 = std.ArrayList(u8).init(std.testing.allocator);
+    defer out2.deinit();
+    try statsContainers(&client, &logger, &.{"web"}, false, out2.writer());
+    try std.testing.expect(std.mem.indexOf(u8, out2.items, "48.0 MB / 256.0 MB") != null);
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
 }
