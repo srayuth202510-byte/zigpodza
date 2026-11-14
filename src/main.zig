@@ -156,6 +156,13 @@ fn dispatch(
                 }
             }
 
+            // Validate identity/network/capability flags before touching the socket.
+            if (r.network) |m| try pod.validateNetworkMode(m);
+            if (r.workdir) |w| try pod.validateWorkdir(w);
+            if (r.user) |u| try pod.validateUser(u);
+            for (r.cap_drop) |c| try pod.validateCapability(c);
+            for (r.cap_add) |c| try pod.validateCapability(c);
+
             // Defer removal until after fetchLogs when attached so output is not lost.
             const auto_remove = r.detach and r.remove;
             const has_host_cfg = auto_remove or
@@ -163,7 +170,10 @@ fn dispatch(
                 r.no_new_privileges or
                 r.memory != null or
                 r.pids_limit != null or
-                has_binding;
+                has_binding or
+                r.network != null or
+                r.cap_drop.len > 0 or
+                r.cap_add.len > 0;
             const sec_opts: []const []const u8 = &.{"no-new-privileges"};
             const host_cfg: ?pod.HostConfig = if (has_host_cfg) .{
                 .AutoRemove = auto_remove,
@@ -172,6 +182,9 @@ fn dispatch(
                 .PidsLimit = r.pids_limit,
                 .SecurityOpt = if (r.no_new_privileges) sec_opts else null,
                 .PortBindings = if (has_binding) .{ .ports = port_buf.items } else null,
+                .NetworkMode = r.network,
+                .CapDrop = if (r.cap_drop.len > 0) r.cap_drop else null,
+                .CapAdd = if (r.cap_add.len > 0) r.cap_add else null,
             } else null;
 
             const req = pod.ContainerCreateRequest{
@@ -179,6 +192,8 @@ fn dispatch(
                 .Cmd = if (r.cmd.len > 0) r.cmd else null,
                 .Env = if (r.env.len > 0) r.env else null,
                 .ExposedPorts = if (port_buf.items.len > 0) .{ .ports = port_buf.items } else null,
+                .WorkingDir = r.workdir,
+                .User = r.user,
                 .Mounts = if (mount_buf.items.len > 0) mount_buf.items else null,
                 .HostConfig = host_cfg,
             };
@@ -255,6 +270,22 @@ fn reportFailure(logger: *log.Logger, cmd: cli.Command, socket_path: []const u8,
         ),
         pod.ApiError.InvalidPort => logger.err(
             "Rejected invalid port mapping. Use [IP:]HOST:CONTAINER[/tcp|udp|sctp] with ports 1-65535 and an IPv4 host address.",
+            .{},
+        ),
+        pod.ApiError.InvalidNetwork => logger.err(
+            "Rejected invalid --network mode. Use none, bridge, host, pasta, or slirp4netns.",
+            .{},
+        ),
+        pod.ApiError.InvalidWorkdir => logger.err(
+            "Rejected invalid --workdir (must be an absolute, traversal-free container path).",
+            .{},
+        ),
+        pod.ApiError.InvalidUser => logger.err(
+            "Rejected invalid --user. Use USER or USER:GROUP (alphanumerics plus '_', '-', '.').",
+            .{},
+        ),
+        pod.ApiError.InvalidCapability => logger.err(
+            "Rejected invalid capability name. Use ALL or an uppercase name such as NET_ADMIN.",
             .{},
         ),
         pod.ApiError.PodmanApiError => {

@@ -15,6 +15,11 @@ pub const usage =
     \\      -e, --env KEY=VALUE        Set an environment variable (repeatable)
     \\      -v, --volume SRC:DST[:ro|rw]  Bind mount a host path (default: read-only)
     \\      -p, --publish [IP:]HOST:CONTAINER[/proto]  Publish a container port (repeatable)
+    \\      --network MODE             Network mode: none|bridge|host|pasta|slirp4netns
+    \\      -w, --workdir PATH         Working directory inside the container
+    \\      -u, --user USER[:GROUP]    Run as user (and optional group)
+    \\      --cap-drop CAP             Drop a Linux capability (repeatable, e.g. ALL)
+    \\      --cap-add CAP              Add a Linux capability (repeatable)
     \\      -m, --memory BYTES         Memory limit (e.g., 64m, 1g, 1048576)
     \\      --pids-limit N             Limit container PIDs
     \\      --read-only                Mount container root filesystem as read-only
@@ -69,7 +74,12 @@ pub const RunOpts = struct {
     env: []const []const u8 = &.{},
     volumes: []const Volume = &.{},
     ports: []const PortMapping = &.{},
+    cap_drop: []const []const u8 = &.{},
+    cap_add: []const []const u8 = &.{},
     name: ?[]const u8 = null,
+    network: ?[]const u8 = null,
+    workdir: ?[]const u8 = null,
+    user: ?[]const u8 = null,
     detach: bool = false,
     remove: bool = false,
     read_only: bool = false,
@@ -108,6 +118,8 @@ pub const Parsed = struct {
                 if (r.env.len > 0) allocator.free(r.env);
                 if (r.volumes.len > 0) allocator.free(r.volumes);
                 if (r.ports.len > 0) allocator.free(r.ports);
+                if (r.cap_drop.len > 0) allocator.free(r.cap_drop);
+                if (r.cap_add.len > 0) allocator.free(r.cap_add);
             },
             else => {},
         }
@@ -354,6 +366,55 @@ fn parsePortSpec(spec: []const u8) ParseError!PortMapping {
     return mapping;
 }
 
+/// Network modes accepted by `--network`. Re-checked by `podman_api.validateNetworkMode`.
+const network_modes = [_][]const u8{ "none", "bridge", "host", "pasta", "slirp4netns" };
+
+fn parseNetworkMode(s: []const u8) ParseError![]const u8 {
+    for (network_modes) |m| {
+        if (eql(s, m)) return s;
+    }
+    return error.InvalidValue;
+}
+
+/// Container working directory: only the absolute-path shape is checked here;
+/// the full path policy is enforced by `podman_api.validateWorkdir`.
+fn parseWorkdir(s: []const u8) ParseError![]const u8 {
+    if (s.len == 0 or s[0] != '/') return error.InvalidValue;
+    return s;
+}
+
+/// `USER[:GROUP]` where each field is alphanumeric plus `_`, `-`, `.`.
+fn parseUserSpec(s: []const u8) ParseError![]const u8 {
+    if (s.len == 0 or s.len > 128) return error.InvalidValue;
+    var it = std.mem.splitScalar(u8, s, ':');
+    var fields: usize = 0;
+    while (it.next()) |field| {
+        fields += 1;
+        if (fields > 2) return error.InvalidValue;
+        if (field.len == 0 or field.len > 64) return error.InvalidValue;
+        for (field, 0..) |c, idx| {
+            if (std.ascii.isAlphanumeric(c) or c == '_' or c == '-' or c == '.') {
+                if (idx == 0 and (c == '-' or c == '.')) return error.InvalidValue;
+                continue;
+            }
+            return error.InvalidValue;
+        }
+    }
+    return s;
+}
+
+/// Linux capability name: `ALL` or an uppercase `[A-Z][A-Z0-9_]*` token.
+fn parseCapName(s: []const u8) ParseError![]const u8 {
+    if (s.len == 0 or s.len > 64) return error.InvalidValue;
+    if (eql(s, "ALL")) return s;
+    if (!std.ascii.isUpper(s[0])) return error.InvalidValue;
+    for (s) |c| {
+        if (std.ascii.isUpper(c) or std.ascii.isDigit(c) or c == '_') continue;
+        return error.InvalidValue;
+    }
+    return s;
+}
+
 fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!RunOpts {
     var opts = RunOpts{ .image = "" };
     var env = std.ArrayList([]const u8).init(allocator);
@@ -362,6 +423,10 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
     errdefer volumes.deinit();
     var ports = std.ArrayList(PortMapping).init(allocator);
     errdefer ports.deinit();
+    var cap_drop = std.ArrayList([]const u8).init(allocator);
+    errdefer cap_drop.deinit();
+    var cap_add = std.ArrayList([]const u8).init(allocator);
+    errdefer cap_add.deinit();
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -394,6 +459,26 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
             try ports.append(try parsePortSpec(try takeValue(args, &i)));
         } else if (std.mem.startsWith(u8, a, "--publish=")) {
             try ports.append(try parsePortSpec(a["--publish=".len..]));
+        } else if (eql(a, "--network")) {
+            opts.network = try parseNetworkMode(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--network=")) {
+            opts.network = try parseNetworkMode(a["--network=".len..]);
+        } else if (eql(a, "-w") or eql(a, "--workdir")) {
+            opts.workdir = try parseWorkdir(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--workdir=")) {
+            opts.workdir = try parseWorkdir(a["--workdir=".len..]);
+        } else if (eql(a, "-u") or eql(a, "--user")) {
+            opts.user = try parseUserSpec(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--user=")) {
+            opts.user = try parseUserSpec(a["--user=".len..]);
+        } else if (eql(a, "--cap-drop")) {
+            try cap_drop.append(try parseCapName(try takeValue(args, &i)));
+        } else if (std.mem.startsWith(u8, a, "--cap-drop=")) {
+            try cap_drop.append(try parseCapName(a["--cap-drop=".len..]));
+        } else if (eql(a, "--cap-add")) {
+            try cap_add.append(try parseCapName(try takeValue(args, &i)));
+        } else if (std.mem.startsWith(u8, a, "--cap-add=")) {
+            try cap_add.append(try parseCapName(a["--cap-add=".len..]));
         } else if (isFlag(a)) {
             return error.UnknownFlag;
         } else break; // first positional = IMAGE; everything after is the command
@@ -406,6 +491,10 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
     opts.volumes = try volumes.toOwnedSlice();
     errdefer allocator.free(opts.volumes);
     opts.ports = try ports.toOwnedSlice();
+    errdefer allocator.free(opts.ports);
+    opts.cap_drop = try cap_drop.toOwnedSlice();
+    errdefer allocator.free(opts.cap_drop);
+    opts.cap_add = try cap_add.toOwnedSlice();
     return opts;
 }
 
@@ -647,6 +736,67 @@ test "parse rejects malformed publish specs without leaking allocations" {
     try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "run", "-p" }));
     // A parsed port mapping must be freed when a later error aborts the parse.
     try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "run", "-p", "8080:80" }));
+}
+
+test "parse run network, workdir, user, and capability flags" {
+    const alloc = std.testing.allocator;
+    var parsed = try parse(alloc, &.{
+        "run",
+        "--network",
+        "none",
+        "--workdir=/work",
+        "-u",
+        "1000:1000",
+        "--cap-drop",
+        "ALL",
+        "--cap-drop=CHOWN",
+        "--cap-add",
+        "NET_BIND_SERVICE",
+        "alpine:3.20",
+    });
+    defer parsed.deinit(alloc);
+
+    const r = parsed.command.run;
+    try std.testing.expectEqualStrings("none", r.network.?);
+    try std.testing.expectEqualStrings("/work", r.workdir.?);
+    try std.testing.expectEqualStrings("1000:1000", r.user.?);
+    try std.testing.expectEqual(@as(usize, 2), r.cap_drop.len);
+    try std.testing.expectEqualStrings("ALL", r.cap_drop[0]);
+    try std.testing.expectEqualStrings("CHOWN", r.cap_drop[1]);
+    try std.testing.expectEqual(@as(usize, 1), r.cap_add.len);
+    try std.testing.expectEqualStrings("NET_BIND_SERVICE", r.cap_add[0]);
+    try std.testing.expectEqualStrings("alpine:3.20", r.image);
+
+    var p_defaults = try parse(alloc, &.{ "run", "-w", "/srv", "alpine:3.20" });
+    defer p_defaults.deinit(alloc);
+    try std.testing.expect(p_defaults.command.run.network == null);
+    try std.testing.expect(p_defaults.command.run.user == null);
+    try std.testing.expectEqual(@as(usize, 0), p_defaults.command.run.cap_drop.len);
+}
+
+test "parse rejects malformed network/workdir/user/capability values without leaking" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--network", "bogus", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--network=", "alpine" }));
+    try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "run", "--network" }));
+
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "-w", "relative/path", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--workdir=", "alpine" }));
+    try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "run", "-w" }));
+
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "-u", ":", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "-u", "a:b:c", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "-u", "bad user", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "-u", "-root", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--user=", "alpine" }));
+    try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "run", "-u" }));
+
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--cap-drop", "net_admin", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--cap-add", "1BAD", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--cap-drop=", "alpine" }));
+    try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "run", "--cap-add" }));
+    // Parsed capability slices must be freed when a later error aborts the parse.
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "run", "--cap-drop", "ALL" }));
 }
 
 test "parse demo and audit subcommands" {

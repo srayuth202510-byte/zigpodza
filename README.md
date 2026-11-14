@@ -104,6 +104,9 @@ zigpod run --rm -v myvol:/var/lib/data alpine:3.20 ls /var/lib/data
 # Publish container ports (TCP by default, repeatable, IPv4 host address optional)
 zigpod run --rm -p 8080:80 -p 127.0.0.1:9000:9000/udp alpine:3.20 sleep 1
 
+# Run with a hardened network/identity profile
+zigpod run --rm --network none -w /work -u 1000:1000 --cap-drop ALL --cap-add NET_BIND_SERVICE alpine:3.20 id
+
 # Run a container in the background with a name
 zigpod run -d --name demo-alpine alpine:3.20 sleep 60
 
@@ -161,6 +164,7 @@ zig build test
 - Container ID/name validation, Docker stream log demultiplexing, JSON response deserialization และ mock Unix-socket end-to-end lifecycle (`src/podman_api.zig`)
 - Host bind-mount policy validator (`validateHostPath`), bind/volume mount classification และ `Mounts` JSON serialization (`src/podman_api.zig`)
 - Port-publishing validator (`validatePortMapping`), `ExposedPorts`/`PortBindings` JSON serialization และ CLI `-p` parsing (`src/cli.zig`, `src/podman_api.zig`)
+- Network/identity/capability validators (`validateNetworkMode`, `validateWorkdir`, `validateUser`, `validateCapability`) และ CLI `--network`/`-w`/`-u`/`--cap-*` parsing (`src/cli.zig`, `src/podman_api.zig`)
 
 ---
 
@@ -175,6 +179,7 @@ zig build test
   - `podman_api.validateIdentifier` ป้องกัน path traversal (`..`, `/`) และ query/header injection บน container ID และ name
   - `podman_api.validateHostPath` (BUG-014) บังคับ **fail-closed host mount policy**: บล็อกการ bind-mount `/`, `/etc`, `/proc`, `/sys`, `/dev`, `/boot`, `/run`, `/var/run`, `/var/lib/docker`, `/var/lib/containers`, `/root` และบังคับ default `:ro` สำหรับ sensitive paths
   - `podman_api.validatePortMapping` (BUG-015) ปฏิเสธพอร์ตนอกช่วง `1..65535`, โปรโตคอลที่ไม่อยู่ใน allow-list (`tcp`/`udp`/`sctp`) และ host address ที่ไม่ใช่ IPv4 literal ก่อนส่งคำขอไปยัง daemon
+  - `podman_api.validateNetworkMode` / `validateWorkdir` / `validateUser` / `validateCapability` (BUG-016) จำกัด `--network` เป็น allow-list, บังคับ `--workdir` เป็น absolute traversal-free path, ตรวจรูปแบบ `--user` และปฏิเสธชื่อ capability ที่ไม่ใช่ `ALL`/uppercase ก่อนส่งคำขอไปยัง daemon
 - **Automated Security Check Script**:
 
 ```bash
@@ -206,6 +211,10 @@ Apply defense-in-depth limits in `HostConfig` when launching containers:
 - `--no-new-privileges`: Set `SecurityOpt: ["no-new-privileges"]`
 - `-v, --volume SRC:DST[:ro|rw]`: Bind-mount a host path or named volume (repeatable, default **read-only**)
 - `-p, --publish [IP:]HOST:CONTAINER[/tcp|udp|sctp]`: Publish a container port (repeatable)
+- `--network <MODE>`: Network mode, one of `none`, `bridge`, `host`, `pasta`, `slirp4netns` (`HostConfig.NetworkMode`)
+- `-w, --workdir <PATH>`: Container working directory (`WorkingDir`)
+- `-u, --user <USER[:GROUP]>`: Run as user (and optional group) (`User`)
+- `--cap-drop <CAP>` / `--cap-add <CAP>`: Drop/add a Linux capability, repeatable (`HostConfig.CapDrop` / `CapAdd`)
 
 ```bash
 zigpod run --rm -m 64m --pids-limit 32 --read-only --no-new-privileges alpine:3.20 echo ok
@@ -228,6 +237,16 @@ zigpod run --rm -m 64m --pids-limit 32 --read-only --no-new-privileges alpine:3.
 - Accepted forms: `CONTAINER`, `CONTAINER/proto`, `HOST:CONTAINER[/proto]`, and `IPV4:HOST:CONTAINER[/proto]` (the host address must be a valid IPv4 literal).
 - Container and host ports must be in `1..65535`; the protocol allow-list is `tcp` (default), `udp`, and `sctp`.
 - Container ports are emitted in `ExposedPorts` (`{"80/tcp":{}}`); mappings with an explicit host port also populate `HostConfig.PortBindings` (`{"80/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]}`).
+
+#### Network, Identity & Capability Policy (`--network` / `-w` / `-u` / `--cap-*`)
+
+`podman_api.validateNetworkMode`, `validateWorkdir`, `validateUser`, and `validateCapability` (BUG-016) validate every identity/network flag **before** any request reaches the daemon:
+
+- `--network` is restricted to the allow-list `none`, `bridge`, `host`, `pasta`, and `slirp4netns`; arbitrary values are rejected so the daemon never receives unexpected network configuration.
+- `-w/--workdir` reuses the container-path policy: absolute, traversal-free (`..`/`.`/`//`/trailing-slash rejected), control-char-free, and ≤ 4096 bytes.
+- `-u/--user` accepts `USER` or `USER:GROUP`, where each field is alphanumeric plus `_`, `-`, `.` and does not start with `-`/`.`.
+- `--cap-drop`/`--cap-add` accept `ALL` or an uppercase `[A-Z][A-Z0-9_]*` capability name (e.g. `NET_ADMIN`); lowercase names and injection characters are rejected.
+- `createContainer` re-validates all of these (defense in depth) before serializing the request.
 
 ### Built-In 14-Case Fail-Closed Self-Test (`zigpod demo`)
 

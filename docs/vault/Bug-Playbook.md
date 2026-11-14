@@ -179,3 +179,15 @@ status: active
   - `createContainer` re-validate `ExposedPorts` แบบ defense-in-depth ก่อน stringify JSON
   - เพิ่มเทส DENY ครบ (port 0, proto แปลก, IP ผิดรูป) และ smoke E2E ตรวจว่า `-p 0:80` ถูกปฏิเสธก่อนถึง daemon
 - **Prevention Rule**: ทุก field ที่อ้างถึง **network endpoint** (ports, อนาคต `--network`, `--hostname`) ต้องผ่าน validator แบบ allow-list (range + protocol + IP literal) และตรวจซ้ำในชั้น API (defense-in-depth) ก่อน serialize — ห้าม serialize ค่าดิบลง request
+
+## BUG-016: Unvalidated Network/Identity/Capability Flags `#bug-pattern` `#security-gate`
+
+- **Symptom**: ระหว่างทำ Phase 1 (`--network`, `-w`/`--workdir`, `-u`/`--user`, `--cap-drop`/`--cap-add`) หาก serialize ค่าดิบลง `HostConfig`/`ContainerCreateRequest` จะสามารถตั้ง network mode นอก allow-list (เช่นเปิด host networking โดยไม่ตั้งใจ), ใส่ working directory ที่มี `..` เพื่อหลุด chroot, ใส่ user string ที่มีอักขระแปลกปลอม, หรือเพิ่ม capability ที่ daemon ตีความผิด ทำให้ privilege surface กว้างขึ้นโดยไม่ตั้งใจ
+- **Root Cause**: เดิม CLI ไม่รองรับ flag เหล่านี้ จึงไม่มีจุดตรวจ; การเพิ่มฟิลด์ identity/network โดยไม่มี policy จะเปิดช่องโหว่คลาสเดียวกับ BUG-005/014/015 แต่เป็นฝั่ง network namespace และ privilege model
+- **Fix**:
+  - เพิ่ม `podman_api.validateNetworkMode()` (allow-list `none`/`bridge`/`host`/`pasta`/`slirp4netns`), `validateWorkdir()` (ใช้ path policy เดียวกับ container mount target), `validateUser()` (`USER[:GROUP]` รูปแบบจำกัด), และ `validateCapability()` (`ALL` หรือ uppercase `[A-Z][A-Z0-9_]*`) ใน [src/podman_api.zig](../../src/podman_api.zig)
+  - `src/cli.zig` parse และตรวจรูปแบบเบื้องต้นของ `--network`, `-w`/`--workdir`, `-u`/`--user`, `--cap-drop`/`--cap-add` (รองรับ `--flag=` และ `--flag value`, repeatable สำหรับ capability) แล้วคืน `InvalidValue` เมื่อผิด
+  - `main.zig` เรียก validator ก่อนสร้าง `HostConfig`/`ContainerCreateRequest` และ map error เป็นข้อความ `reportFailure`
+  - `createContainer` re-validate `NetworkMode`/`WorkingDir`/`User`/`CapDrop`/`CapAdd` แบบ defense-in-depth ก่อน stringify JSON
+  - เพิ่มเทส DENY ครบ (network bogus, workdir relative/traversal, user ผิดรูปแบบ, capability lowercase) และ smoke E2E ตรวจว่า `--network bogus` ถูกปฏิเสธก่อนถึง daemon
+- **Prevention Rule**: ทุก flag ที่มีผลต่อ **network namespace, filesystem view, หรือ privilege model** ต้องผ่าน validator แบบ allow-list/รูปแบบปิด และตรวจซ้ำในชั้น API ก่อน serialize — ห้าม serialize ค่าดิบลง request

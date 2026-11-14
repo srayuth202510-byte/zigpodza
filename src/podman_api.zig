@@ -12,6 +12,10 @@ pub const ApiError = error{
     InvalidHostPath,
     InvalidMountTarget,
     InvalidPort,
+    InvalidNetwork,
+    InvalidWorkdir,
+    InvalidUser,
+    InvalidCapability,
 };
 
 pub const HostConfig = struct {
@@ -21,6 +25,9 @@ pub const HostConfig = struct {
     PidsLimit: ?i64 = null,
     SecurityOpt: ?[]const []const u8 = null,
     PortBindings: ?PortBindings = null,
+    NetworkMode: ?[]const u8 = null,
+    CapDrop: ?[]const []const u8 = null,
+    CapAdd: ?[]const []const u8 = null,
 };
 
 /// A bind mount or named-volume mount, serialized into the container-create
@@ -91,6 +98,8 @@ pub const ContainerCreateRequest = struct {
     Cmd: ?[]const []const u8 = null,
     Env: ?[]const []const u8 = null,
     ExposedPorts: ?ExposedPorts = null,
+    WorkingDir: ?[]const u8 = null,
+    User: ?[]const u8 = null,
     Mounts: ?[]const Mount = null,
     HostConfig: ?HostConfig = null,
 };
@@ -279,6 +288,56 @@ pub fn makePortMapping(
     return mapping;
 }
 
+/// Network modes accepted for `--network` (BUG-016). Any other value is
+/// rejected so the daemon never receives an unexpected network configuration.
+const allowed_network_modes = [_][]const u8{ "none", "bridge", "host", "pasta", "slirp4netns" };
+
+pub fn validateNetworkMode(mode: []const u8) ApiError!void {
+    for (allowed_network_modes) |m| {
+        if (std.mem.eql(u8, mode, m)) return;
+    }
+    return ApiError.InvalidNetwork;
+}
+
+/// Validates the in-container working directory (same path policy as mount
+/// targets: absolute, traversal-free, control-char-free, ≤ 4096 bytes).
+pub fn validateWorkdir(path: []const u8) ApiError!void {
+    validateAbsolutePath(path) catch return ApiError.InvalidWorkdir;
+}
+
+/// Validates `USER[:GROUP]`: one or two non-empty fields of alphanumerics plus
+/// `_`, `-`, `.`, each not starting with `-`/`.` (BUG-016).
+pub fn validateUser(user: []const u8) ApiError!void {
+    if (user.len == 0 or user.len > 128) return ApiError.InvalidUser;
+    var it = std.mem.splitScalar(u8, user, ':');
+    var fields: usize = 0;
+    while (it.next()) |field| {
+        fields += 1;
+        if (fields > 2) return ApiError.InvalidUser;
+        if (field.len == 0 or field.len > 64) return ApiError.InvalidUser;
+        for (field, 0..) |c, idx| {
+            if (std.ascii.isAlphanumeric(c) or c == '_' or c == '-' or c == '.') {
+                if (idx == 0 and (c == '-' or c == '.')) return ApiError.InvalidUser;
+                continue;
+            }
+            return ApiError.InvalidUser;
+        }
+    }
+    return;
+}
+
+/// Validates a Linux capability name: `ALL` or an uppercase `[A-Z][A-Z0-9_]*`
+/// token (BUG-016). Rejects injection characters and lowercase names.
+pub fn validateCapability(cap: []const u8) ApiError!void {
+    if (cap.len == 0 or cap.len > 64) return ApiError.InvalidCapability;
+    if (std.mem.eql(u8, cap, "ALL")) return;
+    if (!std.ascii.isUpper(cap[0])) return ApiError.InvalidCapability;
+    for (cap) |c| {
+        if (std.ascii.isUpper(c) or std.ascii.isDigit(c) or c == '_') continue;
+        return ApiError.InvalidCapability;
+    }
+}
+
 fn appendQueryEncoded(out: *std.ArrayList(u8), s: []const u8) !void {
     for (s) |c| {
         if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
@@ -314,6 +373,14 @@ pub fn createContainer(
     }
     if (cfg.ExposedPorts) |exposed| {
         for (exposed.ports) |p| try validatePortMapping(p);
+    }
+    // Defense in depth: validate identity/network/capability fields too (BUG-016).
+    if (cfg.WorkingDir) |w| try validateWorkdir(w);
+    if (cfg.User) |u| try validateUser(u);
+    if (cfg.HostConfig) |hc| {
+        if (hc.NetworkMode) |m| try validateNetworkMode(m);
+        if (hc.CapDrop) |caps| for (caps) |c| try validateCapability(c);
+        if (hc.CapAdd) |caps| for (caps) |c| try validateCapability(c);
     }
 
     var path_buf = std.ArrayList(u8).init(client.allocator);
@@ -738,6 +805,60 @@ test "ExposedPorts and PortBindings serialize to Docker JSON" {
     ) != null);
 }
 
+test "validate network, workdir, user, and capability fields" {
+    for (allowed_network_modes) |m| try validateNetworkMode(m);
+    try std.testing.expectError(ApiError.InvalidNetwork, validateNetworkMode("bogus"));
+    try std.testing.expectError(ApiError.InvalidNetwork, validateNetworkMode(""));
+    try std.testing.expectError(ApiError.InvalidNetwork, validateNetworkMode("host;rm -rf /"));
+
+    try validateWorkdir("/work");
+    try validateWorkdir("/var/lib/data");
+    try std.testing.expectError(ApiError.InvalidWorkdir, validateWorkdir("relative"));
+    try std.testing.expectError(ApiError.InvalidWorkdir, validateWorkdir("/work/../etc"));
+    try std.testing.expectError(ApiError.InvalidWorkdir, validateWorkdir("/work/"));
+
+    try validateUser("1000");
+    try validateUser("1000:1000");
+    try validateUser("nobody:nogroup");
+    try std.testing.expectError(ApiError.InvalidUser, validateUser(""));
+    try std.testing.expectError(ApiError.InvalidUser, validateUser(":"));
+    try std.testing.expectError(ApiError.InvalidUser, validateUser("a:b:c"));
+    try std.testing.expectError(ApiError.InvalidUser, validateUser("bad user"));
+    try std.testing.expectError(ApiError.InvalidUser, validateUser("-root"));
+
+    try validateCapability("ALL");
+    try validateCapability("NET_ADMIN");
+    try validateCapability("CHOWN");
+    try std.testing.expectError(ApiError.InvalidCapability, validateCapability(""));
+    try std.testing.expectError(ApiError.InvalidCapability, validateCapability("net_admin"));
+    try std.testing.expectError(ApiError.InvalidCapability, validateCapability("1BAD"));
+    try std.testing.expectError(ApiError.InvalidCapability, validateCapability("NET ADMIN"));
+}
+
+test "ContainerCreateRequest serializes network, workdir, user, and capabilities" {
+    const alloc = std.testing.allocator;
+    const cap_drop = [_][]const u8{"ALL"};
+    const cap_add = [_][]const u8{"NET_BIND_SERVICE"};
+    const req = ContainerCreateRequest{
+        .Image = "alpine:3.20",
+        .WorkingDir = "/work",
+        .User = "1000:1000",
+        .HostConfig = .{
+            .NetworkMode = "none",
+            .CapDrop = &cap_drop,
+            .CapAdd = &cap_add,
+        },
+    };
+    const json = try std.json.stringifyAlloc(alloc, req, .{ .emit_null_optional_fields = false });
+    defer alloc.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"WorkingDir\":\"/work\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"User\":\"1000:1000\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"NetworkMode\":\"none\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"CapDrop\":[\"ALL\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"CapAdd\":[\"NET_BIND_SERVICE\"]") != null);
+}
+
 test "demuxLogs handles multiplexed docker stream frames and zero-length frame" {    const frame = [_]u8{
         1, 0, 0, 0, 0, 0, 0, 6, 'h', 'e', 'l', 'l', 'o', '\n',
         1, 0, 0, 0, 0, 0, 0, 0,
@@ -989,6 +1110,21 @@ test "end-to-end container lifecycle over mock Unix socket has zero memory leaks
     try std.testing.expectError(
         ApiError.InvalidPort,
         createContainer(&client, &logger, .{ .Image = "alpine:3.20", .ExposedPorts = .{ .ports = &bad_ports } }, null),
+    );
+
+    // Invalid network/identity/capability fields fail closed before any socket traffic.
+    try std.testing.expectError(
+        ApiError.InvalidNetwork,
+        createContainer(&client, &logger, .{ .Image = "alpine:3.20", .HostConfig = .{ .NetworkMode = "bogus" } }, null),
+    );
+    try std.testing.expectError(
+        ApiError.InvalidWorkdir,
+        createContainer(&client, &logger, .{ .Image = "alpine:3.20", .WorkingDir = "relative" }, null),
+    );
+    const bad_caps = [_][]const u8{"net_admin"};
+    try std.testing.expectError(
+        ApiError.InvalidCapability,
+        createContainer(&client, &logger, .{ .Image = "alpine:3.20", .HostConfig = .{ .CapAdd = &bad_caps } }, null),
     );
 
     const id = try createContainer(&client, &logger, .{

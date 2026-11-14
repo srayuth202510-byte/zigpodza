@@ -129,7 +129,7 @@ while [ ! -S "$SOCK" ] && [ "$i" -lt 40 ]; do
 done
 [ -S "$SOCK" ]
 
-RUN_OUT=$("$BIN" --socket "$SOCK" run --rm -m 64m --pids-limit 32 --read-only --no-new-privileges -v /srv/data:/data -p 8080:80 -p 127.0.0.1:9000:9000/udp alpine:3.20 echo ok)
+RUN_OUT=$("$BIN" --socket "$SOCK" run --rm -m 64m --pids-limit 32 --read-only --no-new-privileges -v /srv/data:/data -p 8080:80 -p 127.0.0.1:9000:9000/udp --network none -w /work -u 1000:1000 --cap-drop ALL --cap-add NET_BIND_SERVICE alpine:3.20 echo ok)
 echo "$RUN_OUT" | grep -q "ok"
 grep -q '"ReadonlyRootfs":true' "$REQ_LOG"
 grep -q '"Memory":67108864' "$REQ_LOG"
@@ -138,6 +138,11 @@ grep -q '"SecurityOpt":\["no-new-privileges"\]' "$REQ_LOG"
 grep -q '"Mounts":\[{"Type":"bind","Source":"/srv/data","Target":"/data","ReadOnly":true}\]' "$REQ_LOG"
 grep -q '"ExposedPorts":{"80/tcp":{},"9000/udp":{}}' "$REQ_LOG"
 grep -q '"PortBindings":{"80/tcp":\[{"HostPort":"8080"}\],"9000/udp":\[{"HostIp":"127.0.0.1","HostPort":"9000"}\]}' "$REQ_LOG"
+grep -q '"NetworkMode":"none"' "$REQ_LOG"
+grep -q '"WorkingDir":"/work"' "$REQ_LOG"
+grep -q '"User":"1000:1000"' "$REQ_LOG"
+grep -q '"CapDrop":\["ALL"\]' "$REQ_LOG"
+grep -q '"CapAdd":\["NET_BIND_SERVICE"\]' "$REQ_LOG"
 
 PS_OUT=$("$BIN" --socket "$SOCK" ps -a)
 echo "$PS_OUT" | grep -q "smoke1234567"
@@ -155,6 +160,11 @@ fi
 
 if "$BIN" --socket "$SOCK" run -p 0:80 alpine:3.20 >/dev/null 2>&1; then
     echo "[FAIL] expected invalid published port (0:80) to fail closed" >&2
+    exit 1
+fi
+
+if "$BIN" --socket "$SOCK" run --network bogus alpine:3.20 >/dev/null 2>&1; then
+    echo "[FAIL] expected invalid network mode (bogus) to fail closed" >&2
     exit 1
 fi
 
