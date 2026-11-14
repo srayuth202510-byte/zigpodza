@@ -28,8 +28,8 @@ pub const usage =
     \\      --no-new-privileges        Prevent privilege escalation inside container
     \\      --profile PROFILE          Security profile: default|sandbox (fail-closed AI sandbox)
     \\      --policy FILE              Pre-flight policy guardrails JSON (e.g. zigpod-policy.json)
-    \\  ps [-a]                        List containers (-a: include stopped)
-    \\  images                         List local images
+    \\  ps [-a] [--json]               List containers (-a: include stopped, --json: JSON output)
+    \\  images [--json]                List local images (--json: JSON output)
     \\  pull IMAGE                     Pull an image from a registry
     \\  rmi [-f] IMAGE                 Remove a local image (-f: force)
     \\  start CONTAINER                Start a created or stopped container
@@ -48,8 +48,8 @@ pub const usage =
     \\      -e, --env KEY=VALUE        Set an environment variable (repeatable)
     \\      -u, --user USER[:GROUP]    Run as user (and optional group)
     \\      -w, --workdir PATH         Working directory inside the container
-    \\  inspect TARGET                 Show container or image details (state, IP, mounts, limits)
-    \\  stats [--no-stream] [-a] [CONTAINER...]  Display CPU, memory, and PIDs metrics
+    \\  inspect [--json] TARGET        Show container or image details (state, IP, mounts, limits)
+    \\  stats [--no-stream] [-a] [--json] [CONTAINER...]  Display CPU, memory, and PIDs metrics
     \\  volume ls|create|rm|inspect [NAME]       Manage named volumes
     \\  network ls|inspect [NAME]      List or inspect container networks
     \\  system ping|df|prune [-f]      Check daemon health, disk usage, or prune unused resources
@@ -143,7 +143,22 @@ pub const ExecOpts = struct {
 pub const StatsOpts = struct {
     no_stream: bool = false,
     all: bool = false,
+    json: bool = false,
     containers: []const []const u8 = &.{},
+};
+
+pub const PsOpts = struct {
+    all: bool = false,
+    json: bool = false,
+};
+
+pub const ImagesOpts = struct {
+    json: bool = false,
+};
+
+pub const InspectOpts = struct {
+    target: []const u8,
+    json: bool = false,
 };
 
 pub const AuditOpts = struct {
@@ -211,8 +226,8 @@ pub const Command = union(enum) {
     version,
     demo,
     audit: AuditOpts,
-    ps: struct { all: bool = false },
-    images,
+    ps: PsOpts,
+    images: ImagesOpts,
     pull: []const u8,
     rmi: RmiOpts,
     run: RunOpts,
@@ -226,7 +241,7 @@ pub const Command = union(enum) {
     rm: RmOpts,
     logs: LogsOpts,
     top: []const u8,
-    inspect: []const u8,
+    inspect: InspectOpts,
     exec: ExecOpts,
     stats: StatsOpts,
     volume: VolumeOpts,
@@ -322,7 +337,7 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
     else if (eql(name, "ps"))
         try parsePs(rest)
     else if (eql(name, "images"))
-        try noArgs(rest, .images)
+        try parseImages(rest)
     else if (eql(name, "pull"))
         .{ .pull = try single(rest) }
     else if (eql(name, "rmi"))
@@ -348,7 +363,7 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
     else if (eql(name, "top"))
         .{ .top = try single(rest) }
     else if (eql(name, "inspect"))
-        .{ .inspect = try single(rest) }
+        try parseInspect(rest)
     else if (eql(name, "exec"))
         .{ .exec = try parseExec(allocator, rest) }
     else if (eql(name, "stats"))
@@ -416,11 +431,53 @@ fn single(args: []const []const u8) ParseError![]const u8 {
 }
 
 fn parsePs(args: []const []const u8) ParseError!Command {
-    var all = false;
+    var opts = PsOpts{};
     for (args) |a| {
-        if (eql(a, "-a") or eql(a, "--all")) all = true else if (isFlag(a)) return error.UnknownFlag else return error.TooManyArguments;
+        if (eql(a, "-a") or eql(a, "--all")) {
+            opts.all = true;
+        } else if (eql(a, "--json")) {
+            opts.json = true;
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else {
+            return error.TooManyArguments;
+        }
     }
-    return .{ .ps = .{ .all = all } };
+    return .{ .ps = opts };
+}
+
+fn parseImages(args: []const []const u8) ParseError!Command {
+    var opts = ImagesOpts{};
+    for (args) |a| {
+        if (eql(a, "--json")) {
+            opts.json = true;
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else {
+            return error.TooManyArguments;
+        }
+    }
+    return .{ .images = opts };
+}
+
+fn parseInspect(args: []const []const u8) ParseError!Command {
+    var json = false;
+    var target: ?[]const u8 = null;
+    for (args) |a| {
+        if (eql(a, "--json")) {
+            json = true;
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else if (target == null) {
+            target = a;
+        } else {
+            return error.TooManyArguments;
+        }
+    }
+    return .{ .inspect = .{
+        .target = target orelse return error.MissingArgument,
+        .json = json,
+    } };
 }
 
 fn parseRm(args: []const []const u8) ParseError!Command {
@@ -753,7 +810,7 @@ fn parseExec(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
     return opts;
 }
 
-/// Parses `stats [--no-stream] [-a|--all] [CONTAINER...]`.
+/// Parses `stats [--no-stream] [-a|--all] [--json] [CONTAINER...]`.
 fn parseStats(allocator: std.mem.Allocator, args: []const []const u8) ParseError!StatsOpts {
     var containers = std.ArrayList([]const u8).init(allocator);
     errdefer containers.deinit();
@@ -764,6 +821,8 @@ fn parseStats(allocator: std.mem.Allocator, args: []const []const u8) ParseError
             opts.no_stream = true;
         } else if (eql(a, "-a") or eql(a, "--all")) {
             opts.all = true;
+        } else if (eql(a, "--json")) {
+            opts.json = true;
         } else if (isFlag(a)) {
             return error.UnknownFlag;
         } else {
@@ -1029,7 +1088,10 @@ test "simple commands" {
     try std.testing.expectEqualStrings("web", (try testParse(&.{ "logs", "web" })).command.logs.container);
     try std.testing.expect(!(try testParse(&.{ "logs", "web" })).command.logs.follow);
     try std.testing.expect((try testParse(&.{ "logs", "-f", "web" })).command.logs.follow);
-    try std.testing.expectEqualStrings("alpine:3.20", (try testParse(&.{ "inspect", "alpine:3.20" })).command.inspect);
+    try std.testing.expectEqualStrings("alpine:3.20", (try testParse(&.{ "inspect", "alpine:3.20" })).command.inspect.target);
+    try std.testing.expect((try testParse(&.{ "inspect", "--json", "alpine:3.20" })).command.inspect.json);
+    try std.testing.expect((try testParse(&.{ "ps", "-a", "--json" })).command.ps.json);
+    try std.testing.expect((try testParse(&.{ "images", "--json" })).command.images.json);
     const rm_plain = (try testParse(&.{ "rm", "abc" })).command.rm;
     try std.testing.expect(!rm_plain.force);
     try std.testing.expectEqualStrings("abc", rm_plain.container);

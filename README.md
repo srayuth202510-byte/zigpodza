@@ -128,17 +128,20 @@ zigpod run --rm -it alpine:3.20 sh
 # Run a container in the background with a name
 zigpod run -d --name demo-alpine alpine:3.20 sleep 60
 
-# List containers (-a includes stopped containers)
+# List containers (-a includes stopped containers, --json outputs structured JSON)
 zigpod ps
 zigpod ps -a
+zigpod ps -a --json
+zigpod images --json
 
 # Fetch or stream container logs (-f follows live output)
 zigpod logs demo-alpine
 zigpod logs -f demo-alpine
 
-# Snapshot container CPU, memory, and PID resource usage
+# Snapshot or stream container CPU, memory, and PID resource usage (--json for automation)
 zigpod stats --no-stream
 zigpod stats --no-stream demo-alpine
+zigpod stats --json demo-alpine
 
 # List running processes inside a container or send an allow-listed signal
 zigpod top demo-alpine

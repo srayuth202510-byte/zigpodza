@@ -138,8 +138,14 @@ fn dispatch(
 ) !u8 {
     switch (cmd) {
         .help, .client_version, .demo, .audit => return 0,
-        .ps => |opts| try pod.listContainers(client, logger, opts.all, stdout),
-        .images => try pod.listImages(client, logger, stdout),
+        .ps => |opts| if (opts.json)
+            try pod.listContainersJson(client, logger, opts.all, stdout)
+        else
+            try pod.listContainers(client, logger, opts.all, stdout),
+        .images => |opts| if (opts.json)
+            try pod.listImagesJson(client, logger, stdout)
+        else
+            try pod.listImages(client, logger, stdout),
         .pull => |image| try pod.pullImage(client, logger, image, stdout),
         .rmi => |opts| try pod.removeImage(client, logger, opts.image, opts.force, stdout),
         .start => |container| try pod.startContainer(client, logger, container),
@@ -152,7 +158,10 @@ fn dispatch(
         .rm => |opts| try pod.removeContainer(client, logger, opts.container, opts.force),
         .logs => |opts| try pod.fetchLogs(client, logger, opts.container, opts.follow, stdout),
         .top => |container| try pod.topContainer(client, logger, container, stdout),
-        .inspect => |target| try pod.inspect(client, logger, target, stdout),
+        .inspect => |opts| if (opts.json)
+            try pod.inspectJson(client, logger, opts.target, stdout)
+        else
+            try pod.inspect(client, logger, opts.target, stdout),
         .volume => |v| switch (v.action) {
             .ls => try pod.listVolumes(client, logger, stdout),
             .create => try pod.createVolume(client, logger, v.name.?, stdout),
@@ -169,7 +178,9 @@ fn dispatch(
             .prune => try pod.systemPrune(client, logger, stdout),
         },
         .stats => |opts| {
-            if (!opts.no_stream and opts.containers.len == 1) {
+            if (opts.json) {
+                try pod.statsContainersJson(client, logger, opts.containers, opts.all, stdout);
+            } else if (!opts.no_stream and opts.containers.len == 1) {
                 try pod.streamContainerStats(client, logger, opts.containers[0], stdout);
             } else {
                 try pod.statsContainers(client, logger, opts.containers, opts.all, stdout);

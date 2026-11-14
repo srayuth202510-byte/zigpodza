@@ -358,3 +358,14 @@ pub const ImagePruneResponse = struct {
     ImagesDeleted: ?[]const ImagePruneItem = null,
     SpaceReclaimed: u64 = 0,
 };
+
+/// Normalized JSON telemetry entry emitted by `zigpod stats --json`.
+pub const StatsJsonEntry = struct {
+    id: []const u8,
+    name: []const u8,
+    cpu_percent: f64,
+    mem_used_bytes: u64,
+    mem_limit_bytes: u64,
+    mem_percent: f64,
+    pids: u64,
+};

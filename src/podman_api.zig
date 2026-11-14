@@ -36,6 +36,7 @@ pub const SystemDfResponse = types.SystemDfResponse;
 pub const ContainerPruneResponse = types.ContainerPruneResponse;
 pub const ImagePruneItem = types.ImagePruneItem;
 pub const ImagePruneResponse = types.ImagePruneResponse;
+pub const StatsJsonEntry = types.StatsJsonEntry;
 const PullStatusLine = types.PullStatusLine;
 
 /// Validates a container ID or name to prevent path traversal, query injection,
@@ -941,14 +942,40 @@ pub fn listContainers(client: *const http.Client, logger: *log.Logger, all: bool
         else
             "";
         const status = if (c.Status.len > 0) c.Status else c.State;
-        try writer.print("{s:<14} {s:<28} {s:<22} {s}\n", .{
-            utils.shortId(c.Id),
-            c.Image,
-            status,
-            name,
-        });
+    try writer.print("{s:<14} {s:<28} {s:<22} {s}\n", .{
+        utils.shortId(c.Id),
+        c.Image,
+        status,
+        name,
+    });
     }
     logger.info("listed {d} container(s) (all={})", .{ parsed.value.len, all });
+}
+
+/// Emits validated JSON array for `zigpod ps [--json]` (`GET /containers/json?all={true|false}`).
+pub fn listContainersJson(client: *const http.Client, logger: *log.Logger, all: bool, writer: anytype) !void {
+    const path = try std.fmt.allocPrint(
+        client.allocator,
+        "{s}/containers/json?all={s}",
+        .{ api_prefix, if (all) "true" else "false" },
+    );
+    defer client.allocator.free(path);
+
+    logger.debug("GET {s}", .{path});
+    const resp = try client.request("GET", path, null);
+    defer resp.deinit();
+
+    if (!resp.ok()) return logApiFailure(logger, "GET", path, resp);
+
+    const parsed = try std.json.parseFromSlice([]ContainerSummary, client.allocator, resp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const json_out = try std.json.stringifyAlloc(client.allocator, parsed.value, .{});
+    defer client.allocator.free(json_out);
+    try writer.print("{s}\n", .{json_out});
+    logger.info("listed {d} container(s) as JSON (all={})", .{ parsed.value.len, all });
 }
 
 pub fn listImages(client: *const http.Client, logger: *log.Logger, writer: anytype) !void {
@@ -979,6 +1006,27 @@ pub fn listImages(client: *const http.Client, logger: *log.Logger, writer: anyty
         });
     }
     logger.info("listed {d} image(s)", .{parsed.value.len});
+}
+
+/// Emits validated JSON array for `zigpod images --json` (`GET /images/json`).
+pub fn listImagesJson(client: *const http.Client, logger: *log.Logger, writer: anytype) !void {
+    const path = api_prefix ++ "/images/json";
+
+    logger.debug("GET {s}", .{path});
+    const resp = try client.request("GET", path, null);
+    defer resp.deinit();
+
+    if (!resp.ok()) return logApiFailure(logger, "GET", path, resp);
+
+    const parsed = try std.json.parseFromSlice([]ImageSummary, client.allocator, resp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const json_out = try std.json.stringifyAlloc(client.allocator, parsed.value, .{});
+    defer client.allocator.free(json_out);
+    try writer.print("{s}\n", .{json_out});
+    logger.info("listed {d} image(s) as JSON", .{parsed.value.len});
 }
 
 pub fn pullImage(client: *const http.Client, logger: *log.Logger, image: []const u8, writer: anytype) !void {
@@ -1144,6 +1192,48 @@ pub fn inspect(client: *const http.Client, logger: *log.Logger, target: []const 
     defer parsed.deinit();
     try printImageInspect(writer, parsed.value);
     logger.info("inspected image {s}", .{target});
+}
+
+/// Inspects a container or image and outputs the validated JSON document (`zigpod inspect --json`).
+pub fn inspectJson(client: *const http.Client, logger: *log.Logger, target: []const u8, writer: anytype) !void {
+    try validateResourceRef(target);
+
+    const cpath = try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/json", .{ api_prefix, target });
+    defer client.allocator.free(cpath);
+
+    logger.debug("GET {s}", .{cpath});
+    const cresp = try client.request("GET", cpath, null);
+    defer cresp.deinit();
+    if (cresp.ok()) {
+        const parsed = try std.json.parseFromSlice(ContainerInspect, client.allocator, cresp.body, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const trimmed = std.mem.trim(u8, cresp.body, " \t\r\n");
+        try writer.print("{s}\n", .{trimmed});
+        logger.info("inspected container {s} as JSON", .{target});
+        return;
+    }
+    if (cresp.status != 404) return logApiFailure(logger, "GET", cpath, cresp);
+
+    const ipath = try std.fmt.allocPrint(client.allocator, "{s}/images/{s}/json", .{ api_prefix, target });
+    defer client.allocator.free(ipath);
+
+    logger.debug("GET {s}", .{ipath});
+    const iresp = try client.request("GET", ipath, null);
+    defer iresp.deinit();
+    if (!iresp.ok()) {
+        logger.err("no such container or image: {s}", .{target});
+        return ApiError.NotFound;
+    }
+
+    const parsed = try std.json.parseFromSlice(ImageInspect, client.allocator, iresp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    const trimmed = std.mem.trim(u8, iresp.body, " \t\r\n");
+    try writer.print("{s}\n", .{trimmed});
+    logger.info("inspected image {s} as JSON", .{target});
 }
 
 fn printJoined(writer: anytype, label: []const u8, items: []const []const u8) !void {
@@ -1795,6 +1885,91 @@ pub fn streamContainerStats(
     }
     try ctx.flush();
     logger.info("streamed {d} stats frame(s) for container {s}", .{ ctx.frames, utils.shortId(id) });
+}
+
+fn fetchStatsJsonEntry(
+    client: *const http.Client,
+    logger: *log.Logger,
+    id: []const u8,
+    writer: anytype,
+    first: bool,
+) !void {
+    try validateIdentifier(id);
+
+    const path = try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/stats?stream=false", .{ api_prefix, id });
+    defer client.allocator.free(path);
+
+    logger.debug("GET {s}", .{path});
+    const resp = try client.request("GET", path, null);
+    defer resp.deinit();
+    if (!resp.ok()) return logApiFailure(logger, "GET", path, resp);
+
+    const parsed = try std.json.parseFromSlice(ContainerStats, client.allocator, resp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const s = parsed.value;
+    const entry = StatsJsonEntry{
+        .id = if (s.id.len > 0) s.id else id,
+        .name = std.mem.trimLeft(u8, s.name, "/"),
+        .cpu_percent = computeCpuPercent(s),
+        .mem_used_bytes = computeMemoryUsage(s.memory_stats).used,
+        .mem_limit_bytes = computeMemoryUsage(s.memory_stats).limit,
+        .mem_percent = computeMemoryUsage(s.memory_stats).percent,
+        .pids = if (s.pids_stats) |p| p.current orelse 0 else 0,
+    };
+
+    const item_json = try std.json.stringifyAlloc(client.allocator, entry, .{});
+    defer client.allocator.free(item_json);
+    if (!first) try writer.writeByte(',');
+    try writer.writeAll(item_json);
+}
+
+/// Emits a JSON array of computed container resource metrics (`zigpod stats --json`).
+pub fn statsContainersJson(
+    client: *const http.Client,
+    logger: *log.Logger,
+    containers: []const []const u8,
+    all: bool,
+    writer: anytype,
+) !void {
+    if (containers.len > 0) {
+        for (containers) |c| try validateIdentifier(c);
+        try writer.writeByte('[');
+        for (containers, 0..) |c, idx| {
+            try fetchStatsJsonEntry(client, logger, c, writer, idx == 0);
+        }
+        try writer.writeAll("]\n");
+        logger.info("fetched JSON stats for {d} container(s)", .{containers.len});
+        return;
+    }
+
+    const list_path = try std.fmt.allocPrint(
+        client.allocator,
+        "{s}/containers/json?all={s}",
+        .{ api_prefix, if (all) "true" else "false" },
+    );
+    defer client.allocator.free(list_path);
+
+    logger.debug("GET {s}", .{list_path});
+    const list_resp = try client.request("GET", list_path, null);
+    defer list_resp.deinit();
+    if (!list_resp.ok()) return logApiFailure(logger, "GET", list_path, list_resp);
+
+    const list_parsed = try std.json.parseFromSlice([]ContainerSummary, client.allocator, list_resp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer list_parsed.deinit();
+
+    for (list_parsed.value) |c| try validateIdentifier(c.Id);
+
+    try writer.writeByte('[');
+    for (list_parsed.value, 0..) |c, idx| {
+        try fetchStatsJsonEntry(client, logger, c.Id, writer, idx == 0);
+    }
+    try writer.writeAll("]\n");
+    logger.info("fetched JSON stats for {d} container(s)", .{list_parsed.value.len});
 }
 
 /// Demultiplexes Docker/Podman attached log frames ([stream_type, 0, 0, 0, size_be32][payload...]).
@@ -3370,6 +3545,85 @@ test "systemPing, systemDf, and systemPrune endpoints" {
     try systemPrune(&client, &logger, out.writer());
     try std.testing.expect(std.mem.indexOf(u8, out.items, "deadbeef1234") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "Total reclaimed space: 4.0 MB") != null);
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
+}
+
+test "listContainersJson, listImagesJson, inspectJson, and statsContainersJson endpoints" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-json-api-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const ps_json = "[{\"Id\":\"c1234567890\",\"Image\":\"alpine:3.20\",\"Status\":\"Up\",\"State\":\"running\",\"Names\":[\"/web\"]}]";
+    const img_json = "[{\"Id\":\"sha256:abcd\",\"RepoTags\":[\"alpine:3.20\"],\"Size\":7340032}]";
+    const insp_json = "{\"Id\":\"c1234567890\",\"Name\":\"/web\",\"Image\":\"alpine:3.20\"}";
+    const stats_json =
+        "{\"id\":\"c1234567890\",\"name\":\"/web\"," ++
+        "\"cpu_stats\":{\"cpu_usage\":{\"total_usage\":200000000},\"system_cpu_usage\":2000000000,\"online_cpus\":2}," ++
+        "\"precpu_stats\":{\"cpu_usage\":{\"total_usage\":100000000},\"system_cpu_usage\":1000000000}," ++
+        "\"memory_stats\":{\"usage\":67108864,\"limit\":268435456,\"stats\":{\"inactive_file\":16777216}}," ++
+        "\"pids_stats\":{\"current\":12}}";
+
+    const replies = [_]ScriptedReply{
+        .{
+            .expected_prefix = "GET /v1.40/containers/json?all=true HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ ps_json.len, ps_json }),
+        },
+        .{
+            .expected_prefix = "GET /v1.40/images/json HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ img_json.len, img_json }),
+        },
+        .{
+            .expected_prefix = "GET /v1.40/containers/web/json HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ insp_json.len, insp_json }),
+        },
+        .{
+            .expected_prefix = "GET /v1.40/containers/web/stats?stream=false HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ stats_json.len, stats_json }),
+        },
+    };
+
+    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{
+        .allocator = alloc,
+        .socket_path = sock_path,
+    };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    try listContainersJson(&client, &logger, true, out.writer());
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"Id\":\"c1234567890\"") != null);
+
+    out.clearRetainingCapacity();
+    try listImagesJson(&client, &logger, out.writer());
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"alpine:3.20\"") != null);
+
+    out.clearRetainingCapacity();
+    try inspectJson(&client, &logger, "web", out.writer());
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"Name\":\"/web\"") != null);
+
+    out.clearRetainingCapacity();
+    try statsContainersJson(&client, &logger, &.{"web"}, false, out.writer());
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"mem_used_bytes\":50331648") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"pids\":12") != null);
 
     thread.join();
     joined = true;
