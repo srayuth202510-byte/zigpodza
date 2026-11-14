@@ -57,6 +57,10 @@ pub const usage =
     \\  wait CONTAINER                 Block until a container stops and print its exit code
     \\  diff CONTAINER                 Inspect changes on a container's filesystem
     \\  events [--since TS] [--until TS] [--json]  Stream or query daemon events
+    \\  tag SRC_IMAGE TARGET_IMAGE     Create a tag for a local image
+    \\  history [--json] IMAGE         Show the history of an image
+    \\  commit [-m MSG] [-a AUTHOR] CONTAINER REPO[:TAG]  Create a new image from a container
+    \\  policy show|check [--json] [FILE]  Inspect or validate a zigpod-policy.json file
     \\  completion bash|zsh|fish       Generate shell tab-completion script
     \\  audit [--json] [FILE]          Verify SHA-256 hash chain of audit.log (--json: structured output)
     \\  demo                           Run 14-case fail-closed ALLOW/DENY self-test suite
@@ -242,6 +246,34 @@ pub const Shell = enum {
     fish,
 };
 
+pub const TagOpts = struct {
+    src_image: []const u8,
+    target_image: []const u8,
+};
+
+pub const HistoryOpts = struct {
+    image: []const u8,
+    json: bool = false,
+};
+
+pub const CommitOpts = struct {
+    container: []const u8,
+    target_image: []const u8,
+    message: ?[]const u8 = null,
+    author: ?[]const u8 = null,
+};
+
+pub const PolicyAction = enum {
+    show,
+    check,
+};
+
+pub const PolicyOpts = struct {
+    action: PolicyAction,
+    path: ?[]const u8 = null,
+    json: bool = false,
+};
+
 pub const Command = union(enum) {
     help,
     client_version,
@@ -273,6 +305,10 @@ pub const Command = union(enum) {
     wait: []const u8,
     diff: []const u8,
     events: EventsOpts,
+    tag: TagOpts,
+    history: HistoryOpts,
+    commit: CommitOpts,
+    policy: PolicyOpts,
     completion: Shell,
 };
 

@@ -4,7 +4,7 @@ const cli_types = @import("cli_types.zig");
 
 pub const Shell = cli_types.Shell;
 
-const subcommands = "run ps images pull rmi start stop restart pause unpause rename kill rm logs top exec inspect stats volume network system port wait diff events completion audit demo version help";
+const subcommands = "run ps images pull rmi tag history commit start stop restart pause unpause rename kill rm logs top exec inspect stats volume network system port wait diff events policy completion audit demo version help";
 
 const bash_template =
     \\# bash completion for zigpod

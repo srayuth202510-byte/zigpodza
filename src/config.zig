@@ -12,6 +12,87 @@
 //!   2. ./ (current directory)
 const std = @import("std");
 
+pub const TomlConfig = struct {
+    default_socket: ?[]u8 = null,
+    log_dir: ?[]u8 = null,
+    verbose: ?bool = null,
+
+    pub fn deinit(self: TomlConfig, allocator: std.mem.Allocator) void {
+        if (self.default_socket) |s| allocator.free(s);
+        if (self.log_dir) |d| allocator.free(d);
+    }
+};
+
+fn unquoteTomlString(raw: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, raw, " \t\r");
+    if (trimmed.len >= 2 and trimmed[0] == '"' and trimmed[trimmed.len - 1] == '"') {
+        return trimmed[1 .. trimmed.len - 1];
+    }
+    if (trimmed.len >= 2 and trimmed[0] == '\'' and trimmed[trimmed.len - 1] == '\'') {
+        return trimmed[1 .. trimmed.len - 1];
+    }
+    return null;
+}
+
+/// Minimal pure-Zig parser for `zigpod.toml` (`[socket]` and `[logging]` sections).
+pub fn parseToml(allocator: std.mem.Allocator, content: []const u8) !TomlConfig {
+    var out = TomlConfig{};
+    errdefer out.deinit(allocator);
+
+    var section: enum { root, socket, logging, other } = .root;
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |raw_line| {
+        const no_comment = if (std.mem.indexOfScalar(u8, raw_line, '#')) |hash| raw_line[0..hash] else raw_line;
+        const line = std.mem.trim(u8, no_comment, " \t\r");
+        if (line.len == 0) continue;
+
+        if (line[0] == '[' and line[line.len - 1] == ']') {
+            const sec = std.mem.trim(u8, line[1 .. line.len - 1], " \t");
+            section = if (std.mem.eql(u8, sec, "socket"))
+                .socket
+            else if (std.mem.eql(u8, sec, "logging"))
+                .logging
+            else
+                .other;
+            continue;
+        }
+
+        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        const key = std.mem.trim(u8, line[0..eq], " \t");
+        const val = std.mem.trim(u8, line[eq + 1 ..], " \t");
+
+        if (section == .socket and std.mem.eql(u8, key, "default_path")) {
+            if (unquoteTomlString(val)) |s| {
+                if (out.default_socket) |old| allocator.free(old);
+                out.default_socket = try allocator.dupe(u8, s);
+            }
+        } else if (section == .logging and std.mem.eql(u8, key, "log_dir")) {
+            if (unquoteTomlString(val)) |s| {
+                if (out.log_dir) |old| allocator.free(old);
+                out.log_dir = try allocator.dupe(u8, s);
+            }
+        } else if (section == .logging and std.mem.eql(u8, key, "verbose")) {
+            if (std.mem.eql(u8, val, "true")) {
+                out.verbose = true;
+            } else if (std.mem.eql(u8, val, "false")) {
+                out.verbose = false;
+            }
+        }
+    }
+    return out;
+}
+
+fn loadTomlFile(allocator: std.mem.Allocator, path: []const u8) !?TomlConfig {
+    const file = std.fs.cwd().openFile(path, .{}) catch |e| switch (e) {
+        error.FileNotFound => return null,
+        else => return e,
+    };
+    defer file.close();
+    const content = try file.readToEndAlloc(allocator, 64 * 1024);
+    defer allocator.free(content);
+    return try parseToml(allocator, content);
+}
+
 pub const Config = struct {
     socket_path: []const u8,
     log_dir: []const u8,
@@ -19,9 +100,12 @@ pub const Config = struct {
     /// Loads configuration into freshly allocated strings owned by `allocator`.
     /// Call `deinit(allocator)` when no longer needed.
     pub fn load(allocator: std.mem.Allocator, socket_override: ?[]const u8) !Config {
-        const socket_path = try resolveSocket(allocator, socket_override);
+        const toml_opt = loadTomlFile(allocator, "zigpod.toml") catch null;
+        defer if (toml_opt) |t| t.deinit(allocator);
+
+        const socket_path = try resolveSocket(allocator, socket_override, toml_opt);
         errdefer allocator.free(socket_path);
-        const log_dir = try resolveLogDir(allocator);
+        const log_dir = try resolveLogDir(allocator, toml_opt);
         return .{
             .socket_path = socket_path,
             .log_dir = log_dir,
@@ -41,7 +125,7 @@ fn getEnv(allocator: std.mem.Allocator, name: []const u8) !?[]u8 {
     };
 }
 
-fn resolveSocket(allocator: std.mem.Allocator, socket_override: ?[]const u8) ![]const u8 {
+fn resolveSocket(allocator: std.mem.Allocator, socket_override: ?[]const u8, toml_opt: ?TomlConfig) ![]const u8 {
     if (socket_override) |s| return allocator.dupe(u8, stripUnixScheme(s));
     if (try getEnv(allocator, "ZIGPOD_SOCKET")) |s| {
         defer allocator.free(s);
@@ -63,6 +147,12 @@ fn resolveSocket(allocator: std.mem.Allocator, socket_override: ?[]const u8) ![]
         }
     }
 
+    if (toml_opt) |t| {
+        if (t.default_socket) |s| {
+            if (s.len > 0) return allocator.dupe(u8, stripUnixScheme(s));
+        }
+    }
+
     if (try getEnv(allocator, "XDG_RUNTIME_DIR")) |dir| {
         defer allocator.free(dir);
         const rootless = try std.fs.path.join(allocator, &.{ dir, "podman", "podman.sock" });
@@ -75,8 +165,13 @@ fn resolveSocket(allocator: std.mem.Allocator, socket_override: ?[]const u8) ![]
     return allocator.dupe(u8, "/run/podman/podman.sock");
 }
 
-fn resolveLogDir(allocator: std.mem.Allocator) ![]const u8 {
+fn resolveLogDir(allocator: std.mem.Allocator, toml_opt: ?TomlConfig) ![]const u8 {
     if (try getEnv(allocator, "ZIGPOD_LOG_DIR")) |d| return d;
+    if (toml_opt) |t| {
+        if (t.log_dir) |d| {
+            if (d.len > 0) return allocator.dupe(u8, d);
+        }
+    }
     return allocator.dupe(u8, ".");
 }
 
@@ -115,4 +210,21 @@ test "log_dir defaults to current directory" {
         defer cfg.deinit(std.testing.allocator);
         try std.testing.expectEqualStrings(".", cfg.log_dir);
     }
+}
+
+test "parseToml parses socket and logging sections without leaks" {
+    const sample =
+        \\# ZigPod config
+        \\[socket]
+        \\default_path = "unix:///tmp/custom-toml.sock" # inline comment
+        \\
+        \\[logging]
+        \\log_dir = "/var/log/zigpod"
+        \\verbose = true
+    ;
+    const parsed = try parseToml(std.testing.allocator, sample);
+    defer parsed.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("unix:///tmp/custom-toml.sock", parsed.default_socket.?);
+    try std.testing.expectEqualStrings("/var/log/zigpod", parsed.log_dir.?);
+    try std.testing.expectEqual(true, parsed.verbose.?);
 }

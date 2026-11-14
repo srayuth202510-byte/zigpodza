@@ -391,3 +391,18 @@ pub const DaemonEvent = struct {
         ID: []const u8 = "",
     };
 };
+
+/// Single layer entry from `GET /images/{name}/history`.
+pub const ImageHistoryItem = struct {
+    Id: []const u8 = "",
+    Created: i64 = 0,
+    CreatedBy: []const u8 = "",
+    Size: i64 = 0,
+    Tags: ?[]const []const u8 = null,
+    Comment: []const u8 = "",
+};
+
+/// Response from `POST /commit`.
+pub const CommitResponse = struct {
+    Id: []const u8 = "",
+};

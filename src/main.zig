@@ -71,6 +71,22 @@ fn run(gpa_allocator: std.mem.Allocator) u8 {
             };
             return 0;
         },
+        .policy => |pol_opts| {
+            switch (pol_opts.action) {
+                .show => policy.showPolicy(gpa_allocator, pol_opts.path, pol_opts.json, stdout) catch |e| {
+                    stderr.print("zigpod: policy show failed: {s}\n", .{@errorName(e)}) catch {};
+                    return 1;
+                },
+                .check => {
+                    const p = pol_opts.path orelse "zigpod-policy.json";
+                    policy.checkPolicyFile(gpa_allocator, p, pol_opts.json, stdout) catch |e| {
+                        stderr.print("zigpod: policy check failed for '{s}': {s}\n", .{ p, @errorName(e) }) catch {};
+                        return 1;
+                    };
+                },
+            }
+            return 0;
+        },
         else => {},
     }
 
@@ -145,7 +161,7 @@ fn dispatch(
     stdout: anytype,
 ) !u8 {
     switch (cmd) {
-        .help, .client_version, .demo, .audit, .completion => return 0,
+        .help, .client_version, .demo, .audit, .completion, .policy => return 0,
         .ps => |opts| if (opts.json)
             try pod.listContainersJson(client, logger, opts.all, stdout)
         else
@@ -192,6 +208,17 @@ fn dispatch(
         },
         .diff => |container| try pod.diffContainer(client, logger, container, stdout),
         .events => |opts| try pod.fetchEvents(client, logger, opts.since, opts.until, opts.json, stdout),
+        .tag => |opts| try pod.tagImage(client, logger, opts.src_image, opts.target_image),
+        .history => |opts| try pod.imageHistory(client, logger, opts.image, opts.json, stdout),
+        .commit => |opts| try pod.commitContainer(
+            client,
+            logger,
+            opts.container,
+            opts.target_image,
+            opts.message,
+            opts.author,
+            stdout,
+        ),
         .stats => |opts| {
             if (opts.json) {
                 try pod.statsContainersJson(client, logger, opts.containers, opts.all, stdout);

@@ -30,6 +30,11 @@ pub const SystemOpts = types.SystemOpts;
 pub const PortOpts = types.PortOpts;
 pub const EventsOpts = types.EventsOpts;
 pub const Shell = types.Shell;
+pub const TagOpts = types.TagOpts;
+pub const HistoryOpts = types.HistoryOpts;
+pub const CommitOpts = types.CommitOpts;
+pub const PolicyAction = types.PolicyAction;
+pub const PolicyOpts = types.PolicyOpts;
 pub const Command = types.Command;
 pub const Parsed = types.Parsed;
 pub const ParseError = types.ParseError;
@@ -125,6 +130,14 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
         .{ .diff = try single(rest) }
     else if (eql(name, "events"))
         try parseEvents(rest)
+    else if (eql(name, "tag"))
+        try parseTag(rest)
+    else if (eql(name, "history"))
+        try parseHistory(rest)
+    else if (eql(name, "commit"))
+        try parseCommit(rest)
+    else if (eql(name, "policy"))
+        try parsePolicyCmd(rest)
     else if (eql(name, "completion"))
         try parseCompletion(rest)
     else if (eql(name, "audit"))
@@ -647,6 +660,106 @@ fn parseCompletion(args: []const []const u8) ParseError!Command {
     else
         return error.InvalidValue;
     return .{ .completion = shell };
+}
+
+/// Parses `tag SRC_IMAGE TARGET_IMAGE`.
+fn parseTag(args: []const []const u8) ParseError!Command {
+    var src: ?[]const u8 = null;
+    var dst: ?[]const u8 = null;
+    for (args) |a| {
+        if (isFlag(a)) return error.UnknownFlag;
+        if (src == null) {
+            src = a;
+        } else if (dst == null) {
+            dst = a;
+        } else {
+            return error.TooManyArguments;
+        }
+    }
+    return .{ .tag = .{
+        .src_image = src orelse return error.MissingArgument,
+        .target_image = dst orelse return error.MissingArgument,
+    } };
+}
+
+/// Parses `history [--json] IMAGE`.
+fn parseHistory(args: []const []const u8) ParseError!Command {
+    var opts = HistoryOpts{ .image = "" };
+    var have = false;
+    for (args) |a| {
+        if (eql(a, "--json")) {
+            opts.json = true;
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else if (!have) {
+            opts.image = a;
+            have = true;
+        } else {
+            return error.TooManyArguments;
+        }
+    }
+    if (!have) return error.MissingArgument;
+    return .{ .history = opts };
+}
+
+/// Parses `commit [-m|--message MSG] [-a|--author AUTHOR] CONTAINER REPO[:TAG]`.
+fn parseCommit(args: []const []const u8) ParseError!Command {
+    var opts = CommitOpts{ .container = "", .target_image = "" };
+    var have_c = false;
+    var have_t = false;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (eql(a, "-m") or eql(a, "--message")) {
+            opts.message = try takeValue(args, &i);
+        } else if (std.mem.startsWith(u8, a, "--message=")) {
+            opts.message = a["--message=".len..];
+        } else if (eql(a, "-a") or eql(a, "--author")) {
+            opts.author = try takeValue(args, &i);
+        } else if (std.mem.startsWith(u8, a, "--author=")) {
+            opts.author = a["--author=".len..];
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else if (!have_c) {
+            opts.container = a;
+            have_c = true;
+        } else if (!have_t) {
+            opts.target_image = a;
+            have_t = true;
+        } else {
+            return error.TooManyArguments;
+        }
+    }
+    if (!have_c or !have_t) return error.MissingArgument;
+    return .{ .commit = opts };
+}
+
+/// Parses `policy show|check [--json] [FILE]`.
+fn parsePolicyCmd(args: []const []const u8) ParseError!Command {
+    if (args.len == 0) return error.MissingArgument;
+    const sub = args[0];
+    const action: PolicyAction = if (eql(sub, "show"))
+        .show
+    else if (eql(sub, "check"))
+        .check
+    else if (isFlag(sub))
+        return error.UnknownFlag
+    else
+        return error.UnknownCommand;
+
+    var opts = PolicyOpts{ .action = action };
+    for (args[1..]) |a| {
+        if (eql(a, "--json")) {
+            opts.json = true;
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else if (opts.path == null) {
+            opts.path = a;
+        } else {
+            return error.TooManyArguments;
+        }
+    }
+    return .{ .policy = opts };
 }
 
 // ---------------------------------------------------------------- tests
@@ -1342,4 +1455,38 @@ test "parse completion subcommand for bash, zsh, fish, and error paths" {
     try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "completion", "powershell" }));
     try std.testing.expectError(error.UnknownFlag, parse(alloc, &.{ "completion", "--bogus" }));
     try std.testing.expectError(error.TooManyArguments, parse(alloc, &.{ "completion", "bash", "extra" }));
+}
+
+test "parse tag, history, commit, and policy subcommands + error paths" {
+    const alloc = std.testing.allocator;
+
+    const p_tag = try parse(alloc, &.{ "tag", "alpine:3.20", "myrepo/app:v1" });
+    defer p_tag.deinit(alloc);
+    try std.testing.expectEqualStrings("alpine:3.20", p_tag.command.tag.src_image);
+    try std.testing.expectEqualStrings("myrepo/app:v1", p_tag.command.tag.target_image);
+
+    const p_hist = try parse(alloc, &.{ "history", "--json", "alpine:3.20" });
+    defer p_hist.deinit(alloc);
+    try std.testing.expect(p_hist.command.history.json);
+    try std.testing.expectEqualStrings("alpine:3.20", p_hist.command.history.image);
+
+    const p_commit = try parse(alloc, &.{ "commit", "-m", "checkpoint", "-a", "alice", "web", "snap:v1" });
+    defer p_commit.deinit(alloc);
+    try std.testing.expectEqualStrings("checkpoint", p_commit.command.commit.message.?);
+    try std.testing.expectEqualStrings("alice", p_commit.command.commit.author.?);
+    try std.testing.expectEqualStrings("web", p_commit.command.commit.container);
+    try std.testing.expectEqualStrings("snap:v1", p_commit.command.commit.target_image);
+
+    const p_pol = try parse(alloc, &.{ "policy", "check", "--json", "zigpod-policy.json" });
+    defer p_pol.deinit(alloc);
+    try std.testing.expectEqual(PolicyAction.check, p_pol.command.policy.action);
+    try std.testing.expect(p_pol.command.policy.json);
+    try std.testing.expectEqualStrings("zigpod-policy.json", p_pol.command.policy.path.?);
+
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "tag", "alpine:3.20" }));
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{"history"}));
+    try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "commit", "-m" }));
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "commit", "web" }));
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{"policy"}));
+    try std.testing.expectError(error.UnknownCommand, parse(alloc, &.{ "policy", "bogus" }));
 }

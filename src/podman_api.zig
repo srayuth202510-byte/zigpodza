@@ -75,6 +75,9 @@ pub const removeImage = images.removeImage;
 pub const listImages = images.listImages;
 pub const listImagesJson = images.listImagesJson;
 pub const pullImage = images.pullImage;
+pub const tagImage = images.tagImage;
+pub const imageHistory = images.imageHistory;
+pub const commitContainer = images.commitContainer;
 
 // Re-exported volume, network, system & inspect endpoints
 pub const listVolumes = system.listVolumes;
