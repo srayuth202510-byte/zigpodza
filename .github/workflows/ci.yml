@@ -26,3 +26,12 @@ jobs:
 
       - name: Run security and hardening checks
         run: ./scripts/security-check.sh --require-zig
+
+      - name: Run CI parity check
+        run: python3 scripts/check-ci-parity.py
+
+      - name: Run smoke and knowledge graph checks
+        run: |
+          python3 scripts/graph-query.py update
+          python3 scripts/graph-query.py query "memory"
+          sh scripts/smoke.sh

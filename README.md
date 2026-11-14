@@ -179,3 +179,52 @@ zig build test
 2. เพิ่ม request/response struct และฟังก์ชัน HTTP endpoint ใน [src/podman_api.zig](src/podman_api.zig)
 3. เชื่อมต่อ subcommand ในฟังก์ชัน `dispatch` ของ [src/main.zig](src/main.zig)
 4. เพิ่ม unit test ในโมดูลที่เกี่ยวข้องแล้วรัน `zig build test`
+
+
+## Hardening, Self-Test, Audit & Knowledge Graph
+
+### Container Hardening Flags (`zigpod run`)
+
+Apply defense-in-depth limits in `HostConfig` when launching containers:
+
+- `-m, --memory <SIZE>`: Memory limit (`b`, `k`, `m`, `g` suffixes supported with checked `std.math.mul`)
+- `--pids-limit <N>`: Maximum container process count
+- `--read-only`: Mount the container root filesystem read-only (`ReadonlyRootfs`)
+- `--no-new-privileges`: Set `SecurityOpt: ["no-new-privileges"]`
+
+```bash
+zigpod run --rm -m 64m --pids-limit 32 --read-only --no-new-privileges alpine:3.20 echo ok
+```
+
+### Built-In 14-Case Fail-Closed Self-Test (`zigpod demo`)
+
+Run the deterministic 14-case `ALLOW`/`DENY` verification suite locally (no running Podman daemon required):
+
+```bash
+zigpod demo
+# or via Makefile:
+make demo
+```
+
+### Tamper-Evident Audit Log (`zigpod audit`)
+
+In addition to `system.log` and `error.log`, `Logger` maintains a SHA-256 hash-chained `audit.log`. Verify chain integrity with:
+
+```bash
+zigpod audit              # checks audit.log in configured log_dir
+zigpod audit /path/to.log # checks a specific audit log file
+```
+
+### Verification & Offline Knowledge Graph CLI
+
+Use the top-level [Makefile](Makefile) and verification scripts to keep builds, CI, docs, and static checks in sync:
+
+```bash
+make verify          # run tests, security gate, ReleaseSafe build, demo, E2E smoke, parity, graph update
+make check-ci        # verify CI workflow, Makefile, CLI, vault docs, and README parity
+make e2e             # run scripts/smoke.sh (mock Unix socket + hardened run + audit tamper test)
+python3 scripts/graph-query.py update
+python3 scripts/graph-query.py query "memory"
+python3 scripts/graph-query.py explain verifyAuditFile
+python3 scripts/graph-query.py path BUG-002 cli.zig
+```

@@ -5,6 +5,7 @@ const std = @import("std");
 
 /// Upper bound on a response body (image pulls stream a lot of progress JSON).
 pub const max_response_bytes = 64 * 1024 * 1024;
+pub const default_timeout_ms: i32 = 30_000;
 
 pub const Error = error{
     SocketNotFound,
@@ -12,6 +13,7 @@ pub const Error = error{
     PermissionDenied,
     InvalidResponse,
     InvalidRequestPath,
+    Timeout,
 };
 
 pub const Response = struct {
@@ -36,9 +38,21 @@ pub fn validateRequestTarget(path: []const u8) Error!void {
     }
 }
 
+fn waitReadable(fd: std.posix.fd_t, timeout_ms: i32) !void {
+    if (timeout_ms < 0) return;
+    var fds = [_]std.posix.pollfd{.{
+        .fd = fd,
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    const ready = try std.posix.poll(&fds, timeout_ms);
+    if (ready == 0) return Error.Timeout;
+}
+
 pub const Client = struct {
     allocator: std.mem.Allocator,
     socket_path: []const u8,
+    timeout_ms: i32 = default_timeout_ms,
 
     pub fn request(self: Client, method: []const u8, path: []const u8, body: ?[]const u8) !Response {
         try validateRequestTarget(path);
@@ -65,6 +79,7 @@ pub const Client = struct {
         }
         try stream.writeAll(req.items);
 
+        try waitReadable(stream.handle, self.timeout_ms);
         const raw = try stream.reader().readAllAlloc(self.allocator, max_response_bytes);
         defer self.allocator.free(raw);
         return parseResponse(self.allocator, raw);
@@ -284,4 +299,34 @@ test "Client.request round-trip over mock Unix socket with chunked response" {
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try std.testing.expectEqualStrings("{\"Status\":\"ok\"}\n", resp.body);
     try std.testing.expect(std.mem.startsWith(u8, ctx.captured_req[0..ctx.captured_len], "GET /v1.40/_ping HTTP/1.1\r\n"));
+}
+
+fn runSlowMockServer(server: *std.net.Server) void {
+    const conn = server.accept() catch return;
+    defer conn.stream.close();
+    std.time.sleep(100 * std.time.ns_per_ms);
+}
+
+test "Client.request returns Error.Timeout when server does not respond" {
+    const sock_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "/tmp/zp-http-timeout-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer std.testing.allocator.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const thread = try std.Thread.spawn(.{}, runSlowMockServer, .{&server});
+    defer thread.join();
+
+    const client = Client{
+        .allocator = std.testing.allocator,
+        .socket_path = sock_path,
+        .timeout_ms = 20,
+    };
+    try std.testing.expectError(Error.Timeout, client.request("GET", "/v1.40/_ping", null));
 }

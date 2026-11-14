@@ -13,6 +13,10 @@ pub const ApiError = error{
 
 pub const HostConfig = struct {
     AutoRemove: bool = false,
+    ReadonlyRootfs: bool = false,
+    Memory: ?i64 = null,
+    PidsLimit: ?i64 = null,
+    SecurityOpt: ?[]const []const u8 = null,
 };
 
 pub const ContainerCreateRequest = struct {
@@ -682,4 +686,25 @@ test "listContainers over mock Unix socket" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "abcdef123456") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "alpine:3.20") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "web") != null);
+}
+
+test "ContainerCreateRequest serializes hardening HostConfig fields" {
+    const alloc = std.testing.allocator;
+    const req = ContainerCreateRequest{
+        .Image = "alpine:3.20",
+        .HostConfig = HostConfig{
+            .AutoRemove = true,
+            .ReadonlyRootfs = true,
+            .Memory = 67_108_864,
+            .PidsLimit = 32,
+            .SecurityOpt = &.{"no-new-privileges"},
+        },
+    };
+    const json = try std.json.stringifyAlloc(alloc, req, .{ .emit_null_optional_fields = false });
+    defer alloc.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"ReadonlyRootfs\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Memory\":67108864") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"PidsLimit\":32") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"SecurityOpt\":[\"no-new-privileges\"]") != null);
 }

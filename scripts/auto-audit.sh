@@ -66,14 +66,28 @@ else
     fail "validateIdentifier() is not called in src/podman_api.zig."
 fi
 
-# 6. Require checked arithmetic in decoders
-if rg -q "std\.math\.add" src/http.zig && rg -q "std\.math\.add" src/podman_api.zig; then
-    pass "Checked arithmetic (std.math.add) active in chunk/frame decoders."
+# 6. Require checked arithmetic in parsers & decoders
+if rg -q "std\.math\.add" src/http.zig && rg -q "std\.math\.add" src/podman_api.zig && rg -q "std\.math\.mul" src/cli.zig; then
+    pass "Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser."
 else
-    fail "Missing std.math.add in src/http.zig or src/podman_api.zig."
+    fail "Missing checked arithmetic in src/http.zig, src/podman_api.zig, or src/cli.zig."
 fi
 
-# 7. Run security-check.sh (includes zig build test & ELF hardening when zig is installed)
+# 7. Require socket timeout polling, hardening config, audit verification, and 14-case demo
+if rg -q "waitReadable" src/http.zig && rg -q "verifyAuditFile" src/log.zig && rg -q "ReadonlyRootfs" src/podman_api.zig && rg -q "runSelfTest" src/demo.zig && rg -q "std\.testing\.allocator" src/demo.zig; then
+    pass "Timeout poll, HostConfig hardening, audit hash-chain verification, and 14-case demo present."
+else
+    fail "Missing timeout, HostConfig hardening, verifyAuditFile, or runSelfTest/testing.allocator in src/demo.zig."
+fi
+
+# 8. Require parity script executable
+if [ -x "$ROOT_DIR/scripts/check-ci-parity.py" ] && [ -x "$ROOT_DIR/scripts/graph-query.py" ] && [ -x "$ROOT_DIR/scripts/smoke.sh" ]; then
+    pass "Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable."
+else
+    fail "Verification scripts missing executable (+x) permission."
+fi
+
+# 9. Run security-check.sh (includes zig build test & ELF hardening when zig is installed)
 SEC_OUT=""
 if SEC_OUT="$("$ROOT_DIR/scripts/security-check.sh" 2>&1)"; then
     pass "scripts/security-check.sh completed cleanly."

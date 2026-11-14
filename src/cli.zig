@@ -13,12 +13,18 @@ pub const usage =
     \\      --rm                       Remove the container when it exits
     \\      --name NAME                Assign a name to the container
     \\      -e, --env KEY=VALUE        Set an environment variable (repeatable)
+    \\      -m, --memory BYTES         Memory limit (e.g., 64m, 1g, 1048576)
+    \\      --pids-limit N             Limit container PIDs
+    \\      --read-only                Mount container root filesystem as read-only
+    \\      --no-new-privileges        Prevent privilege escalation inside container
     \\  ps [-a]                        List containers (-a: include stopped)
     \\  images                         List local images
     \\  pull IMAGE                     Pull an image from a registry
     \\  stop CONTAINER                 Stop a running container
     \\  rm [-f] CONTAINER              Remove a container (-f: force)
     \\  logs CONTAINER                 Print a container's logs
+    \\  audit [FILE]                   Verify SHA-256 hash chain of audit.log
+    \\  demo                           Run 14-case fail-closed ALLOW/DENY self-test suite
     \\  version                        Show client and server versions
     \\  help                           Show this help
     \\
@@ -46,6 +52,10 @@ pub const RunOpts = struct {
     name: ?[]const u8 = null,
     detach: bool = false,
     remove: bool = false,
+    read_only: bool = false,
+    no_new_privileges: bool = false,
+    memory: ?i64 = null,
+    pids_limit: ?i64 = null,
 };
 
 pub const RmOpts = struct {
@@ -57,6 +67,8 @@ pub const Command = union(enum) {
     help,
     client_version,
     version,
+    demo,
+    audit: ?[]const u8,
     ps: struct { all: bool = false },
     images,
     pull: []const u8,
@@ -84,6 +96,7 @@ pub const ParseError = error{
     UnknownCommand,
     UnknownFlag,
     MissingValue,
+    InvalidValue,
     MissingArgument,
     TooManyArguments,
 } || std.mem.Allocator.Error;
@@ -93,6 +106,7 @@ pub fn describeError(e: ParseError) []const u8 {
         error.UnknownCommand => "unknown command",
         error.UnknownFlag => "unknown flag",
         error.MissingValue => "flag requires a value",
+        error.InvalidValue => "invalid flag value",
         error.MissingArgument => "missing required argument",
         error.TooManyArguments => "too many arguments",
         error.OutOfMemory => "out of memory",
@@ -151,6 +165,10 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
         try parseRm(rest)
     else if (eql(name, "logs"))
         .{ .logs = try single(rest) }
+    else if (eql(name, "audit"))
+        try parseAudit(rest)
+    else if (eql(name, "demo"))
+        try noArgs(rest, .demo)
     else if (eql(name, "version"))
         try noArgs(rest, .version)
     else if (eql(name, "help"))
@@ -159,6 +177,13 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
         return error.UnknownCommand;
 
     return .{ .global = global, .command = command };
+}
+
+fn parseAudit(args: []const []const u8) ParseError!Command {
+    if (args.len == 0) return .{ .audit = null };
+    if (isFlag(args[0])) return error.UnknownFlag;
+    if (args.len > 1) return error.TooManyArguments;
+    return .{ .audit = args[0] };
 }
 
 fn noArgs(args: []const []const u8, cmd: Command) ParseError!Command {
@@ -196,6 +221,46 @@ fn parseRm(args: []const []const u8) ParseError!Command {
     return .{ .rm = opts };
 }
 
+pub fn parseMemoryBytes(s: []const u8) ParseError!i64 {
+    if (s.len == 0) return error.InvalidValue;
+    var num_end = s.len;
+    var mult: i64 = 1;
+    if (std.ascii.endsWithIgnoreCase(s, "kb")) {
+        num_end = s.len - 2;
+        mult = 1024;
+    } else if (std.ascii.endsWithIgnoreCase(s, "mb")) {
+        num_end = s.len - 2;
+        mult = 1024 * 1024;
+    } else if (std.ascii.endsWithIgnoreCase(s, "gb")) {
+        num_end = s.len - 2;
+        mult = 1024 * 1024 * 1024;
+    } else {
+        switch (s[s.len - 1]) {
+            'b', 'B' => {
+                num_end = s.len - 1;
+                mult = 1;
+            },
+            'k', 'K' => {
+                num_end = s.len - 1;
+                mult = 1024;
+            },
+            'm', 'M' => {
+                num_end = s.len - 1;
+                mult = 1024 * 1024;
+            },
+            'g', 'G' => {
+                num_end = s.len - 1;
+                mult = 1024 * 1024 * 1024;
+            },
+            else => {},
+        }
+    }
+    if (num_end == 0) return error.InvalidValue;
+    const base = std.fmt.parseInt(i64, s[0..num_end], 10) catch return error.InvalidValue;
+    if (base <= 0) return error.InvalidValue;
+    return std.math.mul(i64, base, mult) catch error.InvalidValue;
+}
+
 fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!RunOpts {
     var opts = RunOpts{ .image = "" };
     var env = std.ArrayList([]const u8).init(allocator);
@@ -208,6 +273,16 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
             opts.detach = true;
         } else if (eql(a, "--rm")) {
             opts.remove = true;
+        } else if (eql(a, "--read-only")) {
+            opts.read_only = true;
+        } else if (eql(a, "--no-new-privileges")) {
+            opts.no_new_privileges = true;
+        } else if (eql(a, "-m") or eql(a, "--memory")) {
+            opts.memory = try parseMemoryBytes(try takeValue(args, &i));
+        } else if (eql(a, "--pids-limit")) {
+            const limit = std.fmt.parseInt(i64, try takeValue(args, &i), 10) catch return error.InvalidValue;
+            if (limit <= 0) return error.InvalidValue;
+            opts.pids_limit = limit;
         } else if (eql(a, "--name")) {
             opts.name = try takeValue(args, &i);
         } else if (eql(a, "-e") or eql(a, "--env")) {
@@ -311,4 +386,85 @@ test "parse errors" {
     try std.testing.expectError(error.MissingArgument, testParse(&.{ "rm", "-f" }));
     try std.testing.expectError(error.UnknownFlag, testParse(&.{ "rm", "--bogus", "a" }));
     try std.testing.expectError(error.TooManyArguments, testParse(&.{ "rm", "a", "b" }));
+}
+
+test "parse run hardening flags and memory suffixes" {
+    const alloc = std.testing.allocator;
+    var parsed = try parse(alloc, &.{
+        "run",
+        "--rm",
+        "-m",
+        "64m",
+        "--pids-limit",
+        "32",
+        "--read-only",
+        "--no-new-privileges",
+        "alpine:3.20",
+        "echo",
+        "ok",
+    });
+    defer parsed.deinit(alloc);
+
+    switch (parsed.command) {
+        .run => |r| {
+            try std.testing.expect(r.remove);
+            try std.testing.expect(r.read_only);
+            try std.testing.expect(r.no_new_privileges);
+            try std.testing.expectEqual(@as(?i64, 64 * 1024 * 1024), r.memory);
+            try std.testing.expectEqual(@as(?i64, 32), r.pids_limit);
+            try std.testing.expectEqualStrings("alpine:3.20", r.image);
+            try std.testing.expectEqual(@as(usize, 2), r.cmd.len);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    var p_bytes = try parse(alloc, &.{ "run", "--memory=1024b", "alpine:3.20" });
+    defer p_bytes.deinit(alloc);
+    try std.testing.expectEqual(@as(?i64, 1024), p_bytes.command.run.memory);
+
+    var p_kib = try parse(alloc, &.{ "run", "-m", "2K", "alpine:3.20" });
+    defer p_kib.deinit(alloc);
+    try std.testing.expectEqual(@as(?i64, 2048), p_kib.command.run.memory);
+
+    var p_gib = try parse(alloc, &.{ "run", "--memory", "1g", "alpine:3.20" });
+    defer p_gib.deinit(alloc);
+    try std.testing.expectEqual(@as(?i64, 1024 * 1024 * 1024), p_gib.command.run.memory);
+}
+
+test "parse rejects invalid hardening values" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "-m", "0", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--memory", "-1m", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--memory", "abc", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--memory", "99999999999999999g", "alpine" }));
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "run", "-m" }));
+
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--pids-limit", "0", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--pids-limit", "-5", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--pids-limit", "nope", "alpine" }));
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "run", "--pids-limit" }));
+}
+
+test "parse demo and audit subcommands" {
+    const alloc = std.testing.allocator;
+    var p_demo = try parse(alloc, &.{"demo"});
+    defer p_demo.deinit(alloc);
+    try std.testing.expect(p_demo.command == .demo);
+    try std.testing.expectError(error.TooManyArguments, parse(alloc, &.{ "demo", "extra" }));
+
+    var p_audit_default = try parse(alloc, &.{"audit"});
+    defer p_audit_default.deinit(alloc);
+    switch (p_audit_default.command) {
+        .audit => |path| try std.testing.expect(path == null),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var p_audit_file = try parse(alloc, &.{ "audit", "/tmp/custom-audit.log" });
+    defer p_audit_file.deinit(alloc);
+    switch (p_audit_file.command) {
+        .audit => |path| try std.testing.expectEqualStrings("/tmp/custom-audit.log", path.?),
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expectError(error.TooManyArguments, parse(alloc, &.{ "audit", "a.log", "b.log" }));
 }

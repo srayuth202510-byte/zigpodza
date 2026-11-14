@@ -1,8 +1,14 @@
 //! File logger.
 //!   system.log  – every message (DEBUG/INFO/WARN/ERROR) with a UTC timestamp
 //!   error.log   – ERROR messages only
+//!   audit.log   – tamper-evident SHA-256 hash-chained log entries
 //! Errors and warnings are also echoed to stderr; info/debug only with --verbose.
 const std = @import("std");
+
+pub const AuditError = error{
+    AuditTampered,
+    InvalidAuditFormat,
+};
 
 pub const Level = enum {
     debug,
@@ -23,10 +29,12 @@ pub const Level = enum {
 pub const Logger = struct {
     system_file: ?std.fs.File = null,
     error_file: ?std.fs.File = null,
+    audit_file: ?std.fs.File = null,
+    last_hash: [64]u8 = [_]u8{'0'} ** 64,
     verbose: bool = false,
     echo_stderr: bool = true,
 
-    /// Opens (creating if needed) `<log_dir>/system.log` and `<log_dir>/error.log`.
+    /// Opens (creating if needed) `<log_dir>/system.log`, `error.log`, and `audit.log`.
     /// Never fails: if the files cannot be opened, logging to them is skipped.
     pub fn init(log_dir: []const u8, verbose: bool) Logger {
         var self = Logger{ .verbose = verbose };
@@ -37,14 +45,18 @@ pub const Logger = struct {
         defer dir.close();
         self.system_file = openAppend(dir, "system.log");
         self.error_file = openAppend(dir, "error.log");
+        self.last_hash = readLastAuditHash(dir);
+        self.audit_file = openAppend(dir, "audit.log");
         return self;
     }
 
     pub fn deinit(self: *Logger) void {
         if (self.system_file) |f| f.close();
         if (self.error_file) |f| f.close();
+        if (self.audit_file) |f| f.close();
         self.system_file = null;
         self.error_file = null;
+        self.audit_file = null;
     }
 
     pub fn debug(self: *Logger, comptime fmt: []const u8, args: anytype) void {
@@ -68,6 +80,26 @@ pub const Logger = struct {
         if (level == .err) {
             if (self.error_file) |f| f.writeAll(line.text) catch {};
         }
+        if (self.audit_file) |f| {
+            var audit_msg_buf: [4096]u8 = undefined;
+            const raw_msg = std.mem.trimRight(u8, line.text[line.msg_start..], "\r\n");
+            const audit_msg = sanitizeAuditField(&audit_msg_buf, raw_msg);
+            const ts_end = std.mem.indexOfScalar(u8, line.text, ' ') orelse 0;
+            const ts_str = line.text[0..ts_end];
+            const entry_hash = computeEntryHash(ts_str, level.label(), &self.last_hash, audit_msg);
+            var audit_buf: [4400]u8 = undefined;
+            if (std.fmt.bufPrint(&audit_buf, "{s}\t{s}\t{s}\t{s}\t{s}\n", .{
+                ts_str,
+                level.label(),
+                self.last_hash,
+                entry_hash,
+                audit_msg,
+            })) |audit_line| {
+                if (f.writeAll(audit_line)) |_| {
+                    self.last_hash = entry_hash;
+                } else |_| {}
+            } else |_| {}
+        }
 
         const echo = level == .err or level == .warn or self.verbose;
         if (self.echo_stderr and echo) {
@@ -78,6 +110,101 @@ pub const Logger = struct {
         }
     }
 };
+
+fn sanitizeAuditField(buf: []u8, input: []const u8) []const u8 {
+    const n = @min(buf.len, input.len);
+    for (input[0..n], 0..) |c, idx| {
+        buf[idx] = switch (c) {
+            '\t', '\r', '\n' => ' ',
+            else => c,
+        };
+    }
+    return buf[0..n];
+}
+
+fn isHex64(s: []const u8) bool {
+    if (s.len != 64) return false;
+    for (s) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
+}
+
+pub fn computeEntryHash(ts_str: []const u8, level_str: []const u8, prev_hash: *const [64]u8, msg: []const u8) [64]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(ts_str);
+    hasher.update("\t");
+    hasher.update(level_str);
+    hasher.update("\t");
+    hasher.update(prev_hash);
+    hasher.update("\t");
+    hasher.update(msg);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    var out: [64]u8 = undefined;
+    _ = std.fmt.bufPrint(&out, "{s}", .{std.fmt.fmtSliceHexLower(&digest)}) catch unreachable;
+    return out;
+}
+
+fn readLastAuditHash(dir: std.fs.Dir) [64]u8 {
+    const genesis = [_]u8{'0'} ** 64;
+    const file = dir.openFile("audit.log", .{}) catch return genesis;
+    defer file.close();
+    const stat = file.stat() catch return genesis;
+    if (stat.size == 0) return genesis;
+
+    var buf: [8192]u8 = undefined;
+    const start: u64 = if (stat.size > buf.len) stat.size - buf.len else 0;
+    file.seekTo(start) catch return genesis;
+    const n = file.readAll(&buf) catch return genesis;
+    const trimmed = std.mem.trimRight(u8, buf[0..n], "\r\n");
+    if (trimmed.len == 0) return genesis;
+
+    const last_nl = std.mem.lastIndexOfScalar(u8, trimmed, '\n');
+    const last_line = if (last_nl) |idx| trimmed[idx + 1 ..] else trimmed;
+
+    var parts = std.mem.splitScalar(u8, last_line, '\t');
+    _ = parts.next() orelse return genesis;
+    _ = parts.next() orelse return genesis;
+    _ = parts.next() orelse return genesis;
+    const hash = parts.next() orelse return genesis;
+    if (!isHex64(hash)) return genesis;
+    var out: [64]u8 = undefined;
+    @memcpy(&out, hash);
+    return out;
+}
+
+/// Verifies the SHA-256 hash chain in `path`. Returns the verified entry count.
+pub fn verifyAuditFile(allocator: std.mem.Allocator, path: []const u8) !usize {
+    const content = try std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024 * 1024);
+    defer allocator.free(content);
+
+    const trimmed = if (std.mem.endsWith(u8, content, "\n")) content[0 .. content.len - 1] else content;
+    if (trimmed.len == 0) return 0;
+
+    var expected_prev = [_]u8{'0'} ** 64;
+    var count: usize = 0;
+    var lines = std.mem.splitScalar(u8, trimmed, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trimRight(u8, raw_line, "\r");
+        var parts = std.mem.splitScalar(u8, line, '\t');
+        const ts_str = parts.next() orelse return AuditError.InvalidAuditFormat;
+        const level_str = parts.next() orelse return AuditError.InvalidAuditFormat;
+        const prev_hash = parts.next() orelse return AuditError.InvalidAuditFormat;
+        const entry_hash = parts.next() orelse return AuditError.InvalidAuditFormat;
+        const msg = parts.next() orelse return AuditError.InvalidAuditFormat;
+        if (parts.next() != null) return AuditError.InvalidAuditFormat;
+        if (!isHex64(prev_hash) or !isHex64(entry_hash)) return AuditError.InvalidAuditFormat;
+
+        if (!std.mem.eql(u8, prev_hash, &expected_prev)) return AuditError.AuditTampered;
+        const computed = computeEntryHash(ts_str, level_str, &expected_prev, msg);
+        if (!std.mem.eql(u8, entry_hash, &computed)) return AuditError.AuditTampered;
+
+        expected_prev = computed;
+        count += 1;
+    }
+    return count;
+}
 
 /// Opens a file with O_APPEND so concurrent zigpod processes never overwrite each other.
 fn openAppend(dir: std.fs.Dir, name: []const u8) ?std.fs.File {
@@ -177,4 +304,40 @@ test "logger writes system.log and error.log" {
     try std.testing.expect(std.mem.indexOf(u8, sys, "[ERROR] bad 1") != null);
     try std.testing.expect(std.mem.indexOf(u8, errs, "[INFO]") == null);
     try std.testing.expect(std.mem.indexOf(u8, errs, "[ERROR] bad 1") != null);
+
+    const audit_path = try std.fs.path.join(std.testing.allocator, &.{ dir_path, "audit.log" });
+    defer std.testing.allocator.free(audit_path);
+    const verified_count = try verifyAuditFile(std.testing.allocator, audit_path);
+    try std.testing.expectEqual(@as(usize, 2), verified_count);
+
+    // Re-opening logger continues the existing SHA-256 chain seamlessly.
+    var logger2 = Logger.init(dir_path, false);
+    logger2.echo_stderr = false;
+    logger2.warn("resumed", .{});
+    logger2.deinit();
+    try std.testing.expectEqual(@as(usize, 3), try verifyAuditFile(std.testing.allocator, audit_path));
+}
+
+test "verifyAuditFile detects single-byte tampering" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir_path);
+
+    var logger = Logger.init(dir_path, false);
+    logger.echo_stderr = false;
+    logger.info("entry one", .{});
+    logger.err("entry two", .{});
+    logger.deinit();
+
+    const audit_path = try std.fs.path.join(std.testing.allocator, &.{ dir_path, "audit.log" });
+    defer std.testing.allocator.free(audit_path);
+
+    const content = try tmp.dir.readFileAlloc(std.testing.allocator, "audit.log", 8192);
+    defer std.testing.allocator.free(content);
+    const idx = std.mem.indexOf(u8, content, "entry one") orelse unreachable;
+    content[idx] = 'X';
+    try tmp.dir.writeFile(.{ .sub_path = "audit.log", .data = content });
+
+    try std.testing.expectError(AuditError.AuditTampered, verifyAuditFile(std.testing.allocator, audit_path));
 }

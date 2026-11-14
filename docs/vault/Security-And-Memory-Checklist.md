@@ -27,12 +27,17 @@ status: active
 ## 2. Protocol & Input Security Gates `#security-gate`
 
 - [ ] `http.Client.request` เรียก `validateRequestTarget(path)` ก่อนเชื่อมต่อ socket
+- [ ] `http.Client.request` ใช้ `waitReadable` (`std.posix.poll`) บังคับ `timeout_ms` ไม่ให้ค้างถาวร
 - [ ] `http.decodeChunked` ใช้ `std.math.add`, ตรวจ `max_response_bytes`, และตรวจ trailer `\r\n`
 - [ ] `podman_api.zig` เรียก `validateIdentifier` กับทุก `id` และ `name` ที่สร้าง URL
 - [ ] `podman_api.demuxLogs` ใช้ `std.math.add` และ fallback เมื่อ frame ไม่สมบูรณ์
+- [ ] Hardening flags (`-m`/`--memory`, `--pids-limit`, `--read-only`, `--no-new-privileges`) ใช้ checked `std.math.mul` และส่งผ่าน `HostConfig`
 
-## 3. Logging & Operations
+## 3. Logging, Tamper Evidence & Operations
 
 - [ ] บันทึกรายละเอียดระบบลง [system.log](../../system.log) และข้อผิดพลาดลง [error.log](../../error.log)
+- [ ] `audit.log` เชื่อมแต่ละบรรทัดด้วย SHA-256 hash chain และตรวจจับการแก้ไขได้ด้วย `zigpod audit` (`verifyAuditFile`)
 - [ ] `system.log` และ `error.log` ไม่เป็น world-writable (`o+w`)
+- [ ] `zigpod demo` ผ่านครบ 14 cases (fail-closed ALLOW/DENY) โดยใช้ `std.testing.allocator` ไม่ leak
+- [ ] CI / `Makefile` / Vault parity ผ่าน `python3 scripts/check-ci-parity.py`, `scripts/smoke.sh`, และ `scripts/graph-query.py`
 - [ ] Release binary (`zig build -Doptimize=ReleaseSafe`) ไม่มี executable stack (`GNU_STACK` ต้องไม่เป็น `RWE`) และไม่มี `RWX` PT_LOAD segment
