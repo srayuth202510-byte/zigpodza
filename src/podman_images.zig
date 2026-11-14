@@ -4,12 +4,12 @@ const http = @import("http.zig");
 const log = @import("log.zig");
 const utils = @import("utils.zig");
 const types = @import("podman_types.zig");
-const v = @import("podman_validate.zig");
+const validate = @import("podman_validate.zig");
 
-const api_prefix = v.api_prefix;
-const validateResourceRef = v.validateResourceRef;
-const appendQueryEncoded = v.appendQueryEncoded;
-const logApiFailure = v.logApiFailure;
+const api_prefix = validate.api_prefix;
+const validateResourceRef = validate.validateResourceRef;
+const appendQueryEncoded = validate.appendQueryEncoded;
+const logApiFailure = validate.logApiFailure;
 
 const ApiError = types.ApiError;
 const ImageSummary = types.ImageSummary;

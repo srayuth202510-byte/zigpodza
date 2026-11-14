@@ -89,6 +89,9 @@ pub const systemPrune = system.systemPrune;
 pub const showVersion = system.showVersion;
 pub const inspect = system.inspect;
 pub const inspectJson = system.inspectJson;
+pub const portContainer = system.portContainer;
+pub const diffContainer = system.diffContainer;
+pub const fetchEvents = system.fetchEvents;
 
 const ScriptedReply = th.ScriptedReply;
 const MockApiCtx = th.MockApiCtx;

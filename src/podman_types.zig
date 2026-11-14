@@ -194,6 +194,7 @@ pub const ContainerInspect = struct {
     pub const NetworkSettings = struct {
         IPAddress: []const u8 = "",
         Networks: ?std.json.Value = null,
+        Ports: ?std.json.Value = null,
     };
 
     pub const MountView = struct {
@@ -368,4 +369,25 @@ pub const StatsJsonEntry = struct {
     mem_limit_bytes: u64,
     mem_percent: f64,
     pids: u64,
+};
+
+/// Single entry from `GET /containers/{id}/changes` (`zigpod diff`).
+/// Kind: 0 = Modified (C), 1 = Added (A), 2 = Deleted (D).
+pub const ContainerDiffItem = struct {
+    Path: []const u8 = "",
+    Kind: u8 = 0,
+};
+
+/// Subset of a Podman/Docker daemon event JSON line from `GET /events`.
+pub const DaemonEvent = struct {
+    Type: []const u8 = "",
+    Action: []const u8 = "",
+    status: []const u8 = "",
+    id: []const u8 = "",
+    time: i64 = 0,
+    Actor: ?Actor = null,
+
+    pub const Actor = struct {
+        ID: []const u8 = "",
+    };
 };

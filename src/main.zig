@@ -177,6 +177,13 @@ fn dispatch(
             .df => try pod.systemDf(client, logger, stdout),
             .prune => try pod.systemPrune(client, logger, stdout),
         },
+        .port => |opts| try pod.portContainer(client, logger, opts.container, opts.private_port, stdout),
+        .wait => |container| {
+            const code = try pod.waitContainer(client, logger, container);
+            try stdout.print("{d}\n", .{code});
+        },
+        .diff => |container| try pod.diffContainer(client, logger, container, stdout),
+        .events => |opts| try pod.fetchEvents(client, logger, opts.since, opts.until, opts.json, stdout),
         .stats => |opts| {
             if (opts.json) {
                 try pod.statsContainersJson(client, logger, opts.containers, opts.all, stdout);

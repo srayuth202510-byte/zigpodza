@@ -27,6 +27,8 @@ pub const NetworkAction = types.NetworkAction;
 pub const NetworkOpts = types.NetworkOpts;
 pub const SystemAction = types.SystemAction;
 pub const SystemOpts = types.SystemOpts;
+pub const PortOpts = types.PortOpts;
+pub const EventsOpts = types.EventsOpts;
 pub const Command = types.Command;
 pub const Parsed = types.Parsed;
 pub const ParseError = types.ParseError;
@@ -114,6 +116,14 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
         try parseNetwork(rest)
     else if (eql(name, "system"))
         try parseSystem(rest)
+    else if (eql(name, "port"))
+        try parsePortCmd(rest)
+    else if (eql(name, "wait"))
+        .{ .wait = try single(rest) }
+    else if (eql(name, "diff"))
+        .{ .diff = try single(rest) }
+    else if (eql(name, "events"))
+        try parseEvents(rest)
     else if (eql(name, "audit"))
         try parseAudit(rest)
     else if (eql(name, "demo"))
@@ -575,6 +585,51 @@ fn parseSystem(args: []const []const u8) ParseError!Command {
     } else {
         return error.UnknownCommand;
     }
+}
+
+/// Parses `port CONTAINER [PRIVATE_PORT[/PROTO]]`.
+fn parsePortCmd(args: []const []const u8) ParseError!Command {
+    var container: ?[]const u8 = null;
+    var private_port: ?[]const u8 = null;
+    for (args) |a| {
+        if (isFlag(a)) return error.UnknownFlag;
+        if (container == null) {
+            container = a;
+        } else if (private_port == null) {
+            private_port = a;
+        } else {
+            return error.TooManyArguments;
+        }
+    }
+    return .{ .port = .{
+        .container = container orelse return error.MissingArgument,
+        .private_port = private_port,
+    } };
+}
+
+/// Parses `events [--since TS] [--until TS] [--json]`.
+fn parseEvents(args: []const []const u8) ParseError!Command {
+    var opts = EventsOpts{};
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (eql(a, "--since")) {
+            opts.since = try takeValue(args, &i);
+        } else if (std.mem.startsWith(u8, a, "--since=")) {
+            opts.since = a["--since=".len..];
+        } else if (eql(a, "--until")) {
+            opts.until = try takeValue(args, &i);
+        } else if (std.mem.startsWith(u8, a, "--until=")) {
+            opts.until = a["--until=".len..];
+        } else if (eql(a, "--json")) {
+            opts.json = true;
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else {
+            return error.TooManyArguments;
+        }
+    }
+    return .{ .events = opts };
 }
 
 // ---------------------------------------------------------------- tests
@@ -1215,4 +1270,26 @@ test "parse start, restart, pause, unpause, rename, and rmi subcommands" {
 test {
     _ = types;
     _ = specs;
+}
+
+test "parse port, wait, diff, and events observation subcommands" {
+    const alloc = std.testing.allocator;
+    const p1 = try parse(alloc, &.{ "port", "web", "80/tcp" });
+    defer p1.deinit(alloc);
+    try std.testing.expectEqualStrings("web", p1.command.port.container);
+    try std.testing.expectEqualStrings("80/tcp", p1.command.port.private_port.?);
+
+    const p2 = try parse(alloc, &.{ "wait", "web" });
+    defer p2.deinit(alloc);
+    try std.testing.expectEqualStrings("web", p2.command.wait);
+
+    const p3 = try parse(alloc, &.{ "diff", "web" });
+    defer p3.deinit(alloc);
+    try std.testing.expectEqualStrings("web", p3.command.diff);
+
+    const p4 = try parse(alloc, &.{ "events", "--since", "100", "--until=200", "--json" });
+    defer p4.deinit(alloc);
+    try std.testing.expectEqualStrings("100", p4.command.events.since.?);
+    try std.testing.expectEqualStrings("200", p4.command.events.until.?);
+    try std.testing.expect(p4.command.events.json);
 }

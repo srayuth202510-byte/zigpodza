@@ -4,17 +4,20 @@ const http = @import("http.zig");
 const log = @import("log.zig");
 const utils = @import("utils.zig");
 const types = @import("podman_types.zig");
-const v = @import("podman_validate.zig");
+const validate = @import("podman_validate.zig");
 const th = @import("podman_test_helpers.zig");
 
-const api_prefix = v.api_prefix;
-const validateVolumeName = v.validateVolumeName;
-const validateIdentifier = v.validateIdentifier;
-const validateResourceRef = v.validateResourceRef;
-const logApiFailure = v.logApiFailure;
-const formatSizeU64 = v.formatSizeU64;
+const api_prefix = validate.api_prefix;
+const validateVolumeName = validate.validateVolumeName;
+const validateIdentifier = validate.validateIdentifier;
+const validateResourceRef = validate.validateResourceRef;
+const appendQueryEncoded = validate.appendQueryEncoded;
+const logApiFailure = validate.logApiFailure;
+const formatSizeU64 = validate.formatSizeU64;
 
 const ApiError = types.ApiError;
+const ContainerDiffItem = types.ContainerDiffItem;
+const DaemonEvent = types.DaemonEvent;
 const VolumeCreateRequest = types.VolumeCreateRequest;
 const VolumeInfo = types.VolumeInfo;
 const VolumeListResponse = types.VolumeListResponse;
@@ -517,6 +520,216 @@ fn printImageInspect(writer: anytype, img: ImageInspect) !void {
     }
 }
 
+fn portMatchesFilter(key: []const u8, filter: []const u8) bool {
+    if (std.mem.eql(u8, key, filter)) return true;
+    if (std.mem.indexOfScalar(u8, filter, '/') == null) {
+        if (std.mem.indexOfScalar(u8, key, '/')) |slash| {
+            return std.mem.eql(u8, key[0..slash], filter);
+        }
+    }
+    return false;
+}
+
+/// Lists published port mappings for a container (`GET /containers/{id}/json`).
+pub fn portContainer(
+    client: *const http.Client,
+    logger: *log.Logger,
+    id: []const u8,
+    filter_port: ?[]const u8,
+    writer: anytype,
+) !void {
+    try validateIdentifier(id);
+
+    const path = try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/json", .{ api_prefix, id });
+    defer client.allocator.free(path);
+
+    logger.debug("GET {s}", .{path});
+    const resp = try client.request("GET", path, null);
+    defer resp.deinit();
+    if (!resp.ok()) return logApiFailure(logger, "GET", path, resp);
+
+    const parsed = try std.json.parseFromSlice(ContainerInspect, client.allocator, resp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const ns = parsed.value.NetworkSettings orelse return;
+    const ports_val = ns.Ports orelse return;
+    if (ports_val != .object) return;
+
+    var it = ports_val.object.iterator();
+    var count: usize = 0;
+    while (it.next()) |entry| {
+        const cport = entry.key_ptr.*;
+        if (filter_port) |fp| {
+            if (!portMatchesFilter(cport, fp)) continue;
+        }
+        if (entry.value_ptr.* != .array) continue;
+        for (entry.value_ptr.array.items) |binding| {
+            if (binding != .object) continue;
+            const hip = if (binding.object.get("HostIp")) |v_ip|
+                (if (v_ip == .string and v_ip.string.len > 0) v_ip.string else "0.0.0.0")
+            else
+                "0.0.0.0";
+            const hport = if (binding.object.get("HostPort")) |v_hp|
+                (if (v_hp == .string) v_hp.string else "")
+            else
+                "";
+            if (hport.len > 0) {
+                try writer.print("{s} -> {s}:{s}\n", .{ cport, hip, hport });
+                count += 1;
+            }
+        }
+    }
+    logger.info("listed {d} port mapping(s) for {s}", .{ count, utils.shortId(id) });
+}
+
+/// Shows filesystem changes in a container (`GET /containers/{id}/changes`).
+pub fn diffContainer(client: *const http.Client, logger: *log.Logger, id: []const u8, writer: anytype) !void {
+    try validateIdentifier(id);
+
+    const path = try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/changes", .{ api_prefix, id });
+    defer client.allocator.free(path);
+
+    logger.debug("GET {s}", .{path});
+    const resp = try client.request("GET", path, null);
+    defer resp.deinit();
+    if (!resp.ok()) return logApiFailure(logger, "GET", path, resp);
+
+    const trimmed = std.mem.trim(u8, resp.body, " \t\r\n");
+    if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "null")) return;
+
+    const parsed = try std.json.parseFromSlice([]ContainerDiffItem, client.allocator, resp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    for (parsed.value) |item| {
+        const kind_ch: u8 = switch (item.Kind) {
+            1 => 'A',
+            2 => 'D',
+            else => 'C',
+        };
+        try writer.print("{c} {s}\n", .{ kind_ch, item.Path });
+    }
+    logger.info("listed {d} filesystem change(s) for {s}", .{ parsed.value.len, utils.shortId(id) });
+}
+
+fn EventsStreamCtx(comptime WriterType: type) type {
+    return struct {
+        allocator: std.mem.Allocator,
+        writer: WriterType,
+        json_mode: bool,
+        line_buf: std.ArrayListUnmanaged(u8) = .{},
+        count: usize = 0,
+
+        fn deinit(self: *@This()) void {
+            self.line_buf.deinit(self.allocator);
+        }
+
+        fn onChunk(self: *@This(), chunk: []const u8) !void {
+            const projected = std.math.add(usize, self.line_buf.items.len, chunk.len) catch return http.Error.InvalidResponse;
+            if (projected > 1024 * 1024) return http.Error.InvalidResponse;
+            try self.line_buf.appendSlice(self.allocator, chunk);
+
+            var start: usize = 0;
+            while (std.mem.indexOfScalarPos(u8, self.line_buf.items, start, '\n')) |nl| {
+                const line = std.mem.trim(u8, self.line_buf.items[start..nl], " \r\t");
+                if (line.len > 0) try self.handleLine(line);
+                start = nl + 1;
+            }
+            if (start > 0) {
+                const rem = self.line_buf.items.len - start;
+                if (rem > 0) std.mem.copyForwards(u8, self.line_buf.items[0..rem], self.line_buf.items[start..]);
+                self.line_buf.items.len = rem;
+            }
+        }
+
+        fn flush(self: *@This()) !void {
+            const line = std.mem.trim(u8, self.line_buf.items, " \r\t");
+            if (line.len > 0) try self.handleLine(line);
+            self.line_buf.items.len = 0;
+        }
+
+        fn handleLine(self: *@This(), line: []const u8) !void {
+            const parsed = std.json.parseFromSlice(DaemonEvent, self.allocator, line, .{
+                .ignore_unknown_fields = true,
+            }) catch return;
+            defer parsed.deinit();
+
+            if (self.json_mode) {
+                try self.writer.print("{s}\n", .{line});
+            } else {
+                const ev = parsed.value;
+                const action = if (ev.Action.len > 0) ev.Action else ev.status;
+                const actor_id = if (ev.Actor) |a| (if (a.ID.len > 0) a.ID else ev.id) else ev.id;
+                try self.writer.print("{d} {s} {s} {s}\n", .{
+                    ev.time,
+                    if (ev.Type.len > 0) ev.Type else "daemon",
+                    action,
+                    utils.shortId(actor_id),
+                });
+            }
+            self.count += 1;
+        }
+    };
+}
+
+/// Streams or queries daemon events (`GET /events` with optional `since`/`until`).
+pub fn fetchEvents(
+    client: *const http.Client,
+    logger: *log.Logger,
+    since: ?[]const u8,
+    until: ?[]const u8,
+    json_mode: bool,
+    writer: anytype,
+) !void {
+    var path_buf = std.ArrayList(u8).init(client.allocator);
+    defer path_buf.deinit();
+    try path_buf.appendSlice(api_prefix ++ "/events");
+
+    var has_q = false;
+    if (since) |s| {
+        try path_buf.appendSlice("?since=");
+        try appendQueryEncoded(&path_buf, s);
+        has_q = true;
+    }
+    if (until) |u| {
+        try path_buf.appendSlice(if (has_q) "&until=" else "?until=");
+        try appendQueryEncoded(&path_buf, u);
+    }
+
+    logger.debug("STREAM GET {s}", .{path_buf.items});
+    const WriterType = @TypeOf(writer);
+    var ctx = EventsStreamCtx(WriterType){
+        .allocator = client.allocator,
+        .writer = writer,
+        .json_mode = json_mode,
+    };
+    defer ctx.deinit();
+
+    const resp = try client.streamRequest(
+        "GET",
+        path_buf.items,
+        null,
+        http.blocking_timeout_ms,
+        &ctx,
+        EventsStreamCtx(WriterType).onChunk,
+    );
+    defer resp.deinit();
+
+    if (!resp.ok()) {
+        const err_resp = http.Response{
+            .status = resp.status,
+            .body = resp.error_body,
+            .allocator = client.allocator,
+        };
+        return logApiFailure(logger, "GET", path_buf.items, err_resp);
+    }
+    try ctx.flush();
+    logger.info("received {d} daemon event(s)", .{ctx.count});
+}
+
 // ---------------------------------------------------------------- tests
 
 test "inspect renders container state, network, mounts, and hardening" {
@@ -669,6 +882,74 @@ test "systemPing, systemDf, and systemPrune endpoints" {
     try systemPrune(&client, &logger, out.writer());
     try std.testing.expect(std.mem.indexOf(u8, out.items, "deadbeef1234") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "Total reclaimed space: 4.0 MB") != null);
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
+}
+
+test "portContainer, diffContainer, and fetchEvents endpoints + validation" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-observe-api-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const insp_json =
+        "{\"Id\":\"web1234567890\",\"NetworkSettings\":{\"Ports\":{\"80/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"8080\"}],\"443/tcp\":[{\"HostIp\":\"0.0.0.0\",\"HostPort\":\"8443\"}]}}}";
+    const diff_json = "[{\"Path\":\"/etc/hosts\",\"Kind\":0},{\"Path\":\"/tmp/new\",\"Kind\":1},{\"Path\":\"/tmp/old\",\"Kind\":2}]";
+    const ev_json = "{\"Type\":\"container\",\"Action\":\"start\",\"time\":1700000000,\"Actor\":{\"ID\":\"web1234567890abcd\"}}\n";
+
+    const replies = [_]ScriptedReply{
+        .{
+            .expected_prefix = "GET /v1.40/containers/web/json HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ insp_json.len, insp_json }),
+        },
+        .{
+            .expected_prefix = "GET /v1.40/containers/web/changes HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ diff_json.len, diff_json }),
+        },
+        .{
+            .expected_prefix = "GET /v1.40/events?since=10&until=20 HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ ev_json.len, ev_json }),
+        },
+    };
+
+    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{
+        .allocator = alloc,
+        .socket_path = sock_path,
+    };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    try std.testing.expectError(ApiError.InvalidIdentifier, portContainer(&client, &logger, "../bad", null, out.writer()));
+    try std.testing.expectError(ApiError.InvalidIdentifier, diffContainer(&client, &logger, "../bad", out.writer()));
+
+    try portContainer(&client, &logger, "web", "80", out.writer());
+    try std.testing.expectEqualStrings("80/tcp -> 127.0.0.1:8080\n", out.items);
+
+    out.clearRetainingCapacity();
+    try diffContainer(&client, &logger, "web", out.writer());
+    try std.testing.expectEqualStrings("C /etc/hosts\nA /tmp/new\nD /tmp/old\n", out.items);
+
+    out.clearRetainingCapacity();
+    try fetchEvents(&client, &logger, "10", "20", false, out.writer());
+    try std.testing.expectEqualStrings("1700000000 container start web123456789\n", out.items);
 
     thread.join();
     joined = true;

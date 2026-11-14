@@ -4,14 +4,15 @@ const http = @import("http.zig");
 const log = @import("log.zig");
 const utils = @import("utils.zig");
 const types = @import("podman_types.zig");
-const v = @import("podman_validate.zig");
+const validate = @import("podman_validate.zig");
 const th = @import("podman_test_helpers.zig");
 
-const api_prefix = v.api_prefix;
-const validateIdentifier = v.validateIdentifier;
-const logApiFailure = v.logApiFailure;
-const formatSizeU64 = v.formatSizeU64;
+const api_prefix = validate.api_prefix;
+const validateIdentifier = validate.validateIdentifier;
+const logApiFailure = validate.logApiFailure;
+const formatSizeU64 = validate.formatSizeU64;
 
+const ApiError = types.ApiError;
 const ContainerStats = types.ContainerStats;
 const ContainerSummary = types.ContainerSummary;
 const StatsJsonEntry = types.StatsJsonEntry;

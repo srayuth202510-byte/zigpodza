@@ -53,6 +53,10 @@ pub const usage =
     \\  volume ls|create|rm|inspect [NAME]       Manage named volumes
     \\  network ls|inspect [NAME]      List or inspect container networks
     \\  system ping|df|prune [-f]      Check daemon health, disk usage, or prune unused resources
+    \\  port CONTAINER [PORT[/PROTO]]  List port mappings for a container
+    \\  wait CONTAINER                 Block until a container stops and print its exit code
+    \\  diff CONTAINER                 Inspect changes on a container's filesystem
+    \\  events [--since TS] [--until TS] [--json]  Stream or query daemon events
     \\  audit [--json] [FILE]          Verify SHA-256 hash chain of audit.log (--json: structured output)
     \\  demo                           Run 14-case fail-closed ALLOW/DENY self-test suite
     \\  version                        Show client and server versions
@@ -220,6 +224,17 @@ pub const SystemOpts = struct {
     force: bool = false,
 };
 
+pub const PortOpts = struct {
+    container: []const u8,
+    private_port: ?[]const u8 = null,
+};
+
+pub const EventsOpts = struct {
+    since: ?[]const u8 = null,
+    until: ?[]const u8 = null,
+    json: bool = false,
+};
+
 pub const Command = union(enum) {
     help,
     client_version,
@@ -247,6 +262,10 @@ pub const Command = union(enum) {
     volume: VolumeOpts,
     network: NetworkOpts,
     system: SystemOpts,
+    port: PortOpts,
+    wait: []const u8,
+    diff: []const u8,
+    events: EventsOpts,
 };
 
 pub const Parsed = struct {
