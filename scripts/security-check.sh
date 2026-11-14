@@ -4,6 +4,21 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# Auto-detect Zig binary if not in PATH
+if ! command -v zig >/dev/null 2>&1; then
+    for candidate in \
+        "$HOME/.config/Code - OSS/User/globalStorage/ziglang.vscode-zig/zig/x86_64-linux-0.13.0/zig" \
+        "$HOME/.config/Code/User/globalStorage/ziglang.vscode-zig/zig/x86_64-linux-0.13.0/zig" \
+        "$HOME/.local/opt/zig-0.13.0/zig" \
+        "$HOME/.local/bin/zig" \
+        "/usr/local/bin/zig"; do
+        if [[ -x "$candidate" ]]; then
+            export PATH="$(dirname "$candidate"):$PATH"
+            break
+        fi
+    done
+fi
+
 echo "==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)..."
 if command -v zig >/dev/null 2>&1; then
     zig build test

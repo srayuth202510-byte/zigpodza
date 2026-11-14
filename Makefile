@@ -1,23 +1,23 @@
 .PHONY: help build test test-adv demo e2e check-ci verify ci query path explain graph-update bugs dashboard dashboard-serve debug-test clean
 .DEFAULT_GOAL := help
 
-ZIG ?= zig
+ZIG ?= $(shell command -v zig 2>/dev/null || for p in "$$HOME/.config/Code - OSS/User/globalStorage/ziglang.vscode-zig/zig/x86_64-linux-0.13.0/zig" "$$HOME/.config/Code/User/globalStorage/ziglang.vscode-zig/zig/x86_64-linux-0.13.0/zig" "$$HOME/.local/opt/zig-0.13.0/zig" "$$HOME/.local/bin/zig"; do test -x "$$p" && echo "$$p" && exit 0; done; echo zig)
 PYTHON ?= python3
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 build: ## Build ReleaseSafe binary to zig-out/bin/zigpod
-	$(ZIG) build -Doptimize=ReleaseSafe
+	"$(ZIG)" build -Doptimize=ReleaseSafe
 
 test: ## Run all unit and integration tests
-	$(ZIG) build test
+	"$(ZIG)" build test
 
 test-adv: ## Run security & hardening gates (requires zig)
 	./scripts/security-check.sh --require-zig
 
 demo: ## Run built-in 18-case fail-closed enforcement demo
-	$(ZIG) build run -- demo
+	"$(ZIG)" build run -- demo
 
 e2e: ## Run end-to-end smoke, hardening, and audit-tamper verification
 	sh ./scripts/smoke.sh
@@ -50,7 +50,7 @@ dashboard-serve: ## Serve interactive web bug dashboard on http://127.0.0.1:8765
 	$(PYTHON) ./scripts/bug-dashboard.py serve
 
 debug-test: ## Run Zig test binary directly for detailed diagnostics
-	$(ZIG) test src/main.zig
+	"$(ZIG)" test src/main.zig
 
 verify: test test-adv build demo e2e check-ci graph-update ## Run full local verification suite
 
