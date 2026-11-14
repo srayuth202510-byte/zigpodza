@@ -117,6 +117,10 @@ zigpod ps -a
 # Fetch container logs
 zigpod logs demo-alpine
 
+# Inspect a container or image (state, IP, mounts, hardening limits)
+zigpod inspect demo-alpine
+zigpod inspect alpine:3.20
+
 # Stop and remove a container
 zigpod stop demo-alpine
 zigpod rm -f demo-alpine
@@ -165,6 +169,7 @@ zig build test
 - Host bind-mount policy validator (`validateHostPath`), bind/volume mount classification และ `Mounts` JSON serialization (`src/podman_api.zig`)
 - Port-publishing validator (`validatePortMapping`), `ExposedPorts`/`PortBindings` JSON serialization และ CLI `-p` parsing (`src/cli.zig`, `src/podman_api.zig`)
 - Network/identity/capability validators (`validateNetworkMode`, `validateWorkdir`, `validateUser`, `validateCapability`) และ CLI `--network`/`-w`/`-u`/`--cap-*` parsing (`src/cli.zig`, `src/podman_api.zig`)
+- Container/image inspect (`inspect` → `GET /containers/{id}/json` แล้ว fallback `GET /images/{name}/json`) พร้อม `validateResourceRef()` ป้องกัน request-line injection (`src/podman_api.zig`)
 
 ---
 
@@ -180,6 +185,7 @@ zig build test
   - `podman_api.validateHostPath` (BUG-014) บังคับ **fail-closed host mount policy**: บล็อกการ bind-mount `/`, `/etc`, `/proc`, `/sys`, `/dev`, `/boot`, `/run`, `/var/run`, `/var/lib/docker`, `/var/lib/containers`, `/root` และบังคับ default `:ro` สำหรับ sensitive paths
   - `podman_api.validatePortMapping` (BUG-015) ปฏิเสธพอร์ตนอกช่วง `1..65535`, โปรโตคอลที่ไม่อยู่ใน allow-list (`tcp`/`udp`/`sctp`) และ host address ที่ไม่ใช่ IPv4 literal ก่อนส่งคำขอไปยัง daemon
   - `podman_api.validateNetworkMode` / `validateWorkdir` / `validateUser` / `validateCapability` (BUG-016) จำกัด `--network` เป็น allow-list, บังคับ `--workdir` เป็น absolute traversal-free path, ตรวจรูปแบบ `--user` และปฏิเสธชื่อ capability ที่ไม่ใช่ `ALL`/uppercase ก่อนส่งคำขอไปยัง daemon
+  - `podman_api.validateResourceRef` (BUG-017) จำกัด `inspect` target ให้เป็น image/container reference เท่านั้น (ตัด space, control char, `?`, `#`) เพื่อป้องกัน HTTP request-line injection
 - **Automated Security Check Script**:
 
 ```bash
@@ -247,6 +253,10 @@ zigpod run --rm -m 64m --pids-limit 32 --read-only --no-new-privileges alpine:3.
 - `-u/--user` accepts `USER` or `USER:GROUP`, where each field is alphanumeric plus `_`, `-`, `.` and does not start with `-`/`.`.
 - `--cap-drop`/`--cap-add` accept `ALL` or an uppercase `[A-Z][A-Z0-9_]*` capability name (e.g. `NET_ADMIN`); lowercase names and injection characters are rejected.
 - `createContainer` re-validates all of these (defense in depth) before serializing the request.
+
+#### Inspecting Containers & Images (`inspect`)
+
+`zigpod inspect TARGET` tries `GET /containers/{id}/json` first and falls back to `GET /images/{name}/json` on `404`, printing a stable subset of fields: id, name, image, created, state/exit code, IP address, `WorkingDir`/`User`, `HostConfig` hardening limits (`NetworkMode`, `ReadonlyRootfs`, `Memory`, `PidsLimit`, `AutoRemove`, `CapDrop`/`CapAdd`, `SecurityOpt`), and mounts. `podman_api.validateResourceRef` (BUG-017) accepts image-reference characters (`/`, `:`, `@`) but rejects spaces, control characters, `?`, and `#` so the target cannot alter the HTTP request line.
 
 ### Built-In 14-Case Fail-Closed Self-Test (`zigpod demo`)
 

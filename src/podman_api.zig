@@ -8,6 +8,7 @@ pub const api_prefix = "/v1.40";
 
 pub const ApiError = error{
     PodmanApiError,
+    NotFound,
     InvalidIdentifier,
     InvalidHostPath,
     InvalidMountTarget,
@@ -136,6 +137,66 @@ pub const VersionInfo = struct {
     Arch: []const u8 = "unknown",
 };
 
+/// Subset of `GET /containers/{id}/json` rendered by `zigpod inspect`.
+pub const ContainerInspect = struct {
+    Id: []const u8 = "",
+    Name: []const u8 = "",
+    Image: []const u8 = "",
+    Created: []const u8 = "",
+    State: ?State = null,
+    Config: ?Config = null,
+    HostConfig: ?HostConfigView = null,
+    NetworkSettings: ?NetworkSettings = null,
+    Mounts: ?[]const MountView = null,
+
+    pub const State = struct {
+        Status: []const u8 = "",
+        Running: bool = false,
+        ExitCode: i64 = 0,
+        StartedAt: []const u8 = "",
+        FinishedAt: []const u8 = "",
+    };
+
+    pub const Config = struct {
+        Image: []const u8 = "",
+        WorkingDir: []const u8 = "",
+        User: []const u8 = "",
+    };
+
+    pub const HostConfigView = struct {
+        AutoRemove: bool = false,
+        ReadonlyRootfs: bool = false,
+        Memory: i64 = 0,
+        PidsLimit: i64 = 0,
+        NetworkMode: []const u8 = "",
+        SecurityOpt: ?[]const []const u8 = null,
+        CapAdd: ?[]const []const u8 = null,
+        CapDrop: ?[]const []const u8 = null,
+    };
+
+    pub const NetworkSettings = struct {
+        IPAddress: []const u8 = "",
+        Networks: ?std.json.Value = null,
+    };
+
+    pub const MountView = struct {
+        Type: []const u8 = "",
+        Source: []const u8 = "",
+        Destination: []const u8 = "",
+        RW: bool = false,
+    };
+};
+
+/// Subset of `GET /images/{name}/json` rendered by `zigpod inspect`.
+pub const ImageInspect = struct {
+    Id: []const u8 = "",
+    RepoTags: ?[]const []const u8 = null,
+    Size: i64 = 0,
+    Created: []const u8 = "",
+    Os: []const u8 = "",
+    Architecture: []const u8 = "",
+};
+
 const PullStatusLine = struct {
     status: ?[]const u8 = null,
     id: ?[]const u8 = null,
@@ -149,6 +210,18 @@ pub fn validateIdentifier(id: []const u8) ApiError!void {
     if (std.mem.eql(u8, id, ".") or std.mem.eql(u8, id, "..")) return ApiError.InvalidIdentifier;
     for (id) |c| {
         if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == ':') continue;
+        return ApiError.InvalidIdentifier;
+    }
+}
+
+/// Validates a container/image reference used inside an inspect URL path.
+/// Allows image-reference characters (including `/` and `:`) while rejecting
+/// control chars and URL delimiters that could alter the request line.
+pub fn validateResourceRef(ref: []const u8) ApiError!void {
+    if (ref.len == 0 or ref.len > 256) return ApiError.InvalidIdentifier;
+    if (std.mem.eql(u8, ref, ".") or std.mem.eql(u8, ref, "..")) return ApiError.InvalidIdentifier;
+    for (ref) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == ':' or c == '/' or c == '@') continue;
         return ApiError.InvalidIdentifier;
     }
 }
@@ -630,6 +703,135 @@ pub fn showVersion(client: *const http.Client, logger: *log.Logger, client_versi
     try writer.print("Client: zigpod {s}\n", .{client_version});
     try writer.print("Server: {s} (API {s}, {s}/{s})\n", .{ v.Version, v.ApiVersion, v.Os, v.Arch });
     logger.info("fetched server version {s} (API {s})", .{ v.Version, v.ApiVersion });
+}
+
+/// Inspects a container first, falling back to an image when the container
+/// lookup returns 404. Prints state, IP, mounts, exit code, and hardening.
+pub fn inspect(client: *const http.Client, logger: *log.Logger, target: []const u8, writer: anytype) !void {
+    try validateResourceRef(target);
+
+    const cpath = try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/json", .{ api_prefix, target });
+    defer client.allocator.free(cpath);
+
+    logger.debug("GET {s}", .{cpath});
+    const cresp = try client.request("GET", cpath, null);
+    defer cresp.deinit();
+    if (cresp.ok()) {
+        const parsed = try std.json.parseFromSlice(ContainerInspect, client.allocator, cresp.body, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        try printContainerInspect(writer, parsed.value);
+        logger.info("inspected container {s}", .{target});
+        return;
+    }
+    if (cresp.status != 404) return logApiFailure(logger, "GET", cpath, cresp);
+
+    const ipath = try std.fmt.allocPrint(client.allocator, "{s}/images/{s}/json", .{ api_prefix, target });
+    defer client.allocator.free(ipath);
+
+    logger.debug("GET {s}", .{ipath});
+    const iresp = try client.request("GET", ipath, null);
+    defer iresp.deinit();
+    if (!iresp.ok()) {
+        logger.err("no such container or image: {s}", .{target});
+        return ApiError.NotFound;
+    }
+
+    const parsed = try std.json.parseFromSlice(ImageInspect, client.allocator, iresp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    try printImageInspect(writer, parsed.value);
+    logger.info("inspected image {s}", .{target});
+}
+
+fn printJoined(writer: anytype, label: []const u8, items: []const []const u8) !void {
+    if (items.len == 0) return;
+    try writer.print("{s:<15}", .{label});
+    for (items, 0..) |item, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writer.writeAll(item);
+    }
+    try writer.writeByte('\n');
+}
+
+fn resolveInspectIp(ns: ?ContainerInspect.NetworkSettings) []const u8 {
+    const settings = ns orelse return "";
+    if (settings.IPAddress.len > 0) return settings.IPAddress;
+    const networks = settings.Networks orelse return "";
+    switch (networks) {
+        .object => |obj| {
+            var it = obj.iterator();
+            while (it.next()) |entry| {
+                const value = entry.value_ptr.*;
+                if (value != .object) continue;
+                const ip = value.object.get("IPAddress") orelse continue;
+                if (ip == .string and ip.string.len > 0) return ip.string;
+            }
+        },
+        else => {},
+    }
+    return "";
+}
+
+fn printContainerInspect(writer: anytype, c: ContainerInspect) !void {
+    try writer.print("{s:<15}{s}\n", .{ "Id:", c.Id });
+    if (c.Name.len > 0) try writer.print("{s:<15}{s}\n", .{ "Name:", std.mem.trimLeft(u8, c.Name, "/") });
+    if (c.Image.len > 0) try writer.print("{s:<15}{s}\n", .{ "Image:", c.Image });
+    if (c.Created.len > 0) try writer.print("{s:<15}{s}\n", .{ "Created:", c.Created });
+
+    if (c.State) |state| {
+        try writer.print("{s:<15}{s} (running={}, exit={d})\n", .{ "State:", state.Status, state.Running, state.ExitCode });
+        if (state.StartedAt.len > 0) try writer.print("{s:<15}{s}\n", .{ "StartedAt:", state.StartedAt });
+        if (state.FinishedAt.len > 0) try writer.print("{s:<15}{s}\n", .{ "FinishedAt:", state.FinishedAt });
+    }
+
+    const ip = resolveInspectIp(c.NetworkSettings);
+    if (ip.len > 0) try writer.print("{s:<15}{s}\n", .{ "IPAddress:", ip });
+
+    if (c.Config) |cfg| {
+        if (cfg.WorkingDir.len > 0) try writer.print("{s:<15}{s}\n", .{ "WorkingDir:", cfg.WorkingDir });
+        if (cfg.User.len > 0) try writer.print("{s:<15}{s}\n", .{ "User:", cfg.User });
+    }
+
+    if (c.HostConfig) |hc| {
+        if (hc.NetworkMode.len > 0) try writer.print("{s:<15}{s}\n", .{ "NetworkMode:", hc.NetworkMode });
+        try writer.print("{s:<15}{}\n", .{ "ReadonlyRootfs:", hc.ReadonlyRootfs });
+        if (hc.Memory != 0) try writer.print("{s:<15}{d}\n", .{ "Memory:", hc.Memory });
+        if (hc.PidsLimit != 0) try writer.print("{s:<15}{d}\n", .{ "PidsLimit:", hc.PidsLimit });
+        if (hc.AutoRemove) try writer.print("{s:<15}{}\n", .{ "AutoRemove:", hc.AutoRemove });
+        if (hc.CapDrop) |caps| try printJoined(writer, "CapDrop:", caps);
+        if (hc.CapAdd) |caps| try printJoined(writer, "CapAdd:", caps);
+        if (hc.SecurityOpt) |opts| try printJoined(writer, "SecurityOpt:", opts);
+    }
+
+    if (c.Mounts) |mounts| {
+        if (mounts.len > 0) {
+            try writer.writeAll("Mounts:\n");
+            for (mounts) |m| {
+                try writer.print("  {s} -> {s} ({s}, {s})\n", .{
+                    m.Source,
+                    m.Destination,
+                    m.Type,
+                    if (m.RW) "rw" else "ro",
+                });
+            }
+        }
+    }
+}
+
+fn printImageInspect(writer: anytype, img: ImageInspect) !void {
+    try writer.print("{s:<15}{s}\n", .{ "Id:", img.Id });
+    if (img.RepoTags) |tags| try printJoined(writer, "RepoTags:", tags);
+    if (img.Size > 0) {
+        var size_buf: [32]u8 = undefined;
+        try writer.print("{s:<15}{s}\n", .{ "Size:", utils.formatSize(&size_buf, img.Size) });
+    }
+    if (img.Created.len > 0) try writer.print("{s:<15}{s}\n", .{ "Created:", img.Created });
+    if (img.Os.len > 0 or img.Architecture.len > 0) {
+        try writer.print("{s:<15}{s}/{s}\n", .{ "Os/Arch:", img.Os, img.Architecture });
+    }
 }
 
 /// Demultiplexes Docker/Podman attached log frames ([stream_type, 0, 0, 0, size_be32][payload...]).
@@ -1199,6 +1401,98 @@ test "listContainers over mock Unix socket" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "abcdef123456") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "alpine:3.20") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "web") != null);
+}
+
+test "validateResourceRef accepts image refs and rejects injection" {
+    try validateResourceRef("alpine:3.20");
+    try validateResourceRef("docker.io/library/alpine:3.20");
+    try validateResourceRef("sha256:abc123");
+    try validateResourceRef("web");
+    try std.testing.expectError(ApiError.InvalidIdentifier, validateResourceRef(""));
+    try std.testing.expectError(ApiError.InvalidIdentifier, validateResourceRef(".."));
+    try std.testing.expectError(ApiError.InvalidIdentifier, validateResourceRef("a b"));
+    try std.testing.expectError(ApiError.InvalidIdentifier, validateResourceRef("a?b"));
+    try std.testing.expectError(ApiError.InvalidIdentifier, validateResourceRef("a\nb"));
+}
+
+test "inspect renders container state, network, mounts, and hardening" {
+    const alloc = std.testing.allocator;
+    const json =
+        \\{"Id":"abc123","Name":"/web","Image":"alpine:3.20","Created":"2026-01-01T00:00:00Z",
+        \\"State":{"Status":"running","Running":true,"ExitCode":0,"StartedAt":"2026-01-01T00:00:01Z","FinishedAt":""},
+        \\"Config":{"WorkingDir":"/work","User":"1000:1000"},
+        \\"HostConfig":{"Memory":67108864,"PidsLimit":32,"ReadonlyRootfs":true,"NetworkMode":"none","CapDrop":["ALL"],"CapAdd":["NET_BIND_SERVICE"],"SecurityOpt":["no-new-privileges"],"AutoRemove":true},
+        \\"NetworkSettings":{"IPAddress":"","Networks":{"podman":{"IPAddress":"10.88.0.2"}}},
+        \\"Mounts":[{"Type":"bind","Source":"/srv/data","Destination":"/data","RW":false}]}
+    ;
+    const parsed = try std.json.parseFromSlice(ContainerInspect, alloc, json, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+    try printContainerInspect(out.writer(), parsed.value);
+
+    const s = out.items;
+    try std.testing.expect(std.mem.indexOf(u8, s, "running (running=true, exit=0)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "10.88.0.2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "1000:1000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "NetworkMode:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "CapDrop:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "ALL") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "/srv/data -> /data (bind, ro)") != null);
+}
+
+test "inspect falls back from container to image over mock Unix socket" {
+    const sock_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "/tmp/zp-api-inspect-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer std.testing.allocator.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const image_json = "{\"Id\":\"sha256:deadbeef\",\"RepoTags\":[\"alpine:3.20\"],\"Size\":7700000,\"Os\":\"linux\",\"Architecture\":\"amd64\"}";
+    const image_resp = std.fmt.comptimePrint(
+        "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}",
+        .{ image_json.len, image_json },
+    );
+
+    const replies = [_]ScriptedReply{
+        .{
+            .expected_prefix = "GET /v1.40/containers/alpine:3.20/json HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 404 Not Found\r\nContent-Length: 21\r\n\r\n{\"message\":\"no such\"}",
+        },
+        .{
+            .expected_prefix = "GET /v1.40/images/alpine:3.20/json HTTP/1.1\r\n",
+            .raw_response = image_resp,
+        },
+    };
+
+    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{
+        .allocator = std.testing.allocator,
+        .socket_path = sock_path,
+    };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8).init(std.testing.allocator);
+    defer out.deinit();
+    try inspect(&client, &logger, "alpine:3.20", out.writer());
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(@as(usize, 2), ctx.matched);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "sha256:deadbeef") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "alpine:3.20") != null);
 }
 
 test "ContainerCreateRequest serializes hardening HostConfig fields" {

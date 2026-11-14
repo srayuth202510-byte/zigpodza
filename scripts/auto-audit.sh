@@ -100,6 +100,13 @@ else
     fail "Missing validateNetworkMode()/validateCapability() identity policy in src/podman_api.zig (see BUG-016)."
 fi
 
+# 5e. Require the inspect resource-reference guard (BUG-017)
+if has_match "pub fn validateResourceRef\(" "src/podman_api.zig" && has_match "try validateResourceRef\(" "src/podman_api.zig"; then
+    pass "validateResourceRef() inspect path guard enforced in src/podman_api.zig."
+else
+    fail "Missing validateResourceRef() inspect path guard in src/podman_api.zig (see BUG-017)."
+fi
+
 # 6. Require checked arithmetic in parsers & decoders
 if has_match "std\.math\.add" "src/http.zig" && has_match "std\.math\.add" "src/podman_api.zig" && has_match "std\.math\.mul" "src/cli.zig"; then
     pass "Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser."

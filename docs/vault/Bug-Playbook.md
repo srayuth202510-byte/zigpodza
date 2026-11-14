@@ -191,3 +191,13 @@ status: active
   - `createContainer` re-validate `NetworkMode`/`WorkingDir`/`User`/`CapDrop`/`CapAdd` แบบ defense-in-depth ก่อน stringify JSON
   - เพิ่มเทส DENY ครบ (network bogus, workdir relative/traversal, user ผิดรูปแบบ, capability lowercase) และ smoke E2E ตรวจว่า `--network bogus` ถูกปฏิเสธก่อนถึง daemon
 - **Prevention Rule**: ทุก flag ที่มีผลต่อ **network namespace, filesystem view, หรือ privilege model** ต้องผ่าน validator แบบ allow-list/รูปแบบปิด และตรวจซ้ำในชั้น API ก่อน serialize — ห้าม serialize ค่าดิบลง request
+
+## BUG-017: Inspect Target Not Validated Before URL Path Assembly `#bug-pattern` `#security-gate`
+
+- **Symptom**: `zigpod inspect TARGET` ต่อ `/containers/{target}/json` หรือ `/images/{target}/json` โดยตรง หาก TARGET มี space, control char, `?`, หรือ `#` จะทำให้ HTTP request line เสียหาย (เปลี่ยน query string หรือทำให้เซิร์ฟเวอร์ตีความ path ผิด) และหากตัดสินใจ fallback ระหว่าง container/image แบบไม่ตรวจ path อาจเปิดช่องโหว่ path traversal คล้าย BUG-005 บน endpoint ใหม่
+- **Root Cause**: เดิม CLI ไม่มี subcommand `inspect` จึงไม่มีจุดตรวจ; image reference มีอักขระ `/`, `:`, `@` ตามปกติ แต่ก็ยังต้องตัดอักขระที่สามารถเปลี่ยนโครงสร้าง HTTP request line ออกไป
+- **Fix**:
+  - เพิ่ม `podman_api.validateResourceRef()` ใน [src/podman_api.zig](../../src/podman_api.zig): อนุญาต alphanumeric, `-`, `_`, `.`, `:`, `/`, `@` และยาว 1..256; ปฏิเสธ `.`/`..` และ space/control char/`?`/`#`
+  - `inspect()` ตรวจ target ก่อน แล้วลอง `GET /containers/{target}/json` ก่อน ถ้าได้ 404 ค่อย fallback `GET /images/{target}/json`; ถ้าทั้งคู่ไม่พบ → `ApiError.NotFound`
+  - เพิ่มเทส DENY (space, `?`, newline, `..`) และเทส container/image rendering; smoke E2E เรียก `inspect` ผ่าน mock socket
+- **Prevention Rule**: ทุก string ที่ถูกแทรกเป็น **URL path segment** (container id, image name, อนาคต `network`/`volume` name) ต้องผ่าน validator ที่อนุญาตเฉพาะอักขระที่ใช้ได้จริง และตัด URL delimiter (`?`, `#`) รวมถึง control char เสมอ

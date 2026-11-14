@@ -30,6 +30,7 @@ pub const usage =
     \\  stop CONTAINER                 Stop a running container
     \\  rm [-f] CONTAINER              Remove a container (-f: force)
     \\  logs CONTAINER                 Print a container's logs
+    \\  inspect TARGET                 Show container or image details (state, IP, mounts, limits)
     \\  audit [FILE]                   Verify SHA-256 hash chain of audit.log
     \\  demo                           Run 14-case fail-closed ALLOW/DENY self-test suite
     \\  version                        Show client and server versions
@@ -106,6 +107,7 @@ pub const Command = union(enum) {
     stop: []const u8,
     rm: RmOpts,
     logs: []const u8,
+    inspect: []const u8,
 };
 
 pub const Parsed = struct {
@@ -199,6 +201,8 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
         try parseRm(rest)
     else if (eql(name, "logs"))
         .{ .logs = try single(rest) }
+    else if (eql(name, "inspect"))
+        .{ .inspect = try single(rest) }
     else if (eql(name, "audit"))
         try parseAudit(rest)
     else if (eql(name, "demo"))
@@ -552,6 +556,7 @@ test "simple commands" {
     try std.testing.expectEqualStrings("alpine", (try testParse(&.{ "pull", "alpine" })).command.pull);
     try std.testing.expectEqualStrings("web", (try testParse(&.{ "stop", "web" })).command.stop);
     try std.testing.expectEqualStrings("web", (try testParse(&.{ "logs", "web" })).command.logs);
+    try std.testing.expectEqualStrings("alpine:3.20", (try testParse(&.{ "inspect", "alpine:3.20" })).command.inspect);
     const rm_plain = (try testParse(&.{ "rm", "abc" })).command.rm;
     try std.testing.expect(!rm_plain.force);
     try std.testing.expectEqualStrings("abc", rm_plain.container);
@@ -578,6 +583,9 @@ test "parse errors" {
     try std.testing.expectError(error.TooManyArguments, testParse(&.{ "stop", "a", "b" }));
     try std.testing.expectError(error.MissingArgument, testParse(&.{"logs"}));
     try std.testing.expectError(error.TooManyArguments, testParse(&.{ "logs", "a", "b" }));
+    try std.testing.expectError(error.MissingArgument, testParse(&.{"inspect"}));
+    try std.testing.expectError(error.UnknownFlag, testParse(&.{ "inspect", "--bad" }));
+    try std.testing.expectError(error.TooManyArguments, testParse(&.{ "inspect", "a", "b" }));
     try std.testing.expectError(error.TooManyArguments, testParse(&.{ "images", "extra" }));
     try std.testing.expectError(error.UnknownFlag, testParse(&.{ "images", "--all" }));
     try std.testing.expectError(error.TooManyArguments, testParse(&.{ "version", "extra" }));

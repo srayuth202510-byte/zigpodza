@@ -93,9 +93,9 @@ def reply(conn, status, body=b""):
     hdr = f"HTTP/1.1 {status}\r\nContent-Length: {len(body)}\r\n\r\n".encode("ascii")
     conn.sendall(hdr + body)
 
-# Expect 6 requests: create, start, wait, logs, delete (--rm), ps -a
+# Expect 7 requests: create, start, wait, logs, delete (--rm), ps -a, inspect
 with open(req_path, "wb") as out:
-    for step in range(6):
+    for step in range(7):
         conn, _ = srv.accept()
         try:
             req = read_req(conn)
@@ -113,6 +113,8 @@ with open(req_path, "wb") as out:
                 reply(conn, "204 No Content")
             elif b"/containers/json" in req:
                 reply(conn, "200 OK", b'[{"Id":"smoke1234567890ab","Image":"alpine:3.20","Status":"Up","Names":["/smoke"]}]')
+            elif b"/json" in req and b"/containers/" in req:
+                reply(conn, "200 OK", b'{"Id":"smoke1234567890ab","Name":"/smoke","Image":"alpine:3.20","State":{"Status":"exited","Running":false,"ExitCode":0},"Config":{"WorkingDir":"/work","User":"1000:1000"},"HostConfig":{"Memory":67108864,"PidsLimit":32,"ReadonlyRootfs":true,"NetworkMode":"none","CapDrop":["ALL"],"CapAdd":["NET_BIND_SERVICE"]},"NetworkSettings":{"IPAddress":"10.88.0.2"},"Mounts":[{"Type":"bind","Source":"/srv/data","Destination":"/data","RW":false}]}')
             else:
                 reply(conn, "404 Not Found", b'{"message":"unexpected"}')
         finally:
@@ -146,6 +148,11 @@ grep -q '"CapAdd":\["NET_BIND_SERVICE"\]' "$REQ_LOG"
 
 PS_OUT=$("$BIN" --socket "$SOCK" ps -a)
 echo "$PS_OUT" | grep -q "smoke1234567"
+
+INSPECT_OUT=$("$BIN" --socket "$SOCK" inspect smoke1234567890ab)
+echo "$INSPECT_OUT" | grep -q "10.88.0.2"
+echo "$INSPECT_OUT" | grep -q "NetworkMode:"
+echo "$INSPECT_OUT" | grep -q "/srv/data -> /data (bind, ro)"
 
 # Adversarial input must fail closed before reaching daemon.
 if "$BIN" --socket "$SOCK" rm ../evil >/dev/null 2>&1; then

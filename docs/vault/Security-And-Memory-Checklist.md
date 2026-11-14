@@ -39,6 +39,7 @@ status: active
 - [ ] Container mount target ผ่าน `validateContainerPath()` (absolute, traversal-free) และ `createContainer` re-validate `Mounts` แบบ defense-in-depth
 - [ ] Published ports (`-p`) ผ่าน `podman_api.makePortMapping()` → `validatePortMapping()` (fail-closed: port `1..65535`, proto `tcp`/`udp`/`sctp`, host address ต้องเป็น IPv4 literal) และ `createContainer` re-validate `ExposedPorts` แบบ defense-in-depth (BUG-015)
 - [ ] Network/identity/capabilities (`--network`, `-w`, `-u`, `--cap-drop`/`--cap-add`) ผ่าน `validateNetworkMode()` (allow-list `none`/`bridge`/`host`/`pasta`/`slirp4netns`), `validateWorkdir()` (absolute traversal-free), `validateUser()` (`USER[:GROUP]`) และ `validateCapability()` (`ALL`/uppercase) และ `createContainer` re-validate แบบ defense-in-depth (BUG-016)
+- [ ] `inspect TARGET` ผ่าน `validateResourceRef()` ก่อนประกอบ URL path ตัด space/control char/`?`/`#` เพื่อกัน request-line injection (BUG-017)
 - [ ] Lifecycle `run` มี best-effort cleanup: start fail → force-remove; `--rm` + fetchLogs fail → remove (BUG-012)
 
 ## 3. Logging, Tamper Evidence & Operations

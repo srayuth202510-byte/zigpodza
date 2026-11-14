@@ -19,9 +19,9 @@ status: active
 
 | Metric | Value |
 | :--- | :--- |
-| Tracked Bug Patterns | **16** (16 Guarded) |
+| Tracked Bug Patterns | **17** (17 Guarded) |
 | Zig Source Modules | **8** |
-| Unit & Integration Tests | **57** |
+| Unit & Integration Tests | **60** |
 | Static Security & Memory Gates | **9/9 PASS** |
 
 ## Guard Coverage Map
@@ -68,6 +68,8 @@ flowchart LR
     BUG016["BUG-016"] --> SEC["[[Security-And-Memory-Checklist]]"]
     BUG016 --> src_podman_api_zig["src/podman_api.zig"]
     BUG016 --> src_cli_zig["src/cli.zig"]
+    BUG017["BUG-017"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG017 --> src_podman_api_zig["src/podman_api.zig"]
 ```
 
 ## Bug Pattern Registry
@@ -90,18 +92,19 @@ flowchart LR
 | [BUG-014](../../docs/vault/Bug-Playbook.md#L159) | Host Bind Mount Without a Fail-Closed Path Policy | `#bug-pattern` `#security-gate` | [podman_api.zig](../../src/podman_api.zig) | **Guarded** |
 | [BUG-015](../../docs/vault/Bug-Playbook.md#L171) | Port Publishing Without a Fail-Closed Port Policy | `#bug-pattern` `#security-gate` | [podman_api.zig](../../src/podman_api.zig), [cli.zig](../../src/cli.zig) | **Guarded** |
 | [BUG-016](../../docs/vault/Bug-Playbook.md#L183) | Unvalidated Network/Identity/Capability Flags | `#bug-pattern` `#security-gate` | [podman_api.zig](../../src/podman_api.zig), [cli.zig](../../src/cli.zig) | **Guarded** |
+| [BUG-017](../../docs/vault/Bug-Playbook.md#L195) | Inspect Target Not Validated Before URL Path Assembly | `#bug-pattern` `#security-gate` | [podman_api.zig](../../src/podman_api.zig) | **Guarded** |
 
 ## Module Test & Allocator Coverage
 
 | Module | Lines | Public Decls | Unit Tests | Memory Gate |
 | :--- | ---: | ---: | ---: | :--- |
-| [cli.zig](../../src/cli.zig) | 824 | 13 | 14 | `std.testing.allocator` |
+| [cli.zig](../../src/cli.zig) | 832 | 13 | 14 | `std.testing.allocator` |
 | [config.zig](../../src/config.zig) | 118 | 4 | 4 | `std.testing.allocator` |
 | [demo.zig](../../src/demo.zig) | 379 | 1 | 1 | `std.testing.allocator` |
 | [http.zig](../../src/http.zig) | 476 | 12 | 11 | `std.testing.allocator` |
 | [log.zig](../../src/log.zig) | 465 | 16 | 7 | `std.testing.allocator` |
-| [main.zig](../../src/main.zig) | 307 | 2 | 0 | `gpa.deinit() != .leak` |
-| [podman_api.zig](../../src/podman_api.zig) | 1223 | 37 | 18 | `std.testing.allocator` |
+| [main.zig](../../src/main.zig) | 311 | 2 | 0 | `gpa.deinit() != .leak` |
+| [podman_api.zig](../../src/podman_api.zig) | 1517 | 46 | 21 | `std.testing.allocator` |
 | [utils.zig](../../src/utils.zig) | 42 | 3 | 2 | `stack-only (no heap)` |
 
 ## Static Security & Memory Gates
@@ -231,3 +234,10 @@ flowchart LR
 - **Root Cause**: เดิม CLI ไม่รองรับ flag เหล่านี้ จึงไม่มีจุดตรวจ; การเพิ่มฟิลด์ identity/network โดยไม่มี policy จะเปิดช่องโหว่คลาสเดียวกับ BUG-005/014/015 แต่เป็นฝั่ง network namespace และ privilege model
 - **Fix**: เพิ่ม `podman_api.validateNetworkMode()` (allow-list `none`/`bridge`/`host`/`pasta`/`slirp4netns`), `validateWorkdir()` (ใช้ path policy เดียวกับ container mount target), `validateUser()` (`USER[:GROUP]` รูปแบบจำกัด), และ `validateCapability()` (`ALL` หรือ uppercase `[A-Z][A-Z0-9_]*`) ใน `src/podman_api.zig`; `src/cli.zig` parse และตรวจรูปแบบเบื้องต้นของ `--network`, `-w`/`--workdir`, `-u`/`--user`, `--cap-drop`/`--cap-add` (รองรับ `--flag=` และ `--flag value`, repeatable สำหรับ capability) แล้วคืน `InvalidValue` เมื่อผิด; `main.zig` เรียก validator ก่อนสร้าง `HostConfig`/`ContainerCreateRequest` และ map error เป็นข้อความ `reportFailure`; `createContainer` re-validate `NetworkMode`/`WorkingDir`/`User`/`CapDrop`/`CapAdd` แบบ defense-in-depth ก่อน stringify JSON; เพิ่มเทส DENY ครบ (network bogus, workdir relative/traversal, user ผิดรูปแบบ, capability lowercase) และ smoke E2E ตรวจว่า `--network bogus` ถูกปฏิเสธก่อนถึง daemon
 - **Prevention**: ทุก flag ที่มีผลต่อ **network namespace, filesystem view, หรือ privilege model** ต้องผ่าน validator แบบ allow-list/รูปแบบปิด และตรวจซ้ำในชั้น API ก่อน serialize — ห้าม serialize ค่าดิบลง request
+
+### BUG-017 — Inspect Target Not Validated Before URL Path Assembly
+- **Source**: [docs/vault/Bug-Playbook.md:195](../../docs/vault/Bug-Playbook.md#L195) · **Status**: `Guarded`
+- **Symptom**: `zigpod inspect TARGET` ต่อ `/containers/{target}/json` หรือ `/images/{target}/json` โดยตรง หาก TARGET มี space, control char, `?`, หรือ `#` จะทำให้ HTTP request line เสียหาย (เปลี่ยน query string หรือทำให้เซิร์ฟเวอร์ตีความ path ผิด) และหากตัดสินใจ fallback ระหว่าง container/image แบบไม่ตรวจ path อาจเปิดช่องโหว่ path traversal คล้าย BUG-005 บน endpoint ใหม่
+- **Root Cause**: เดิม CLI ไม่มี subcommand `inspect` จึงไม่มีจุดตรวจ; image reference มีอักขระ `/`, `:`, `@` ตามปกติ แต่ก็ยังต้องตัดอักขระที่สามารถเปลี่ยนโครงสร้าง HTTP request line ออกไป
+- **Fix**: เพิ่ม `podman_api.validateResourceRef()` ใน `src/podman_api.zig`: อนุญาต alphanumeric, `-`, `_`, `.`, `:`, `/`, `@` และยาว 1..256; ปฏิเสธ `.`/`..` และ space/control char/`?`/`#`; `inspect()` ตรวจ target ก่อน แล้วลอง `GET /containers/{target}/json` ก่อน ถ้าได้ 404 ค่อย fallback `GET /images/{target}/json`; ถ้าทั้งคู่ไม่พบ → `ApiError.NotFound`; เพิ่มเทส DENY (space, `?`, newline, `..`) และเทส container/image rendering; smoke E2E เรียก `inspect` ผ่าน mock socket
+- **Prevention**: ทุก string ที่ถูกแทรกเป็น **URL path segment** (container id, image name, อนาคต `network`/`volume` name) ต้องผ่าน validator ที่อนุญาตเฉพาะอักขระที่ใช้ได้จริง และตัด URL delimiter (`?`, `#`) รวมถึง control char เสมอ

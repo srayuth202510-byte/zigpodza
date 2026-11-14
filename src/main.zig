@@ -133,6 +133,7 @@ fn dispatch(
         .stop => |container| try pod.stopContainer(client, logger, container),
         .rm => |opts| try pod.removeContainer(client, logger, opts.container, opts.force),
         .logs => |container| try pod.fetchLogs(client, logger, container, stdout),
+        .inspect => |target| try pod.inspect(client, logger, target, stdout),
         .version => try pod.showVersion(client, logger, version, stdout),
         .run => |r| {
             // Validate and classify each -v mount (bind vs named volume).
@@ -290,6 +291,9 @@ fn reportFailure(logger: *log.Logger, cmd: cli.Command, socket_path: []const u8,
         ),
         pod.ApiError.PodmanApiError => {
             // Already logged with HTTP status and response details by podman_api.
+        },
+        pod.ApiError.NotFound => {
+            // Already logged with the target name by podman_api.inspect.
         },
         else => logger.err("command '{s}' failed: {s}", .{ @tagName(cmd), @errorName(err) }),
     }
