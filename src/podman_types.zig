@@ -406,3 +406,401 @@ pub const ImageHistoryItem = struct {
 pub const CommitResponse = struct {
     Id: []const u8 = "",
 };
+
+// ---------------------------------------------------------------- tests
+
+test "TmpfsBounds serializes via std.json.stringifyAlloc" {
+    const alloc = std.testing.allocator;
+    const t = TmpfsBounds{ .tmp_options = "rw,noexec,nosuid,nodev,size=67108864" };
+    const json = try std.json.stringifyAlloc(alloc, t, .{});
+    defer alloc.free(json);
+    try std.testing.expectEqualSlices(u8, "{\"/tmp\":\"rw,noexec,nosuid,nodev,size=67108864\"}", json);
+}
+
+test "ExposedPorts serializes via std.json.stringifyAlloc" {
+    const alloc = std.testing.allocator;
+    const ports = [_]PortMapping{
+        .{ .container_port = 80, .proto = "tcp" },
+        .{ .container_port = 53, .proto = "udp" },
+    };
+    const ep = ExposedPorts{ .ports = &ports };
+    const json = try std.json.stringifyAlloc(alloc, ep, .{});
+    defer alloc.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "{\"80/tcp\":{},\"53/udp\":{}}") != null);
+}
+
+test "PortBindings serializes via std.json.stringifyAlloc and skips entries without host port" {
+    const alloc = std.testing.allocator;
+    const ports = [_]PortMapping{
+        .{ .container_port = 3000 }, // no host port -> skipped
+        .{ .host_ip = "127.0.0.1", .host_port = 9000, .container_port = 9000, .proto = "tcp" },
+    };
+    const pb = PortBindings{ .ports = &ports };
+    const json = try std.json.stringifyAlloc(alloc, pb, .{});
+    defer alloc.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "{\"9000/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"9000\"}]}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "3000") == null);
+}
+
+test "ContainerCreateRequest serializes with omit-null optionals" {
+    const alloc = std.testing.allocator;
+    const req = ContainerCreateRequest{ .Image = "alpine:3.20" };
+    const json = try std.json.stringifyAlloc(alloc, req, .{ .emit_null_optional_fields = false });
+    defer alloc.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Image\":\"alpine:3.20\"") != null);
+    // Null optionals are omitted entirely when emit_null_optional_fields is false.
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Mounts\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"HostConfig\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"ExposedPorts\"") == null);
+}
+
+test "ContainerCreateRequest serializes full HostConfig with all fields" {
+    const alloc = std.testing.allocator;
+    const cap_drop = [_][]const u8{ "ALL" };
+    const cap_add = [_][]const u8{ "NET_ADMIN" };
+    const sec_opt = [_][]const u8{ "no-new-privileges" };
+    const mounts = [_]Mount{
+        .{ .Type = "bind", .Source = "/srv/data", .Target = "/data", .ReadOnly = true },
+    };
+    const ports = [_]PortMapping{
+        .{ .host_port = 8080, .container_port = 80, .proto = "tcp" },
+    };
+    const req = ContainerCreateRequest{
+        .Image = "alpine:3.20",
+        .Cmd = &.{ "sh" },
+        .Env = &.{ "A=1" },
+        .ExposedPorts = .{ .ports = &ports },
+        .WorkingDir = "/work",
+        .User = "1000:1000",
+        .AttachStdin = true,
+        .AttachStdout = true,
+        .AttachStderr = true,
+        .OpenStdin = true,
+        .Tty = false,
+        .Mounts = &mounts,
+        .HostConfig = .{
+            .AutoRemove = true,
+            .ReadonlyRootfs = true,
+            .Memory = 67_108_864,
+            .PidsLimit = 32,
+            .SecurityOpt = &sec_opt,
+            .PortBindings = .{ .ports = &ports },
+            .NetworkMode = "none",
+            .CapDrop = &cap_drop,
+            .CapAdd = &cap_add,
+            .Tmpfs = .{ .tmp_options = "rw,noexec,nosuid,nodev,size=67108864" },
+        },
+    };
+    const json = try std.json.stringifyAlloc(alloc, req, .{ .emit_null_optional_fields = false });
+    defer alloc.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Image\":\"alpine:3.20\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"ReadonlyRootfs\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Memory\":67108864") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"PidsLimit\":32") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"SecurityOpt\":[\"no-new-privileges\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"NetworkMode\":\"none\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"CapDrop\":[\"ALL\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"CapAdd\":[\"NET_ADMIN\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Tmpfs\":{\"/tmp\":\"rw,noexec,nosuid,nodev,size=67108864\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Mounts\":[{\"Type\":\"bind\",\"Source\":\"/srv/data\",\"Target\":\"/data\",\"ReadOnly\":true}]") != null);
+}
+
+test "Mount struct field defaults and serialization" {
+    const alloc = std.testing.allocator;
+    const m = Mount{ .Type = "volume", .Source = "myvol", .Target = "/vol", .ReadOnly = false };
+    const json = try std.json.stringifyAlloc(alloc, m, .{ .emit_null_optional_fields = false });
+    defer alloc.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Type\":\"volume\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Source\":\"myvol\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Target\":\"/vol\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"ReadOnly\":false") != null);
+}
+
+test "HostConfig default values are zero/false/null" {
+    const hc = HostConfig{};
+    try std.testing.expect(hc.AutoRemove == false);
+    try std.testing.expect(hc.ReadonlyRootfs == false);
+    try std.testing.expect(hc.Memory == null);
+    try std.testing.expect(hc.PidsLimit == null);
+    try std.testing.expect(hc.SecurityOpt == null);
+    try std.testing.expect(hc.PortBindings == null);
+    try std.testing.expect(hc.NetworkMode == null);
+    try std.testing.expect(hc.CapDrop == null);
+    try std.testing.expect(hc.CapAdd == null);
+    try std.testing.expect(hc.Tmpfs == null);
+}
+
+test "ContainerSummary default values" {
+    const cs = ContainerSummary{ .Id = "" };
+    try std.testing.expectEqualStrings("", cs.Id);
+    try std.testing.expectEqualStrings("", cs.Image);
+    try std.testing.expectEqualStrings("", cs.Command);
+    try std.testing.expectEqualStrings("", cs.Status);
+    try std.testing.expectEqualStrings("", cs.State);
+    try std.testing.expect(cs.Names == null);
+}
+
+test "ImageSummary default values" {
+    const is_ = ImageSummary{ .Id = "" };
+    try std.testing.expectEqualStrings("", is_.Id);
+    try std.testing.expect(is_.RepoTags == null);
+    try std.testing.expectEqual(@as(i64, 0), is_.Size);
+    try std.testing.expectEqual(@as(i64, 0), is_.Created);
+}
+
+test "WaitResponse default and parsed status code" {
+    const alloc = std.testing.allocator;
+    const wr = WaitResponse{ .StatusCode = 0 };
+    try std.testing.expectEqual(@as(i64, 0), wr.StatusCode);
+
+    const parsed = try std.json.parseFromSlice(WaitResponse, alloc, "{\"StatusCode\":137}", .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(i64, 137), parsed.value.StatusCode);
+}
+
+test "VersionInfo default values" {
+    const v = VersionInfo{};
+    try std.testing.expectEqualStrings("unknown", v.Version);
+    try std.testing.expectEqualStrings("unknown", v.ApiVersion);
+    try std.testing.expectEqualStrings("unknown", v.Os);
+    try std.testing.expectEqualStrings("unknown", v.Arch);
+}
+
+test "ExecCreateRequest default values" {
+    const e = ExecCreateRequest{ .Cmd = &.{ "ls" } };
+    try std.testing.expect(e.AttachStdin == false);
+    try std.testing.expect(e.AttachStdout == true);
+    try std.testing.expect(e.AttachStderr == true);
+    try std.testing.expect(e.Tty == false);
+    try std.testing.expectEqualStrings("ls", e.Cmd[0]);
+    try std.testing.expect(e.Env == null);
+    try std.testing.expect(e.WorkingDir == null);
+    try std.testing.expect(e.User == null);
+}
+
+test "ExecCreateResponse default values" {
+    const e = ExecCreateResponse{};
+    try std.testing.expectEqualStrings("", e.Id);
+    try std.testing.expect(e.Warnings == null);
+}
+
+test "ExecInspect default values" {
+    const e = ExecInspect{};
+    try std.testing.expect(e.Running == false);
+    try std.testing.expectEqual(@as(i64, 0), e.ExitCode);
+}
+
+test "PullStatusLine default values and error field" {
+    const ps = PullStatusLine{};
+    try std.testing.expect(ps.status == null);
+    try std.testing.expect(ps.id == null);
+    try std.testing.expect(ps.@"error" == null);
+
+    const alloc = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(PullStatusLine, alloc, "{\"status\":\"Pulling\",\"id\":\"layer1\"}", .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("Pulling", parsed.value.status.?);
+    try std.testing.expectEqualStrings("layer1", parsed.value.id.?);
+    try std.testing.expect(parsed.value.@"error" == null);
+
+    const parsed_err = try std.json.parseFromSlice(PullStatusLine, alloc, "{\"error\":\"network timeout\"}", .{ .ignore_unknown_fields = true });
+    defer parsed_err.deinit();
+    try std.testing.expectEqualStrings("network timeout", parsed_err.value.@"error".?);
+}
+
+test "ContainerStats nested defaults and zero stats" {
+    const alloc = std.testing.allocator;
+    const s = ContainerStats{};
+    try std.testing.expectEqualStrings("", s.id);
+    try std.testing.expectEqualStrings("", s.name);
+    try std.testing.expect(s.cpu_stats == null);
+    try std.testing.expect(s.memory_stats == null);
+    try std.testing.expect(s.pids_stats == null);
+
+    // All-zero stats must not panic.
+    const zero = ContainerStats{
+        .cpu_stats = .{
+            .cpu_usage = .{ .total_usage = 0 },
+            .system_cpu_usage = 0,
+            .online_cpus = 0,
+        },
+        .precpu_stats = .{
+            .cpu_usage = .{ .total_usage = 0 },
+            .system_cpu_usage = 0,
+        },
+        .memory_stats = .{ .usage = 0, .limit = 0, .stats = null },
+        .pids_stats = .{ .current = 0 },
+    };
+    // cpu: cur_total <= pre_total => 0.0
+    // mem: limit == 0 => 0.0
+    try std.testing.expectEqual(@as(f64, 0.0), @import("podman_logs.zig").computeCpuPercent(zero));
+    const mem = @import("podman_logs.zig").computeMemoryUsage(zero.memory_stats);
+    try std.testing.expectEqual(@as(u64, 0), mem.used);
+    try std.testing.expectEqual(@as(u64, 0), mem.limit);
+    try std.testing.expectEqual(@as(f64, 0.0), mem.percent);
+    _ = alloc;
+}
+
+test "ContainerTop default values" {
+    const ct = ContainerTop{};
+    try std.testing.expect(ct.Titles == null);
+    try std.testing.expect(ct.Processes == null);
+}
+
+test "VolumeCreateRequest defaults" {
+    const vcr = VolumeCreateRequest{ .Name = "app-data" };
+    try std.testing.expectEqualStrings("app-data", vcr.Name);
+    try std.testing.expectEqualStrings("local", vcr.Driver);
+}
+
+test "VolumeInfo defaults" {
+    const vi = VolumeInfo{};
+    try std.testing.expectEqualStrings("", vi.Name);
+    try std.testing.expectEqualStrings("local", vi.Driver);
+    try std.testing.expectEqualStrings("", vi.Mountpoint);
+    try std.testing.expectEqualStrings("", vi.CreatedAt);
+}
+
+test "VolumeListResponse null volumes" {
+    const vlr = VolumeListResponse{};
+    try std.testing.expect(vlr.Volumes == null);
+}
+
+test "NetworkInfo defaults" {
+    const ni = NetworkInfo{};
+    try std.testing.expectEqualStrings("", ni.Id);
+    try std.testing.expectEqualStrings("", ni.Name);
+    try std.testing.expectEqualStrings("", ni.Driver);
+    try std.testing.expectEqualStrings("local", ni.Scope);
+    try std.testing.expect(ni.Internal == false);
+}
+
+test "SystemDfResponse defaults" {
+    const df = SystemDfResponse{};
+    try std.testing.expectEqual(@as(i64, 0), df.LayersSize);
+    try std.testing.expect(df.Images == null);
+    try std.testing.expect(df.Containers == null);
+    try std.testing.expect(df.Volumes == null);
+}
+
+test "SystemDfResponse nested DfContainer and DfVolume defaults" {
+    const dc = SystemDfResponse.DfContainer{};
+    try std.testing.expectEqualStrings("", dc.Id);
+    try std.testing.expectEqualStrings("", dc.State);
+    try std.testing.expectEqual(@as(i64, 0), dc.SizeRw);
+    try std.testing.expectEqual(@as(i64, 0), dc.SizeRootFs);
+
+    const dv = SystemDfResponse.DfVolume{};
+    try std.testing.expectEqualStrings("", dv.Name);
+    try std.testing.expect(dv.UsageData == null);
+
+    const ud = SystemDfResponse.UsageData{};
+    try std.testing.expectEqual(@as(i64, 0), ud.Size);
+    try std.testing.expectEqual(@as(i64, 0), ud.RefCount);
+}
+
+test "ContainerPruneResponse defaults" {
+    const cpr = ContainerPruneResponse{};
+    try std.testing.expect(cpr.ContainersDeleted == null);
+    try std.testing.expectEqual(@as(u64, 0), cpr.SpaceReclaimed);
+}
+
+test "ImagePruneItem defaults" {
+    const ipi = ImagePruneItem{};
+    try std.testing.expect(ipi.Untagged == null);
+    try std.testing.expect(ipi.Deleted == null);
+}
+
+test "ImagePruneResponse defaults" {
+    const ipr = ImagePruneResponse{};
+    try std.testing.expect(ipr.ImagesDeleted == null);
+    try std.testing.expectEqual(@as(u64, 0), ipr.SpaceReclaimed);
+}
+
+test "StatsJsonEntry fields" {
+    const alloc = std.testing.allocator;
+    const e = StatsJsonEntry{
+        .id = "abc123",
+        .name = "/web",
+        .cpu_percent = 42.5,
+        .mem_used_bytes = 67_108_864,
+        .mem_limit_bytes = 268_435_456,
+        .mem_percent = 25.0,
+        .pids = 12,
+    };
+    try std.testing.expectEqualStrings("abc123", e.id);
+    try std.testing.expectEqualStrings("/web", e.name);
+    try std.testing.expectApproxEqAbs(@as(f64, 42.5), e.cpu_percent, 0.001);
+    try std.testing.expectEqual(@as(u64, 67_108_864), e.mem_used_bytes);
+    try std.testing.expectEqual(@as(u64, 268_435_456), e.mem_limit_bytes);
+    try std.testing.expectApproxEqAbs(@as(f64, 25.0), e.mem_percent, 0.001);
+    try std.testing.expectEqual(@as(u64, 12), e.pids);
+    _ = alloc;
+}
+
+test "ContainerDiffItem kind mapping and defaults" {
+    const d0 = ContainerDiffItem{};
+    try std.testing.expectEqualStrings("", d0.Path);
+    try std.testing.expectEqual(@as(u8, 0), d0.Kind);
+
+    const d1 = ContainerDiffItem{ .Path = "/etc/hosts", .Kind = 1 };
+    try std.testing.expectEqualStrings("/etc/hosts", d1.Path);
+    try std.testing.expectEqual(@as(u8, 1), d1.Kind);
+
+    const d2 = ContainerDiffItem{ .Path = "/tmp/new", .Kind = 2 };
+    try std.testing.expectEqualStrings("/tmp/new", d2.Path);
+    try std.testing.expectEqual(@as(u8, 2), d2.Kind);
+}
+
+test "DaemonEvent defaults and Actor nested" {
+    const ev = DaemonEvent{};
+    try std.testing.expectEqualStrings("", ev.Type);
+    try std.testing.expectEqualStrings("", ev.Action);
+    try std.testing.expectEqualStrings("", ev.status);
+    try std.testing.expectEqualStrings("", ev.id);
+    try std.testing.expectEqual(@as(i64, 0), ev.time);
+    try std.testing.expect(ev.Actor == null);
+
+    const ev_full = DaemonEvent{
+        .Type = "container",
+        .Action = "start",
+        .status = "start",
+        .id = "web1234567890abcd",
+        .time = 1700000000,
+        .Actor = .{ .ID = "web1234567890abcd" },
+    };
+    try std.testing.expectEqualStrings("container", ev_full.Type);
+    try std.testing.expectEqualStrings("start", ev_full.Action);
+    try std.testing.expectEqual(@as(i64, 1700000000), ev_full.time);
+    try std.testing.expect(ev_full.Actor != null);
+    try std.testing.expectEqualStrings("web1234567890abcd", ev_full.Actor.?.ID);
+}
+
+test "ImageHistoryItem defaults and populated fields" {
+    const ih = ImageHistoryItem{};
+    try std.testing.expectEqualStrings("", ih.Id);
+    try std.testing.expectEqual(@as(i64, 0), ih.Created);
+    try std.testing.expectEqualStrings("", ih.CreatedBy);
+    try std.testing.expectEqual(@as(i64, 0), ih.Size);
+    try std.testing.expect(ih.Tags == null);
+    try std.testing.expectEqualStrings("", ih.Comment);
+
+    const alloc = std.testing.allocator;
+    const tags = [_][]const u8{ "alpine:3.20", "docker.io/library/alpine:latest" };
+    const ih_full = ImageHistoryItem{
+        .Id = "sha256:deadbeef",
+        .Created = 1700000000,
+        .CreatedBy = "/bin/sh -c echo hi",
+        .Size = 4096,
+        .Tags = &tags,
+        .Comment = "build step",
+    };
+    try std.testing.expectEqualStrings("sha256:deadbeef", ih_full.Id);
+    try std.testing.expectEqual(@as(i64, 1700000000), ih_full.Created);
+    try std.testing.expectEqualStrings("/bin/sh -c echo hi", ih_full.CreatedBy);
+    try std.testing.expectEqual(@as(i64, 4096), ih_full.Size);
+    try std.testing.expectEqualStrings("alpine:3.20", ih_full.Tags.?[0]);
+    try std.testing.expectEqualStrings("docker.io/library/alpine:latest", ih_full.Tags.?[1]);
+    try std.testing.expectEqualStrings("build step", ih_full.Comment);
+    _ = alloc;
+}

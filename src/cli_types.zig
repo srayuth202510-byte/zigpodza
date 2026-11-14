@@ -371,3 +371,193 @@ pub fn takeValue(args: []const []const u8, i: *usize) ParseError![]const u8 {
     if (i.* >= args.len) return error.MissingValue;
     return args[i.*];
 }
+
+// ---------------------------------------------------------------- tests
+
+test "Volume struct default readonly is true" {
+    const v = Volume{ .source = "/srv/data", .destination = "/data" };
+    try std.testing.expectEqualStrings("/srv/data", v.source);
+    try std.testing.expectEqualStrings("/data", v.destination);
+    try std.testing.expect(v.readonly);
+
+    const v_rw = Volume{ .source = "/srv/cache", .destination = "/cache", .readonly = false };
+    try std.testing.expect(!v_rw.readonly);
+}
+
+test "PortMapping struct defaults" {
+    const pm = PortMapping{ .container_port = 80 };
+    try std.testing.expect(pm.host_ip == null);
+    try std.testing.expect(pm.host_port == null);
+    try std.testing.expectEqual(@as(u16, 80), pm.container_port);
+    try std.testing.expectEqualStrings("tcp", pm.proto);
+
+    const pm_full = PortMapping{
+        .host_ip = "127.0.0.1",
+        .host_port = 8080,
+        .container_port = 9000,
+        .proto = "udp",
+    };
+    try std.testing.expectEqualStrings("127.0.0.1", pm_full.host_ip.?);
+    try std.testing.expectEqual(@as(?u16, 8080), pm_full.host_port);
+    try std.testing.expectEqual(@as(u16, 9000), pm_full.container_port);
+    try std.testing.expectEqualStrings("udp", pm_full.proto);
+}
+
+test "Profile enum values" {
+    try std.testing.expect(@intFromEnum(Profile.default) == 0);
+    try std.testing.expect(@intFromEnum(Profile.sandbox) == 1);
+    try std.testing.expect(std.mem.eql(u8, @tagName(Profile.default), "default"));
+    try std.testing.expect(std.mem.eql(u8, @tagName(Profile.sandbox), "sandbox"));
+}
+
+test "RunOpts default values" {
+    const r = RunOpts{ .image = "alpine:3.20" };
+    try std.testing.expectEqualStrings("alpine:3.20", r.image);
+    try std.testing.expectEqual(@as(usize, 0), r.cmd.len);
+    try std.testing.expectEqual(@as(usize, 0), r.env.len);
+    try std.testing.expectEqual(@as(usize, 0), r.volumes.len);
+    try std.testing.expectEqual(@as(usize, 0), r.ports.len);
+    try std.testing.expectEqual(@as(usize, 0), r.cap_drop.len);
+    try std.testing.expectEqual(@as(usize, 0), r.cap_add.len);
+    try std.testing.expect(r.name == null);
+    try std.testing.expect(r.network == null);
+    try std.testing.expect(r.workdir == null);
+    try std.testing.expect(r.user == null);
+    try std.testing.expect(r.profile == .default);
+    try std.testing.expect(r.policy_path == null);
+    try std.testing.expect(r.detach == false);
+    try std.testing.expect(r.interactive == false);
+    try std.testing.expect(r.tty == false);
+    try std.testing.expect(r.remove == false);
+    try std.testing.expect(r.read_only == false);
+    try std.testing.expect(r.no_new_privileges == false);
+    try std.testing.expect(r.memory == null);
+    try std.testing.expect(r.pids_limit == null);
+}
+
+test "Parsed.deinit frees owned slices for run command" {
+    const alloc = std.testing.allocator;
+    const env_arr = try alloc.alloc([]const u8, 1);
+    env_arr[0] = "A=1";
+    const volumes_arr = try alloc.alloc(Volume, 1);
+    volumes_arr[0] = Volume{ .source = "/srv/data", .destination = "/data", .readonly = true };
+    const ports_arr = try alloc.alloc(PortMapping, 1);
+    ports_arr[0] = PortMapping{ .container_port = 80 };
+    const cap_drop_arr = try alloc.alloc([]const u8, 1);
+    cap_drop_arr[0] = "ALL";
+    const cap_add_arr = try alloc.alloc([]const u8, 1);
+    cap_add_arr[0] = "NET_ADMIN";
+
+    var p = Parsed{
+        .global = .{},
+        .command = .{
+            .run = .{
+                .image = "alpine:3.20",
+                .env = env_arr,
+                .volumes = volumes_arr,
+                .ports = ports_arr,
+                .cap_drop = cap_drop_arr,
+                .cap_add = cap_add_arr,
+            },
+        },
+    };
+    p.deinit(alloc);
+}
+
+test "Parsed.deinit frees owned slices for exec command" {
+    const alloc = std.testing.allocator;
+    const env_arr = try alloc.alloc([]const u8, 1);
+    env_arr[0] = "A=1";
+
+    var p = Parsed{
+        .global = .{},
+        .command = .{
+            .exec = .{
+                .container = "web",
+                .env = env_arr,
+                .cmd = &.{ "sh" },
+            },
+        },
+    };
+    p.deinit(alloc);
+}
+
+test "Parsed.deinit frees owned slices for stats command" {
+    const alloc = std.testing.allocator;
+    const containers_arr = try alloc.alloc([]const u8, 1);
+    containers_arr[0] = "web";
+
+    var p = Parsed{
+        .global = .{},
+        .command = .{
+            .stats = .{
+                .containers = containers_arr,
+            },
+        },
+    };
+    p.deinit(alloc);
+}
+
+test "Parsed.deinit is no-op for commands without owned slices" {
+    const alloc = std.testing.allocator;
+    var p = Parsed{ .global = .{}, .command = .{ .ps = .{} } };
+    p.deinit(alloc);
+
+    var p2 = Parsed{ .global = .{}, .command = .help };
+    p2.deinit(alloc);
+
+    var p3 = Parsed{ .global = .{}, .command = .{ .pull = "test-image" } };
+    p3.deinit(alloc);
+
+    var p4 = Parsed{ .global = .{}, .command = .version };
+    p4.deinit(alloc);
+
+    var p5 = Parsed{ .global = .{}, .command = .demo };
+    p5.deinit(alloc);
+
+    var p6 = Parsed{ .global = .{}, .command = .{ .audit = .{} } };
+    p6.deinit(alloc);
+
+    var p7 = Parsed{ .global = .{}, .command = .{ .completion = .bash } };
+    p7.deinit(alloc);
+}
+
+test "ParseError error set contains expected errors" {
+    // Verify each error variant has a distinct name via describeError.
+    try std.testing.expectEqualStrings("unknown command", describeError(error.UnknownCommand));
+    try std.testing.expectEqualStrings("unknown flag", describeError(error.UnknownFlag));
+    try std.testing.expectEqualStrings("flag requires a value", describeError(error.MissingValue));
+    try std.testing.expectEqualStrings("invalid flag value", describeError(error.InvalidValue));
+    try std.testing.expectEqualStrings("missing required argument", describeError(error.MissingArgument));
+    try std.testing.expectEqualStrings("too many arguments", describeError(error.TooManyArguments));
+    try std.testing.expectEqualStrings("out of memory", describeError(error.OutOfMemory));
+}
+
+test "eql compares byte slices correctly" {
+    try std.testing.expect(eql("abc", "abc"));
+    try std.testing.expect(!eql("abc", "abd"));
+    try std.testing.expect(eql("", ""));
+    try std.testing.expect(!eql("a", ""));
+    try std.testing.expect(!eql("", "a"));
+}
+
+test "isFlag detects dash-prefixed args" {
+    try std.testing.expect(isFlag("-v"));
+    try std.testing.expect(isFlag("--verbose"));
+    try std.testing.expect(isFlag("-it"));
+    try std.testing.expect(!isFlag("alpine"));
+    try std.testing.expect(!isFlag("-")); // len == 1, not a flag
+    try std.testing.expect(!isFlag("")); // empty
+}
+
+test "takeValue advances index and returns value, errors when missing" {
+    var args = [_][]const u8{ "--socket", "/tmp/x.sock" };
+    var i: usize = 0;
+    const val = try takeValue(&args, &i);
+    try std.testing.expectEqual(@as(usize, 1), i);
+    try std.testing.expectEqualStrings("/tmp/x.sock", val);
+
+    var args2 = [_][]const u8{ "--socket" };
+    var idx2: usize = 0;
+    try std.testing.expectError(error.MissingValue, takeValue(&args2, &idx2));
+}
