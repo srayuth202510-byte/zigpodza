@@ -8,6 +8,7 @@ pub const types = @import("podman_types.zig");
 pub const api_prefix = "/v1.40";
 
 pub const ApiError = types.ApiError;
+pub const TmpfsBounds = types.TmpfsBounds;
 pub const HostConfig = types.HostConfig;
 pub const Mount = types.Mount;
 pub const PortMapping = types.PortMapping;

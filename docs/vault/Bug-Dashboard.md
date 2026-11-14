@@ -19,9 +19,9 @@ status: active
 
 | Metric | Value |
 | :--- | :--- |
-| Tracked Bug Patterns | **18** (18 Guarded) |
-| Zig Source Modules | **9** |
-| Unit & Integration Tests | **70** |
+| Tracked Bug Patterns | **19** (19 Guarded) |
+| Zig Source Modules | **10** |
+| Unit & Integration Tests | **75** |
 | Static Security & Memory Gates | **9/9 PASS** |
 
 ## Guard Coverage Map
@@ -72,6 +72,9 @@ flowchart LR
     BUG017 --> src_podman_api_zig["src/podman_api.zig"]
     BUG018["BUG-018"] --> SEC["[[Security-And-Memory-Checklist]]"]
     BUG018 --> src_podman_api_zig["src/podman_api.zig"]
+    BUG019["BUG-019"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG019 --> src_policy_zig["src/policy.zig"]
+    BUG019 --> src_log_zig["src/log.zig"]
 ```
 
 ## Bug Pattern Registry
@@ -96,19 +99,21 @@ flowchart LR
 | [BUG-016](../../docs/vault/Bug-Playbook.md#L183) | Unvalidated Network/Identity/Capability Flags | `#bug-pattern` `#security-gate` | [podman_api.zig](../../src/podman_api.zig), [cli.zig](../../src/cli.zig) | **Guarded** |
 | [BUG-017](../../docs/vault/Bug-Playbook.md#L195) | Inspect Target Not Validated Before URL Path Assembly | `#bug-pattern` `#security-gate` | [podman_api.zig](../../src/podman_api.zig) | **Guarded** |
 | [BUG-018](../../docs/vault/Bug-Playbook.md#L205) | Exec ID from Daemon Response Reused in URL Without Validation | `#bug-pattern` `#security-gate` | [podman_api.zig](../../src/podman_api.zig) | **Guarded** |
+| [BUG-019](../../docs/vault/Bug-Playbook.md#L217) | Sandbox Profile Without Pre-Flight Policy Guardrails & DENY Telemetry | `#bug-pattern` `#security-gate` | [policy.zig](../../src/policy.zig), [log.zig](../../src/log.zig) | **Guarded** |
 
 ## Module Test & Allocator Coverage
 
 | Module | Lines | Public Decls | Unit Tests | Memory Gate |
 | :--- | ---: | ---: | ---: | :--- |
-| [cli.zig](../../src/cli.zig) | 1049 | 16 | 18 | `std.testing.allocator` |
+| [cli.zig](../../src/cli.zig) | 1112 | 18 | 19 | `std.testing.allocator` |
 | [config.zig](../../src/config.zig) | 118 | 4 | 4 | `std.testing.allocator` |
 | [demo.zig](../../src/demo.zig) | 379 | 1 | 1 | `std.testing.allocator` |
 | [http.zig](../../src/http.zig) | 914 | 25 | 12 | `std.testing.allocator` |
-| [log.zig](../../src/log.zig) | 465 | 16 | 7 | `std.testing.allocator` |
-| [main.zig](../../src/main.zig) | 348 | 2 | 0 | `gpa.deinit() != .leak` |
-| [podman_api.zig](../../src/podman_api.zig) | 2250 | 59 | 26 | `std.testing.allocator` |
-| [podman_types.zig](../../src/podman_types.zig) | 267 | 32 | 0 | `MISSING` |
+| [log.zig](../../src/log.zig) | 638 | 20 | 8 | `std.testing.allocator` |
+| [main.zig](../../src/main.zig) | 400 | 2 | 0 | `gpa.deinit() != .leak` |
+| [podman_api.zig](../../src/podman_api.zig) | 2251 | 60 | 26 | `std.testing.allocator` |
+| [podman_types.zig](../../src/podman_types.zig) | 283 | 34 | 0 | `MISSING` |
+| [policy.zig](../../src/policy.zig) | 199 | 13 | 3 | `std.testing.allocator` |
 | [utils.zig](../../src/utils.zig) | 42 | 3 | 2 | `stack-only (no heap)` |
 
 ## Static Security & Memory Gates
@@ -252,3 +257,10 @@ flowchart LR
 - **Root Cause**: เดิม CLI ไม่มี `exec` จึงไม่มีจุดตรวจ; exec ID เป็นค่าที่มาจากภายนอก (daemon response) ซึ่งควรถือเป็น untrusted ในใจเคร่องาน trust boundary เหมือน request body อื่น ๆ
 - **Fix**: เพิ่ม `createExec()` / `startExec()` / `inspectExec()` ใน `src/podman_api.zig` โดยเรียก `validateIdentifier(exec_id)` ก่อนประกอบทุก path ที่ใช้ exec ID และตรวจ container ID/`--user`/`--workdir` ด้วย validator เดิม; ใช้ `demuxLogs()` กับ response body ของ `/exec/{id}/start` และคืนค่า `ExitCode` จาก `/exec/{id}/json` ไปเป็น process exit status ของ CLI; ใช้ `requestWithTimeout(..., blocking_timeout_ms)` สำหรับ exec start เพื่อไม่ตัดคำสั่งที่รันนาน (BUG-007); เพิ่มเทส mock socket 3-step lifecycle และเทส DENY ของ container/exec ID + `--user`/`--workdir`; smoke E2E เรียก `exec` ผ่าน mock socket
 - **Prevention**: **ทุกค่าที่มาจาก daemon response** หากถูกนำไปประกอบ URL path ต้องผ่าน validator เสมอ และ response body ของ stream protocol (logs/exec) ต้องผ่าน demultiplex ก่อนแสดงผล พร้อมคืนค่า exit code เพื่อให้ caller ตัดสินใจได้ถูก
+
+### BUG-019 — Sandbox Profile Without Pre-Flight Policy Guardrails & DENY Telemetry
+- **Source**: [docs/vault/Bug-Playbook.md:217](../../docs/vault/Bug-Playbook.md#L217) · **Status**: `Guarded`
+- **Symptom**: เมื่อรัน workload ที่ไม่น่าเชื่อถือหรือ AI agent หากพึ่งพาให้ผู้ใช้ระบุ flag ความปลอดภัย (`--read-only`, `--no-new-privileges`, `--cap-drop=ALL`, `--network=none`, `--pids-limit`, `--memory`) เองทุกครั้ง หรืออนุญาตให้ flag ที่ส่งมาทะลุเพดานของ `zigpod-policy.json` (เช่น ขอ `-m 512m` หรือ `--network host` ในโหมด sandbox) จะทำให้ container ได้สิทธิ์เกินขอบเขตที่กำหนด และหากการปฏิเสธไม่ถูกบันทึกเป็น structured `DENY` event ใน `audit.log` ระบบตรวจวิเคราะห์อัตโนมัติ (`balorsh` / `zigpod audit --json`) จะไม่สามารถแยกแยะเหตุการณ์ละเมิดนโยบายออกจาก error ทั่วไปได้
+- **Root Cause**: เดิมไม่มีชั้น Policy Engine ก่อนสร้าง `ContainerCreateRequest` และ `audit` แสดงผลเฉพาะข้อความสรุปธรรมดาโดยไม่แยก `DENY` telemetry
+- **Fix**: เพิ่ม `src/policy.zig` (`applySandboxDefaults`, `loadPolicyFile`, `checkRunPolicy`, `enforceRunPolicy`) และไฟล์นโยบาย `zigpod-policy.json`: บังคับค่าเริ่มต้นแบบ fail-closed (`--read-only`, `--no-new-privileges`, `--cap-drop=ALL`, `--network=none`, `--pids-limit=64`, `--memory=256m`, bounded `/tmp` tmpfs) และตรวจ pre-flight ก่อนเปิด socket; เพิ่ม `Logger.deny()` และ `writeAuditJson()` ใน `src/log.zig` พร้อม `--json` ใน `zigpod audit` เพื่อส่งออก structured JSON (`valid`, `entries`, `deny_events`, `deny_records`); เพิ่มเทส unit สำหรับ `policy.zig` และ `writeAuditJson` พร้อม smoke E2E ทดสอบ `--profile=sandbox -m 512m` และ `audit --json`
+- **Prevention**: โหมด sandbox ต้องบังคับ fail-closed defaults เสมอ, ต้องตรวจเพดานทุกข้อกับ `zigpod-policy.json` แบบ pre-flight ก่อนคุยกับ daemon, และทุกการปฏิเสธด้านความปลอดภัยต้องเรียก `logger.deny(rule, detail)` ลง hash-chained `audit.log`

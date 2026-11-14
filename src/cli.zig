@@ -26,6 +26,8 @@ pub const usage =
     \\      --pids-limit N             Limit container PIDs
     \\      --read-only                Mount container root filesystem as read-only
     \\      --no-new-privileges        Prevent privilege escalation inside container
+    \\      --profile PROFILE          Security profile: default|sandbox (fail-closed AI sandbox)
+    \\      --policy FILE              Pre-flight policy guardrails JSON (e.g. zigpod-policy.json)
     \\  ps [-a]                        List containers (-a: include stopped)
     \\  images                         List local images
     \\  pull IMAGE                     Pull an image from a registry
@@ -40,7 +42,7 @@ pub const usage =
     \\      -w, --workdir PATH         Working directory inside the container
     \\  inspect TARGET                 Show container or image details (state, IP, mounts, limits)
     \\  stats [--no-stream] [-a] [CONTAINER...]  Display CPU, memory, and PIDs metrics
-    \\  audit [FILE]                   Verify SHA-256 hash chain of audit.log
+    \\  audit [--json] [FILE]          Verify SHA-256 hash chain of audit.log (--json: structured output)
     \\  demo                           Run 14-case fail-closed ALLOW/DENY self-test suite
     \\  version                        Show client and server versions
     \\  help                           Show this help
@@ -78,6 +80,11 @@ pub const PortMapping = struct {
     proto: []const u8 = "tcp",
 };
 
+pub const Profile = enum {
+    default,
+    sandbox,
+};
+
 pub const RunOpts = struct {
     image: []const u8,
     cmd: []const []const u8 = &.{},
@@ -90,6 +97,8 @@ pub const RunOpts = struct {
     network: ?[]const u8 = null,
     workdir: ?[]const u8 = null,
     user: ?[]const u8 = null,
+    profile: Profile = .default,
+    policy_path: ?[]const u8 = null,
     detach: bool = false,
     interactive: bool = false,
     tty: bool = false,
@@ -126,12 +135,17 @@ pub const StatsOpts = struct {
     containers: []const []const u8 = &.{},
 };
 
+pub const AuditOpts = struct {
+    path: ?[]const u8 = null,
+    json: bool = false,
+};
+
 pub const Command = union(enum) {
     help,
     client_version,
     version,
     demo,
-    audit: ?[]const u8,
+    audit: AuditOpts,
     ps: struct { all: bool = false },
     images,
     pull: []const u8,
@@ -262,10 +276,33 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
 }
 
 fn parseAudit(args: []const []const u8) ParseError!Command {
-    if (args.len == 0) return .{ .audit = null };
-    if (isFlag(args[0])) return error.UnknownFlag;
-    if (args.len > 1) return error.TooManyArguments;
-    return .{ .audit = args[0] };
+    var opts = AuditOpts{};
+    for (args) |a| {
+        if (eql(a, "--json")) {
+            opts.json = true;
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else if (opts.path == null) {
+            opts.path = a;
+        } else {
+            return error.TooManyArguments;
+        }
+    }
+    return .{ .audit = opts };
+}
+
+fn parseProfile(s: []const u8) ParseError!Profile {
+    if (eql(s, "default")) return .default;
+    if (eql(s, "sandbox")) return .sandbox;
+    return error.InvalidValue;
+}
+
+fn parsePolicyPath(s: []const u8) ParseError![]const u8 {
+    if (s.len == 0 or s.len > 4096) return error.InvalidValue;
+    for (s) |c| {
+        if (c < 0x20 or c == 0x7f) return error.InvalidValue;
+    }
+    return s;
 }
 
 fn noArgs(args: []const []const u8, cmd: Command) ParseError!Command {
@@ -549,6 +586,14 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
         } else if (eql(a, "-it") or eql(a, "-ti")) {
             opts.interactive = true;
             opts.tty = true;
+        } else if (eql(a, "--profile")) {
+            opts.profile = try parseProfile(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--profile=")) {
+            opts.profile = try parseProfile(a["--profile=".len..]);
+        } else if (eql(a, "--policy")) {
+            opts.policy_path = try parsePolicyPath(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--policy=")) {
+            opts.policy_path = try parsePolicyPath(a["--policy=".len..]);
         } else if (isFlag(a)) {
             return error.UnknownFlag;
         } else break; // first positional = IMAGE; everything after is the command
@@ -989,18 +1034,36 @@ test "parse demo and audit subcommands" {
     var p_audit_default = try parse(alloc, &.{"audit"});
     defer p_audit_default.deinit(alloc);
     switch (p_audit_default.command) {
-        .audit => |path| try std.testing.expect(path == null),
+        .audit => |a| {
+            try std.testing.expect(a.path == null);
+            try std.testing.expect(!a.json);
+        },
         else => return error.TestUnexpectedResult,
     }
 
-    var p_audit_file = try parse(alloc, &.{ "audit", "/tmp/custom-audit.log" });
+    var p_audit_file = try parse(alloc, &.{ "audit", "--json", "/tmp/custom-audit.log" });
     defer p_audit_file.deinit(alloc);
     switch (p_audit_file.command) {
-        .audit => |path| try std.testing.expectEqualStrings("/tmp/custom-audit.log", path.?),
+        .audit => |a| {
+            try std.testing.expectEqualStrings("/tmp/custom-audit.log", a.path.?);
+            try std.testing.expect(a.json);
+        },
         else => return error.TestUnexpectedResult,
     }
 
     try std.testing.expectError(error.TooManyArguments, parse(alloc, &.{ "audit", "a.log", "b.log" }));
+    try std.testing.expectError(error.UnknownFlag, parse(alloc, &.{ "audit", "--bogus" }));
+}
+
+test "parse run --profile=sandbox and --policy flags" {
+    const alloc = std.testing.allocator;
+    var p = try parse(alloc, &.{ "run", "--profile=sandbox", "--policy", "zigpod-policy.json", "alpine:3.20" });
+    defer p.deinit(alloc);
+    try std.testing.expectEqual(Profile.sandbox, p.command.run.profile);
+    try std.testing.expectEqualStrings("zigpod-policy.json", p.command.run.policy_path.?);
+
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--profile=bogus", "alpine:3.20" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--policy=", "alpine:3.20" }));
 }
 
 test "parse stats subcommand with --no-stream, -a, and containers" {

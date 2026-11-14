@@ -212,3 +212,14 @@ status: active
   - ใช้ `requestWithTimeout(..., blocking_timeout_ms)` สำหรับ exec start เพื่อไม่ตัดคำสั่งที่รันนาน (BUG-007)
   - เพิ่มเทส mock socket 3-step lifecycle และเทส DENY ของ container/exec ID + `--user`/`--workdir`; smoke E2E เรียก `exec` ผ่าน mock socket
 - **Prevention Rule**: **ทุกค่าที่มาจาก daemon response** หากถูกนำไปประกอบ URL path ต้องผ่าน validator เสมอ และ response body ของ stream protocol (logs/exec) ต้องผ่าน demultiplex ก่อนแสดงผล พร้อมคืนค่า exit code เพื่อให้ caller ตัดสินใจได้ถูก
+
+
+## BUG-019: Sandbox Profile Without Pre-Flight Policy Guardrails & DENY Telemetry `#bug-pattern` `#security-gate`
+
+- **Symptom**: เมื่อรัน workload ที่ไม่น่าเชื่อถือหรือ AI agent หากพึ่งพาให้ผู้ใช้ระบุ flag ความปลอดภัย (`--read-only`, `--no-new-privileges`, `--cap-drop=ALL`, `--network=none`, `--pids-limit`, `--memory`) เองทุกครั้ง หรืออนุญาตให้ flag ที่ส่งมาทะลุเพดานของ `zigpod-policy.json` (เช่น ขอ `-m 512m` หรือ `--network host` ในโหมด sandbox) จะทำให้ container ได้สิทธิ์เกินขอบเขตที่กำหนด และหากการปฏิเสธไม่ถูกบันทึกเป็น structured `DENY` event ใน `audit.log` ระบบตรวจวิเคราะห์อัตโนมัติ (`balorsh` / `zigpod audit --json`) จะไม่สามารถแยกแยะเหตุการณ์ละเมิดนโยบายออกจาก error ทั่วไปได้
+- **Root Cause**: เดิมไม่มีชั้น Policy Engine ก่อนสร้าง `ContainerCreateRequest` และ `audit` แสดงผลเฉพาะข้อความสรุปธรรมดาโดยไม่แยก `DENY` telemetry
+- **Fix**:
+  - เพิ่ม [src/policy.zig](../../src/policy.zig) (`applySandboxDefaults`, `loadPolicyFile`, `checkRunPolicy`, `enforceRunPolicy`) และไฟล์นโยบาย [zigpod-policy.json](../../zigpod-policy.json): บังคับค่าเริ่มต้นแบบ fail-closed (`--read-only`, `--no-new-privileges`, `--cap-drop=ALL`, `--network=none`, `--pids-limit=64`, `--memory=256m`, bounded `/tmp` tmpfs) และตรวจ pre-flight ก่อนเปิด socket
+  - เพิ่ม `Logger.deny()` และ `writeAuditJson()` ใน [src/log.zig](../../src/log.zig) พร้อม `--json` ใน `zigpod audit` เพื่อส่งออก structured JSON (`valid`, `entries`, `deny_events`, `deny_records`)
+  - เพิ่มเทส unit สำหรับ `policy.zig` และ `writeAuditJson` พร้อม smoke E2E ทดสอบ `--profile=sandbox -m 512m` และ `audit --json`
+- **Prevention Rule**: โหมด sandbox ต้องบังคับ fail-closed defaults เสมอ, ต้องตรวจเพดานทุกข้อกับ `zigpod-policy.json` แบบ pre-flight ก่อนคุยกับ daemon, และทุกการปฏิเสธด้านความปลอดภัยต้องเรียก `logger.deny(rule, detail)` ลง hash-chained `audit.log`

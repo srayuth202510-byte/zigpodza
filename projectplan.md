@@ -306,11 +306,11 @@ flowchart LR
 
 ### Phase 3: Fail-Closed Policy Engine & AI Sandbox Guardrails
 
-- [ ] **Sandbox Security Profiles (`--profile=sandbox`)**:
-  - Enforce fail-closed defaults for untrusted or AI-agent workloads (`--read-only`, `--no-new-privileges`, `--cap-drop=ALL`, `--network=none`, `--pids-limit=64`, `--memory=256m`, bounded tmpfs)
-  - Reject container creation pre-flight if requested flags exceed limits defined in `zigpod-policy.json`
-- [ ] **Audit & Balor Toolkit Integration**:
-  - Add `zigpod audit --json` structured output and `DENY` event telemetry for `balorsh` (`loganalyst` / `blueteam`) automated auditing
+- [x] **Sandbox Security Profiles (`--profile=sandbox`)**:
+  - Enforce fail-closed defaults for untrusted or AI-agent workloads (`--read-only`, `--no-new-privileges`, `--cap-drop=ALL`, `--network=none`, `--pids-limit=64`, `--memory=256m`, bounded tmpfs) -- DONE (`src/policy.zig`, `src/cli.zig`, `src/main.zig`)
+  - Reject container creation pre-flight if requested flags exceed limits defined in `zigpod-policy.json` -- DONE (`src/policy.zig`, `zigpod-policy.json`, `src/main.zig`)
+- [x] **Audit & Balor Toolkit Integration**:
+  - Add `zigpod audit --json` structured output and `DENY` event telemetry for `balorsh` (`loganalyst` / `blueteam`) automated auditing -- DONE (`src/log.zig`, `src/cli.zig`, `src/main.zig`)
 
 ### Phase 4: Image Build, Native Pod Commands & Multi-Arch Releases
 

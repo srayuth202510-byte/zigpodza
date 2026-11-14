@@ -12,6 +12,21 @@ pub const ApiError = error{
     InvalidWorkdir,
     InvalidUser,
     InvalidCapability,
+    PolicyViolation,
+    InvalidPolicyFile,
+};
+
+/// Serializes Docker `HostConfig.Tmpfs` mapping `/tmp` to bounded mount options:
+/// `{"/tmp":"rw,noexec,nosuid,nodev,size=67108864"}`.
+pub const TmpfsBounds = struct {
+    tmp_options: []const u8,
+
+    pub fn jsonStringify(self: TmpfsBounds, jw: anytype) !void {
+        try jw.beginObject();
+        try jw.objectField("/tmp");
+        try jw.write(self.tmp_options);
+        try jw.endObject();
+    }
 };
 
 pub const HostConfig = struct {
@@ -24,6 +39,7 @@ pub const HostConfig = struct {
     NetworkMode: ?[]const u8 = null,
     CapDrop: ?[]const []const u8 = null,
     CapAdd: ?[]const []const u8 = null,
+    Tmpfs: ?TmpfsBounds = null,
 };
 
 /// A bind mount or named-volume mount, serialized into the container-create

@@ -191,12 +191,20 @@ if "$BIN" --socket "$SOCK" run --network bogus alpine:3.20 >/dev/null 2>&1; then
     exit 1
 fi
 
+if "$BIN" --socket "$SOCK" run --profile=sandbox -m 512m alpine:3.20 >/dev/null 2>&1; then
+    echo "[FAIL] expected sandbox profile memory limit excess (512m > 256m) to fail closed pre-flight" >&2
+    exit 1
+fi
+
 rm -f "$SOCK"
 wait "$SERVER_PID" || true
 SERVER_PID=""
 
-# Verify intact hash-chained audit.log and reject single-byte tamper.
+# Verify intact hash-chained audit.log (both plain and --json) and reject single-byte tamper.
 "$BIN" audit "$ZIGPOD_LOG_DIR/audit.log" | grep -q "audit chain verified"
+AUDIT_JSON=$("$BIN" audit --json "$ZIGPOD_LOG_DIR/audit.log")
+echo "$AUDIT_JSON" | grep -q '"valid":true'
+echo "$AUDIT_JSON" | grep -q '"rule":"policy.max_memory_bytes"'
 
 TAMPERED="$TMPDIR/audit-tampered.log"
 cp "$ZIGPOD_LOG_DIR/audit.log" "$TAMPERED"

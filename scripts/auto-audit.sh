@@ -58,7 +58,7 @@ else
 fi
 
 # 4. Require std.testing.allocator in every heap-allocating module
-for mod in src/cli.zig src/config.zig src/http.zig src/podman_api.zig src/log.zig; do
+for mod in src/cli.zig src/config.zig src/http.zig src/podman_api.zig src/log.zig src/policy.zig; do
     if has_match "std\.testing\.allocator" "$mod"; then
         pass "std.testing.allocator present in $mod."
     else
@@ -112,6 +112,13 @@ if has_match "pub fn createExec\(" "src/podman_api.zig" && has_match "pub fn sta
     pass "createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig."
 else
     fail "Missing createExec()/startExec() validation in src/podman_api.zig (see BUG-018)."
+fi
+
+# 5g. Require the fail-closed sandbox policy engine & DENY telemetry (BUG-019)
+if has_match "pub fn checkRunPolicy\(" "src/policy.zig" && has_match "pub fn writeAuditJson\(" "src/log.zig" && has_match "logger\.deny\(" "src/main.zig"; then
+    pass "checkRunPolicy(), writeAuditJson(), and logger.deny() enforced (BUG-019)."
+else
+    fail "Missing sandbox policy guard or DENY audit telemetry (see BUG-019)."
 fi
 
 # 6. Require checked arithmetic in parsers & decoders

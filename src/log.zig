@@ -79,6 +79,13 @@ pub const Logger = struct {
         self.log(.err, fmt, args);
     }
 
+    /// Emits a structured `DENY` security telemetry event into `system.log`,
+    /// `error.log`, and the SHA-256 hash-chained `audit.log` for `balorsh`
+    /// (`loganalyst` / `blueteam`) automated auditing.
+    pub fn deny(self: *Logger, rule: []const u8, detail: []const u8) void {
+        self.log(.err, "DENY rule={s} detail={s}", .{ rule, detail });
+    }
+
     pub fn log(self: *Logger, level: Level, comptime fmt: []const u8, args: anytype) void {
         var buf: [4096]u8 = undefined;
         const line = formatLine(&buf, std.time.timestamp(), level, fmt, args);
@@ -264,6 +271,133 @@ pub fn verifyAuditFile(allocator: std.mem.Allocator, path: []const u8) !usize {
         count += 1;
     }
     return count;
+}
+
+pub const AuditDenyRecord = struct {
+    timestamp: []const u8,
+    rule: []const u8,
+    detail: []const u8,
+    hash: []const u8,
+};
+
+pub const AuditReport = struct {
+    path: []const u8,
+    valid: bool,
+    entries: usize,
+    deny_events: usize,
+    error_events: usize,
+    head_hash: []const u8,
+    failure_reason: ?[]const u8 = null,
+    deny_records: []const AuditDenyRecord,
+};
+
+fn parseDenyMessage(msg: []const u8) ?struct { rule: []const u8, detail: []const u8 } {
+    const prefix = "DENY rule=";
+    if (!std.mem.startsWith(u8, msg, prefix)) return null;
+    const after_rule = msg[prefix.len..];
+    const detail_marker = " detail=";
+    const idx = std.mem.indexOf(u8, after_rule, detail_marker) orelse return .{
+        .rule = after_rule,
+        .detail = "",
+    };
+    return .{
+        .rule = after_rule[0..idx],
+        .detail = after_rule[idx + detail_marker.len ..],
+    };
+}
+
+/// Verifies `path` and writes a structured JSON audit report to `writer`.
+/// Returns `true` if the hash chain is intact, or `false` if tampering or
+/// format corruption was detected.
+pub fn writeAuditJson(allocator: std.mem.Allocator, path: []const u8, writer: anytype) !bool {
+    const content = try std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024 * 1024);
+    defer allocator.free(content);
+
+    var deny_list = std.ArrayList(AuditDenyRecord).init(allocator);
+    defer deny_list.deinit();
+
+    var expected_prev = [_]u8{'0'} ** 64;
+    var count: usize = 0;
+    var error_count: usize = 0;
+    var valid = true;
+    var failure_reason: ?[]const u8 = null;
+
+    if (content.len > 0) {
+        var lines = std.mem.splitScalar(u8, content, '\n');
+        while (lines.next()) |raw_line| {
+            if (lines.peek() == null) break;
+            if (raw_line.len == 0) continue;
+            const line = std.mem.trimRight(u8, raw_line, "\r");
+            var parts = std.mem.splitScalar(u8, line, '\t');
+            const ts_str = parts.next() orelse {
+                valid = false;
+                failure_reason = "InvalidAuditFormat";
+                break;
+            };
+            const level_str = parts.next() orelse {
+                valid = false;
+                failure_reason = "InvalidAuditFormat";
+                break;
+            };
+            const prev_hash = parts.next() orelse {
+                valid = false;
+                failure_reason = "InvalidAuditFormat";
+                break;
+            };
+            const entry_hash = parts.next() orelse {
+                valid = false;
+                failure_reason = "InvalidAuditFormat";
+                break;
+            };
+            const msg = parts.next() orelse {
+                valid = false;
+                failure_reason = "InvalidAuditFormat";
+                break;
+            };
+            if (parts.next() != null or !isHex64(prev_hash) or !isHex64(entry_hash)) {
+                valid = false;
+                failure_reason = "InvalidAuditFormat";
+                break;
+            }
+            if (!std.mem.eql(u8, prev_hash, &expected_prev)) {
+                valid = false;
+                failure_reason = "AuditTampered";
+                break;
+            }
+            const computed = computeEntryHash(ts_str, level_str, &expected_prev, msg);
+            if (!std.mem.eql(u8, entry_hash, &computed)) {
+                valid = false;
+                failure_reason = "AuditTampered";
+                break;
+            }
+
+            expected_prev = computed;
+            count += 1;
+            if (std.mem.eql(u8, level_str, "ERROR")) error_count += 1;
+            if (parseDenyMessage(msg)) |d| {
+                try deny_list.append(.{
+                    .timestamp = ts_str,
+                    .rule = d.rule,
+                    .detail = d.detail,
+                    .hash = entry_hash,
+                });
+            }
+        }
+    }
+
+    const report = AuditReport{
+        .path = path,
+        .valid = valid,
+        .entries = count,
+        .deny_events = deny_list.items.len,
+        .error_events = error_count,
+        .head_hash = &expected_prev,
+        .failure_reason = failure_reason,
+        .deny_records = deny_list.items,
+    };
+    try std.json.stringify(report, .{ .emit_null_optional_fields = false }, writer);
+    try writer.writeByte('\n');
+    return valid;
 }
 
 /// Opens a file with O_APPEND so concurrent zigpod processes never overwrite each other.
@@ -462,4 +596,43 @@ test "interleaved loggers keep the audit chain consistent (flock + re-read)" {
     const audit_path = try std.fs.path.join(std.testing.allocator, &.{ dir_path, "audit.log" });
     defer std.testing.allocator.free(audit_path);
     try std.testing.expectEqual(@as(usize, 4), try verifyAuditFile(std.testing.allocator, audit_path));
+}
+
+test "logger.deny and writeAuditJson emit structured DENY telemetry and detect tampering" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir_path);
+
+    {
+        var logger = Logger.init(dir_path, false);
+        defer logger.deinit();
+        logger.echo_stderr = false;
+        logger.info("zigpod start", .{});
+        logger.deny("policy.max_memory_bytes", "requested 512m exceeds sandbox ceiling 256m");
+    }
+
+    const audit_path = try std.fs.path.join(alloc, &.{ dir_path, "audit.log" });
+    defer alloc.free(audit_path);
+
+    var json_out = std.ArrayList(u8).init(alloc);
+    defer json_out.deinit();
+    const ok = try writeAuditJson(alloc, audit_path, json_out.writer());
+    try std.testing.expect(ok);
+    try std.testing.expect(std.mem.indexOf(u8, json_out.items, "\"valid\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_out.items, "\"entries\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_out.items, "\"deny_events\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_out.items, "\"rule\":\"policy.max_memory_bytes\"") != null);
+
+    // Tamper with the audit file and verify writeAuditJson reports valid=false.
+    try tmp.dir.writeFile(.{
+        .sub_path = "audit.log",
+        .data = "2026-01-01T00:00:00Z\tINFO\t0000000000000000000000000000000000000000000000000000000000000000\tffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\ttampered\n",
+    });
+    json_out.clearRetainingCapacity();
+    const ok_tampered = try writeAuditJson(alloc, audit_path, json_out.writer());
+    try std.testing.expect(!ok_tampered);
+    try std.testing.expect(std.mem.indexOf(u8, json_out.items, "\"valid\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_out.items, "\"failure_reason\":\"AuditTampered\"") != null);
 }

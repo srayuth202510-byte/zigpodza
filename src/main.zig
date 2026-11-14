@@ -6,6 +6,7 @@ const demo = @import("demo.zig");
 const http = @import("http.zig");
 const log = @import("log.zig");
 const pod = @import("podman_api.zig");
+const policy = @import("policy.zig");
 
 pub const version = "0.1.0";
 
@@ -71,14 +72,24 @@ fn run(gpa_allocator: std.mem.Allocator) u8 {
     };
 
     switch (parsed.command) {
-        .audit => |opt_path| {
-            const audit_path = if (opt_path) |p|
+        .audit => |audit_opts| {
+            const audit_path = if (audit_opts.path) |p|
                 p
             else
                 std.fs.path.join(arena, &.{ cfg.log_dir, "audit.log" }) catch {
                     stderr.writeAll("zigpod: out of memory\n") catch {};
                     return 1;
                 };
+            if (audit_opts.json) {
+                const ok = log.writeAuditJson(arena, audit_path, stdout) catch |e| {
+                    stderr.print(
+                        "zigpod: audit JSON verification failed for '{s}': {s}\n",
+                        .{ audit_path, @errorName(e) },
+                    ) catch {};
+                    return 1;
+                };
+                return if (ok) 0 else 1;
+            }
             const count = log.verifyAuditFile(arena, audit_path) catch |e| {
                 if (e == error.StreamTooLong) {
                     stderr.print(
@@ -154,7 +165,38 @@ fn dispatch(
             return if (code > 0 and code <= 255) @intCast(code) else if (code == 0) 0 else 1;
         },
         .version => try pod.showVersion(client, logger, version, stdout),
-        .run => |r| {
+        .run => |r_orig| {
+            var r = r_orig;
+            var tmpfs_bounds: ?pod.TmpfsBounds = null;
+
+            if (r.profile == .sandbox or r.policy_path != null) {
+                if (r.profile == .sandbox) {
+                    policy.applySandboxDefaults(&r);
+                }
+
+                var loaded_pol: ?std.json.Parsed(policy.Policy) = null;
+                defer if (loaded_pol) |lp| lp.deinit();
+
+                const active_pol: policy.Policy = if (r.policy_path) |p_path| blk: {
+                    loaded_pol = try policy.loadPolicyFile(client.allocator, p_path);
+                    break :blk loaded_pol.?.value;
+                } else blk: {
+                    // Use ./zigpod-policy.json when present; otherwise use built-in fail-closed defaults.
+                    if (std.fs.cwd().access("zigpod-policy.json", .{})) |_| {
+                        loaded_pol = try policy.loadPolicyFile(client.allocator, "zigpod-policy.json");
+                        break :blk loaded_pol.?.value;
+                    } else |_| {
+                        break :blk policy.default_sandbox_policy;
+                    }
+                };
+
+                if (policy.checkRunPolicy(r, active_pol)) |violated_rule| {
+                    logger.deny(violated_rule, "container run rejected by pre-flight sandbox policy");
+                    return pod.ApiError.PolicyViolation;
+                }
+                tmpfs_bounds = .{ .tmp_options = active_pol.tmpfs_tmp_options };
+            }
+
             // Validate and classify each -v mount (bind vs named volume).
             var mount_buf = std.ArrayList(pod.Mount).init(client.allocator);
             defer mount_buf.deinit();
@@ -193,7 +235,8 @@ fn dispatch(
                 has_binding or
                 r.network != null or
                 r.cap_drop.len > 0 or
-                r.cap_add.len > 0;
+                r.cap_add.len > 0 or
+                tmpfs_bounds != null;
             const sec_opts: []const []const u8 = &.{"no-new-privileges"};
             const host_cfg: ?pod.HostConfig = if (has_host_cfg) .{
                 .AutoRemove = auto_remove,
@@ -205,6 +248,7 @@ fn dispatch(
                 .NetworkMode = r.network,
                 .CapDrop = if (r.cap_drop.len > 0) r.cap_drop else null,
                 .CapAdd = if (r.cap_add.len > 0) r.cap_add else null,
+                .Tmpfs = tmpfs_bounds,
             } else null;
 
             const req = pod.ContainerCreateRequest{
@@ -290,42 +334,49 @@ fn reportFailure(logger: *log.Logger, cmd: cli.Command, socket_path: []const u8,
             "Invalid HTTP response from Podman socket '{s}'.",
             .{socket_path},
         ),
-        http.Error.InvalidRequestPath => logger.err(
+        http.Error.InvalidRequestPath => logger.deny(
+            "http.validateRequestTarget",
             "Rejected invalid HTTP request path.",
-            .{},
         ),
-        pod.ApiError.InvalidIdentifier => logger.err(
+        pod.ApiError.InvalidIdentifier => logger.deny(
+            "api.validateIdentifier",
             "Invalid container identifier or name (allowed: alphanumeric, '-', '_', '.', ':').",
-            .{},
         ),
-        pod.ApiError.InvalidHostPath => logger.err(
+        pod.ApiError.InvalidHostPath => logger.deny(
+            "api.validateHostPath",
             "Rejected unsafe host path or volume name. Bind mounts must be absolute, traversal-free, and may not target /, /etc, /proc, /sys, /dev, /boot, /run, /root, or container-engine state; sensitive /etc files are read-only.",
-            .{},
         ),
-        pod.ApiError.InvalidMountTarget => logger.err(
+        pod.ApiError.InvalidMountTarget => logger.deny(
+            "api.validateContainerPath",
             "Rejected invalid container mount target (must be an absolute, traversal-free path).",
-            .{},
         ),
-        pod.ApiError.InvalidPort => logger.err(
+        pod.ApiError.InvalidPort => logger.deny(
+            "api.validatePortMapping",
             "Rejected invalid port mapping. Use [IP:]HOST:CONTAINER[/tcp|udp|sctp] with ports 1-65535 and an IPv4 host address.",
-            .{},
         ),
-        pod.ApiError.InvalidNetwork => logger.err(
+        pod.ApiError.InvalidNetwork => logger.deny(
+            "api.validateNetworkMode",
             "Rejected invalid --network mode. Use none, bridge, host, pasta, or slirp4netns.",
-            .{},
         ),
-        pod.ApiError.InvalidWorkdir => logger.err(
+        pod.ApiError.InvalidWorkdir => logger.deny(
+            "api.validateWorkdir",
             "Rejected invalid --workdir (must be an absolute, traversal-free container path).",
-            .{},
         ),
-        pod.ApiError.InvalidUser => logger.err(
+        pod.ApiError.InvalidUser => logger.deny(
+            "api.validateUser",
             "Rejected invalid --user. Use USER or USER:GROUP (alphanumerics plus '_', '-', '.').",
-            .{},
         ),
-        pod.ApiError.InvalidCapability => logger.err(
+        pod.ApiError.InvalidCapability => logger.deny(
+            "api.validateCapability",
             "Rejected invalid capability name. Use ALL or an uppercase name such as NET_ADMIN.",
-            .{},
         ),
+        pod.ApiError.InvalidPolicyFile => logger.deny(
+            "policy.loadPolicyFile",
+            "Rejected missing or malformed policy file (zigpod-policy.json).",
+        ),
+        pod.ApiError.PolicyViolation => {
+            // Specific rule already recorded via logger.deny in dispatch.
+        },
         pod.ApiError.PodmanApiError => {
             // Already logged with HTTP status and response details by podman_api.
         },
@@ -343,6 +394,7 @@ test {
     _ = http;
     _ = log;
     _ = pod;
+    _ = policy;
     _ = @import("utils.zig");
     std.testing.refAllDecls(@This());
 }
