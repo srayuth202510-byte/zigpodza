@@ -1,5 +1,7 @@
 # Multi-stage build for zigpod
-FROM alpine:3.20 AS builder
+# Alpine 3.21 community is the first Alpine release shipping zig 0.13.0,
+# matching build.zig.zon minimum_zig_version (Alpine 3.20 only has zig 0.12.0).
+FROM alpine:3.21 AS builder
 
 RUN apk add --no-cache zig
 
@@ -9,7 +11,7 @@ COPY src ./src
 
 RUN zig build -Doptimize=ReleaseSafe
 
-FROM alpine:3.20
+FROM alpine:3.21
 
 COPY --from=builder /src/zig-out/bin/zigpod /usr/local/bin/zigpod
 
