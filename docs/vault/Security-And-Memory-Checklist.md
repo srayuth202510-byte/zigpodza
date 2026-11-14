@@ -53,6 +53,6 @@ status: active
 - [ ] Partial tail จาก crash ต้องถูก repair ตอน init และ `verifyAuditFile` ต้องไม่รายงานเป็น tampering (BUG-008)
 - [ ] `system.log` และ `error.log` ไม่เป็น world-writable (`o+w`) และ log ใหม่ต้องเป็น `0640` (BUG-013)
 - [ ] Timestamp จากทุกผู้เขียน log (Zig + shell scripts) ต้องเป็น ค.ศ. UTC — สคริปต์ต้อง pin `LC_ALL=C` (BUG-011)
-- [ ] `zigpod demo` ผ่านครบ 14 cases (fail-closed ALLOW/DENY) โดยใช้ `std.testing.allocator` ไม่ leak
+- [ ] `zigpod demo` ผ่านครบ 18 cases (fail-closed ALLOW/DENY) โดยใช้ `std.testing.allocator` ไม่ leak
 - [ ] CI / `Makefile` / Vault parity ผ่าน `python3 scripts/check-ci-parity.py`, `scripts/smoke.sh`, และ `scripts/graph-query.py`
 - [ ] Release binary (`zig build -Doptimize=ReleaseSafe`) ไม่มี executable stack (`GNU_STACK` ต้องไม่เป็น `RWE`) และไม่มี `RWX` PT_LOAD segment

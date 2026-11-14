@@ -116,10 +116,10 @@ flowchart LR
 
 | Module | Lines | Public Decls | Unit Tests | Memory Gate |
 | :--- | ---: | ---: | ---: | :--- |
-| [cli.zig](../../src/cli.zig) | 1579 | 40 | 25 | `std.testing.allocator` |
+| [cli.zig](../../src/cli.zig) | 1605 | 40 | 25 | `std.testing.allocator` |
 | [cli_specs.zig](../../src/cli_specs.zig) | 220 | 12 | 1 | `std.testing.allocator` |
 | [cli_types.zig](../../src/cli_types.zig) | 584 | 44 | 12 | `std.testing.allocator` |
-| [completion.zig](../../src/completion.zig) | 145 | 2 | 1 | `std.testing.allocator` |
+| [completion.zig](../../src/completion.zig) | 170 | 2 | 1 | `std.testing.allocator` |
 | [config.zig](../../src/config.zig) | 243 | 7 | 5 | `std.testing.allocator` |
 | [demo.zig](../../src/demo.zig) | 486 | 6 | 2 | `std.testing.allocator` |
 | [http.zig](../../src/http.zig) | 668 | 21 | 5 | `std.testing.allocator` |

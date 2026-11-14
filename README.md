@@ -30,10 +30,12 @@ zigpodza/
 │  ├─ main.zig         # CLI entry point, dispatch & error/DENY reporting
 │  ├─ cli.zig          # Subcommand & flag parser
 │  ├─ config.zig       # Socket path & log directory resolution
-│  ├─ demo.zig         # 14-case fail-closed ALLOW/DENY self-test suite
+│  ├─ demo.zig         # 18-case fail-closed ALLOW/DENY self-test suite
 │  ├─ http.zig         # HTTP/1.1 Unix-socket client (Content-Length, chunked streaming, 101 upgrade, RawTermGuard)
 │  ├─ podman_types.zig # Podman/Docker v1.40 DTO structs, JSON serializers & stats calculators
 │  ├─ podman_api.zig   # Docker/Podman v1.40 API endpoints, security validators & LogDemuxer
+│  ├─ podman_build.zig # Deterministic ustar build-context archiver & POST /v1.40/build client
+│  ├─ podman_pods.zig  # Libpod /v4.0.0/libpod/pods lifecycle endpoints
 │  ├─ policy.zig       # --profile=sandbox & zigpod-policy.json pre-flight engine
 │  ├─ log.zig          # Timestamped file logger (system.log, error.log & SHA-256 hash-chained audit.log)
 │  └─ utils.zig        # Formatting helpers (shortId, formatSize)
@@ -327,9 +329,9 @@ zigpod run --rm --profile=sandbox alpine:3.20 echo sandbox-ok
 
 `zigpod exec [OPTIONS] CONTAINER CMD...` creates an exec instance (`POST /containers/{id}/exec`), starts it (`POST /exec/{id}/start`), demultiplexes the Docker stream to stdout/stderr (or upgrades to HTTP `101 Switching Protocols` with `RawTermGuard` when `-i`/`-t`/`-it` is specified), then reads `GET /exec/{id}/json` and propagates the command's exit code as the CLI exit status. `-e/--env`, `-u/--user`, and `-w/--workdir` are validated with the same validators as `run`; the daemon-allocated exec ID is re-validated with `validateIdentifier` before it is reused in a URL (BUG-018). The start call uses the blocking socket timeout so long-running commands are not cut off.
 
-### Built-In 14-Case Fail-Closed Self-Test (`zigpod demo`)
+### Built-In 18-Case Fail-Closed Self-Test (`zigpod demo`)
 
-Run the deterministic 14-case `ALLOW`/`DENY` verification suite locally (no running Podman daemon required):
+Run the deterministic 18-case `ALLOW`/`DENY` verification suite locally (no running Podman daemon required):
 
 ```bash
 zigpod demo

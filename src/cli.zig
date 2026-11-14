@@ -68,6 +68,10 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
             global.verbose = true;
         } else if (eql(a, "--socket")) {
             global.socket = try takeValue(args, &i);
+        } else if (std.mem.startsWith(u8, a, "--socket=")) {
+            const v = a["--socket=".len..];
+            if (v.len == 0) return error.MissingValue;
+            global.socket = v;
         } else if (eql(a, "-h") or eql(a, "--help")) {
             return .{ .global = global, .command = .help };
         } else if (eql(a, "--version")) {
@@ -182,6 +186,14 @@ fn parseBuild(args: []const []const u8) ParseError!Command {
         const a = args[i];
         if (eql(a, "-t") or eql(a, "--tag")) {
             tag = try takeValue(args, &i);
+        } else if (std.mem.startsWith(u8, a, "--tag=")) {
+            const v = a["--tag=".len..];
+            if (v.len == 0) return error.MissingValue;
+            tag = v;
+        } else if (std.mem.startsWith(u8, a, "-t=")) {
+            const v = a["-t=".len..];
+            if (v.len == 0) return error.MissingValue;
+            tag = v;
         } else if (isFlag(a)) {
             return error.UnknownFlag;
         } else if (ctx == null) {
@@ -1576,4 +1588,18 @@ test "parse tag, history, commit, and policy subcommands + error paths" {
     try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "commit", "web" }));
     try std.testing.expectError(error.MissingArgument, parse(alloc, &.{"policy"}));
     try std.testing.expectError(error.UnknownCommand, parse(alloc, &.{ "policy", "bogus" }));
+
+    const p_build = try parse(alloc, &.{ "--socket=/tmp/custom.sock", "build", "--tag=myimg:1.0", "." });
+    defer p_build.deinit(alloc);
+    try std.testing.expectEqualStrings("/tmp/custom.sock", p_build.global.socket.?);
+    try std.testing.expectEqualStrings("myimg:1.0", p_build.command.build.tag);
+    try std.testing.expectEqualStrings(".", p_build.command.build.ctx);
+
+    const p_build_short = try parse(alloc, &.{ "build", "-t=myimg:2.0", "./app" });
+    defer p_build_short.deinit(alloc);
+    try std.testing.expectEqualStrings("myimg:2.0", p_build_short.command.build.tag);
+    try std.testing.expectEqualStrings("./app", p_build_short.command.build.ctx);
+
+    try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "--socket=", "ps" }));
+    try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "build", "--tag=", "." }));
 }

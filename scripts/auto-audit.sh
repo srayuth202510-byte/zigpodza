@@ -133,9 +133,9 @@ else
     fail "Missing checked arithmetic in src/http_parser.zig, src/podman_logs.zig, or src/cli_specs.zig."
 fi
 
-# 7. Require socket timeout polling, hardening config, audit verification, and 14-case demo
+# 7. Require socket timeout polling, hardening config, audit verification, and 18-case demo
 if has_match "waitReadable" "src/http.zig" && has_match "verifyAuditFile" "src/log.zig" && has_match "ReadonlyRootfs" "src/podman_api.zig" && has_match "runSelfTest" "src/demo.zig" && has_match "std\.testing\.allocator" "src/demo.zig"; then
-    pass "Timeout poll, HostConfig hardening, audit hash-chain verification, and 14-case demo present."
+    pass "Timeout poll, HostConfig hardening, audit hash-chain verification, and 18-case demo present."
 else
     fail "Missing timeout, HostConfig hardening, verifyAuditFile, or runSelfTest/testing.allocator in src/demo.zig."
 fi

@@ -16,7 +16,7 @@ test: ## Run all unit and integration tests
 test-adv: ## Run security & hardening gates (requires zig)
 	./scripts/security-check.sh --require-zig
 
-demo: ## Run built-in 14-case fail-closed enforcement demo
+demo: ## Run built-in 18-case fail-closed enforcement demo
 	$(ZIG) build run -- demo
 
 e2e: ## Run end-to-end smoke, hardening, and audit-tamper verification

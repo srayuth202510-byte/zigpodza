@@ -4,7 +4,7 @@ const cli_types = @import("cli_types.zig");
 
 pub const Shell = cli_types.Shell;
 
-const subcommands = "run ps images pull rmi tag history commit start stop restart pause unpause rename kill rm logs top exec inspect stats volume network system port wait diff events policy completion audit demo version help";
+const subcommands = "run ps images pull rmi tag history commit build start stop restart pause unpause rename kill rm logs top exec inspect stats volume network pod system port wait diff events policy completion audit demo version help";
 
 const bash_template =
     \\# bash completion for zigpod
@@ -24,6 +24,12 @@ const bash_template =
     \\            ;;
     \\        network)
     \\            COMPREPLY=( $(compgen -W "ls inspect" -- "${{cur}}") )
+    \\            ;;
+    \\        pod)
+    \\            COMPREPLY=( $(compgen -W "create ps stop rm" -- "${{cur}}") )
+    \\            ;;
+    \\        policy)
+    \\            COMPREPLY=( $(compgen -W "show check" -- "${{cur}}") )
     \\            ;;
     \\        system)
     \\            COMPREPLY=( $(compgen -W "ping df prune" -- "${{cur}}") )
@@ -52,6 +58,10 @@ const zsh_script =
     \\        'images:List local images'
     \\        'pull:Pull an image'
     \\        'rmi:Remove a local image'
+    \\        'tag:Create a tag for a local image'
+    \\        'history:Show image history'
+    \\        'commit:Create a new image from a container'
+    \\        'build:Build an image from a directory'
     \\        'start:Start a container'
     \\        'stop:Stop a container'
     \\        'restart:Restart a container'
@@ -67,11 +77,13 @@ const zsh_script =
     \\        'stats:Display container resource usage'
     \\        'volume:Manage named volumes'
     \\        'network:Manage networks'
+    \\        'pod:Manage pods'
     \\        'system:System maintenance'
     \\        'port:List container port mappings'
     \\        'wait:Wait for a container to stop'
     \\        'diff:Inspect filesystem changes'
     \\        'events:Stream daemon events'
+    \\        'policy:Inspect or validate security policy'
     \\        'completion:Generate shell completion'
     \\        'audit:Verify hash-chained audit.log'
     \\        'demo:Run self-test suite'
@@ -92,6 +104,12 @@ const zsh_script =
     \\        network)
     \\            _values 'action' ls inspect
     \\            ;;
+    \\        pod)
+    \\            _values 'action' create ps stop rm
+    \\            ;;
+    \\        policy)
+    \\            _values 'action' show check
+    \\            ;;
     \\        system)
     \\            _values 'action' ping df prune
     \\            ;;
@@ -110,6 +128,8 @@ const fish_template =
     \\complete -c zigpod -n "__fish_seen_subcommand_from completion" -a "bash zsh fish"
     \\complete -c zigpod -n "__fish_seen_subcommand_from volume" -a "ls create rm inspect"
     \\complete -c zigpod -n "__fish_seen_subcommand_from network" -a "ls inspect"
+    \\complete -c zigpod -n "__fish_seen_subcommand_from pod" -a "create ps stop rm"
+    \\complete -c zigpod -n "__fish_seen_subcommand_from policy" -a "show check"
     \\complete -c zigpod -n "__fish_seen_subcommand_from system" -a "ping df prune"
     \\
 ;
@@ -134,12 +154,17 @@ test "writeCompletion emits valid scripts for bash, zsh, and fish" {
     try writeCompletion(.bash, out.writer());
     try std.testing.expect(std.mem.indexOf(u8, out.items, "complete -F _zigpod_completions zigpod") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "events") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "build") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "pod") != null);
 
     out.clearRetainingCapacity();
     try writeCompletion(.zsh, out.writer());
     try std.testing.expect(std.mem.indexOf(u8, out.items, "#compdef zigpod") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "'build:Build an image from a directory'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "'pod:Manage pods'") != null);
 
     out.clearRetainingCapacity();
     try writeCompletion(.fish, out.writer());
     try std.testing.expect(std.mem.indexOf(u8, out.items, "complete -c zigpod -f") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "__fish_seen_subcommand_from pod") != null);
 }
