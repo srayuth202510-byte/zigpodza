@@ -96,6 +96,7 @@ fn loadTomlFile(allocator: std.mem.Allocator, path: []const u8) !?TomlConfig {
 pub const Config = struct {
     socket_path: []const u8,
     log_dir: []const u8,
+    verbose: bool = false,
 
     /// Loads configuration into freshly allocated strings owned by `allocator`.
     /// Call `deinit(allocator)` when no longer needed.
@@ -106,9 +107,11 @@ pub const Config = struct {
         const socket_path = try resolveSocket(allocator, socket_override, toml_opt);
         errdefer allocator.free(socket_path);
         const log_dir = try resolveLogDir(allocator, toml_opt);
+        const verbose = if (toml_opt) |t| (t.verbose orelse false) else false;
         return .{
             .socket_path = socket_path,
             .log_dir = log_dir,
+            .verbose = verbose,
         };
     }
 
@@ -149,7 +152,10 @@ fn resolveSocket(allocator: std.mem.Allocator, socket_override: ?[]const u8, tom
 
     if (toml_opt) |t| {
         if (t.default_socket) |s| {
-            if (s.len > 0) return allocator.dupe(u8, stripUnixScheme(s));
+            const stripped = stripUnixScheme(s);
+            if (stripped.len > 0 and !std.mem.eql(u8, stripped, "/run/podman/podman.sock")) {
+                return allocator.dupe(u8, stripped);
+            }
         }
     }
 
@@ -160,6 +166,13 @@ fn resolveSocket(allocator: std.mem.Allocator, socket_override: ?[]const u8, tom
             return rootless;
         } else |_| {
             allocator.free(rootless);
+        }
+    }
+
+    if (toml_opt) |t| {
+        if (t.default_socket) |s| {
+            const stripped = stripUnixScheme(s);
+            if (stripped.len > 0) return allocator.dupe(u8, stripped);
         }
     }
     return allocator.dupe(u8, "/run/podman/podman.sock");

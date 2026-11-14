@@ -149,7 +149,7 @@ fn run(gpa_allocator: std.mem.Allocator) u8 {
         else => {},
     }
 
-    var logger = log.Logger.init(cfg.log_dir, parsed.global.verbose);
+    var logger = log.Logger.init(cfg.log_dir, parsed.global.verbose or cfg.verbose);
     defer logger.deinit();
 
     logger.info("zigpod {s} command={s} socket={s}", .{
@@ -483,7 +483,18 @@ fn reportFailure(logger: *log.Logger, cmd: cli.Command, socket_path: []const u8,
             // Already logged with HTTP status and response details by podman_api.
         },
         pod.ApiError.NotFound => {
-            // Already logged with the target name by podman_api.inspect.
+            // Already logged with the target name by inspect/buildImage.
+        },
+        pod.ApiError.MissingDockerfile => logger.err(
+            "No Dockerfile or Containerfile found in build context directory.",
+            .{},
+        ),
+        pod.ApiError.BuildContextTooLarge => logger.err(
+            "Build context exceeds the 512 MiB limit.",
+            .{},
+        ),
+        pod.ApiError.BuildFailed => {
+            // Already logged with build stream error details by podman_build.
         },
         else => logger.err("command '{s}' failed: {s}", .{ @tagName(cmd), @errorName(err) }),
     }

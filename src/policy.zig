@@ -201,7 +201,12 @@ pub fn checkPolicyFile(allocator: std.mem.Allocator, path: []const u8, json_mode
     const parsed = try loadPolicyFile(allocator, path);
     defer parsed.deinit();
     if (json_mode) {
-        try writer.print("{{\"valid\":true,\"path\":\"{s}\",\"profile\":\"{s}\"}}\n", .{ path, parsed.value.profile });
+        try std.json.stringify(.{
+            .valid = true,
+            .path = path,
+            .profile = parsed.value.profile,
+        }, .{}, writer);
+        try writer.writeByte('\n');
     } else {
         try writer.print("policy '{s}' valid (profile={s})\n", .{ path, parsed.value.profile });
     }
@@ -314,6 +319,11 @@ test "showPolicy and checkPolicyFile render and validate policy JSON without lea
     out.clearRetainingCapacity();
     try checkPolicyFile(alloc, "zigpod-policy.json", false, out.writer());
     try std.testing.expect(std.mem.indexOf(u8, out.items, "valid") != null);
+
+    out.clearRetainingCapacity();
+    try checkPolicyFile(alloc, "zigpod-policy.json", true, out.writer());
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"valid\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"profile\":\"sandbox\"") != null);
 }
 
 test "loadPolicyFile parses valid zigpod-policy.json and rejects malformed files" {

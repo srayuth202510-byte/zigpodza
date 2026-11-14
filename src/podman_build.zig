@@ -224,7 +224,10 @@ pub fn buildImage(
     }
 
     // Fail-closed: refuse to build without a Dockerfile/Containerfile in the context.
-    var dir = std.fs.cwd().openDir(ctx_dir, .{}) catch return ApiError.NotFound;
+    var dir = std.fs.cwd().openDir(ctx_dir, .{}) catch {
+        logger.err("build context directory not found: {s}", .{ctx_dir});
+        return ApiError.NotFound;
+    };
     defer dir.close();
     const real_ctx = dir.realpathAlloc(client.allocator, ".") catch return ApiError.InvalidHostPath;
     defer client.allocator.free(real_ctx);

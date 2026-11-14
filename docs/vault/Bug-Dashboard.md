@@ -120,15 +120,15 @@ flowchart LR
 | [cli_specs.zig](../../src/cli_specs.zig) | 220 | 12 | 1 | `std.testing.allocator` |
 | [cli_types.zig](../../src/cli_types.zig) | 584 | 44 | 12 | `std.testing.allocator` |
 | [completion.zig](../../src/completion.zig) | 145 | 2 | 1 | `std.testing.allocator` |
-| [config.zig](../../src/config.zig) | 230 | 7 | 5 | `std.testing.allocator` |
+| [config.zig](../../src/config.zig) | 243 | 7 | 5 | `std.testing.allocator` |
 | [demo.zig](../../src/demo.zig) | 486 | 6 | 2 | `std.testing.allocator` |
 | [http.zig](../../src/http.zig) | 668 | 21 | 5 | `std.testing.allocator` |
 | [http_parser.zig](../../src/http_parser.zig) | 258 | 2 | 8 | `std.testing.allocator` |
 | [http_types.zig](../../src/http_types.zig) | 263 | 18 | 11 | `std.testing.allocator` |
 | [log.zig](../../src/log.zig) | 711 | 20 | 9 | `std.testing.allocator` |
-| [main.zig](../../src/main.zig) | 722 | 2 | 2 | `gpa.deinit() != .leak` |
+| [main.zig](../../src/main.zig) | 733 | 2 | 2 | `gpa.deinit() != .leak` |
 | [podman_api.zig](../../src/podman_api.zig) | 1547 | 99 | 11 | `std.testing.allocator` |
-| [podman_build.zig](../../src/podman_build.zig) | 516 | 4 | 5 | `std.testing.allocator` |
+| [podman_build.zig](../../src/podman_build.zig) | 519 | 4 | 5 | `std.testing.allocator` |
 | [podman_images.zig](../../src/podman_images.zig) | 421 | 7 | 2 | `std.testing.allocator` |
 | [podman_logs.zig](../../src/podman_logs.zig) | 838 | 10 | 8 | `std.testing.allocator` |
 | [podman_pods.zig](../../src/podman_pods.zig) | 130 | 4 | 1 | `std.testing.allocator` |
@@ -136,7 +136,7 @@ flowchart LR
 | [podman_test_helpers.zig](../../src/podman_test_helpers.zig) | 54 | 4 | 0 | `MISSING` |
 | [podman_types.zig](../../src/podman_types.zig) | 870 | 57 | 32 | `std.testing.allocator` |
 | [podman_validate.zig](../../src/podman_validate.zig) | 533 | 27 | 13 | `std.testing.allocator` |
-| [policy.zig](../../src/policy.zig) | 350 | 16 | 5 | `std.testing.allocator` |
+| [policy.zig](../../src/policy.zig) | 360 | 16 | 5 | `std.testing.allocator` |
 | [utils.zig](../../src/utils.zig) | 42 | 3 | 2 | `stack-only (no heap)` |
 
 ## Static Security & Memory Gates
