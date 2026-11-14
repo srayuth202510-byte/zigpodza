@@ -4173,3 +4173,103 @@ test transitive failure
    +- zig test Debug native 6 errors
 error: the following build command failed with exit code 1:
 /home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0xbd788fda -Za31cf58b18dd521c test
+2026-11-14T12:04:04Z [ERROR] auto-audit detected 1 failure(s):
+OK: No 'page_allocator' usage in src/.
+OK: GPA leak check is enforced.
+OK: No BUG-001 AccessDenied mismatch in src/http.zig.
+OK: std.testing.allocator present in src/main.zig.
+OK: std.testing.allocator present in src/cli.zig.
+OK: std.testing.allocator present in src/cli_specs.zig.
+OK: std.testing.allocator present in src/config.zig.
+OK: std.testing.allocator present in src/http.zig.
+OK: std.testing.allocator present in src/http_parser.zig.
+OK: std.testing.allocator present in src/podman_api.zig.
+OK: std.testing.allocator present in src/podman_validate.zig.
+OK: std.testing.allocator present in src/podman_logs.zig.
+OK: std.testing.allocator present in src/podman_images.zig.
+OK: std.testing.allocator present in src/podman_system.zig.
+OK: std.testing.allocator present in src/log.zig.
+OK: std.testing.allocator present in src/policy.zig.
+OK: validateRequestTarget() enforced in src/http.zig.
+OK: validateIdentifier() enforced in src/podman_*.zig.
+OK: validateHostPath() fail-closed host mount policy enforced in src/podman_*.zig.
+OK: validatePortMapping() fail-closed port policy enforced in src/podman_*.zig.
+OK: validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_*.zig.
+OK: validateResourceRef() inspect path guard enforced in src/podman_*.zig.
+OK: createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig.
+OK: checkRunPolicy(), writeAuditJson(), and logger.deny() enforced (BUG-019).
+OK: Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser.
+OK: Timeout poll, HostConfig hardening, audit hash-chain verification, and 14-case demo present.
+OK: Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable.
+FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)...
+test
++- run test
+   +- zig test Debug native 6 errors
+src/podman_system.zig:52:33: error: capture shadows declaration of 'v'
+src/podman_system.zig:7:1: note: declared here
+src/podman_system.zig:134:11: error: local constant shadows declaration of 'v'
+src/podman_system.zig:7:1: note: declared here
+src/podman_system.zig:246:17: error: capture shadows declaration of 'v'
+src/podman_system.zig:7:1: note: declared here
+src/podman_system.zig:343:11: error: local constant shadows declaration of 'v'
+src/podman_system.zig:7:1: note: declared here
+src/podman_logs.zig:624:9: error: use of undeclared identifier 'ApiError'
+src/podman_logs.zig:823:9: error: use of undeclared identifier 'ApiError'
+error: the following command failed with 6 compilation errors:
+/home/mitsword/.local/opt/zig-0.13.0/zig test -ODebug -Mroot=/home/mitsword/เอกสาร/zigpodza/src/main.zig --cache-dir /home/mitsword/เอกสาร/zigpodza/.zig-cache --global-cache-dir /home/mitsword/.cache/zig --name test --listen=- 
+Build Summary: 0/3 steps succeeded; 1 failed (disable with --summary none)
+test transitive failure
++- run test transitive failure
+   +- zig test Debug native 6 errors
+error: the following build command failed with exit code 1:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0x104e1ad8 -Z8d304d1744a9cf4a test
+2026-11-14T12:04:20Z [ERROR] auto-audit detected 1 failure(s):
+OK: No 'page_allocator' usage in src/.
+OK: GPA leak check is enforced.
+OK: No BUG-001 AccessDenied mismatch in src/http.zig.
+OK: std.testing.allocator present in src/main.zig.
+OK: std.testing.allocator present in src/cli.zig.
+OK: std.testing.allocator present in src/cli_specs.zig.
+OK: std.testing.allocator present in src/config.zig.
+OK: std.testing.allocator present in src/http.zig.
+OK: std.testing.allocator present in src/http_parser.zig.
+OK: std.testing.allocator present in src/podman_api.zig.
+OK: std.testing.allocator present in src/podman_validate.zig.
+OK: std.testing.allocator present in src/podman_logs.zig.
+OK: std.testing.allocator present in src/podman_images.zig.
+OK: std.testing.allocator present in src/podman_system.zig.
+OK: std.testing.allocator present in src/log.zig.
+OK: std.testing.allocator present in src/policy.zig.
+OK: validateRequestTarget() enforced in src/http.zig.
+OK: validateIdentifier() enforced in src/podman_*.zig.
+OK: validateHostPath() fail-closed host mount policy enforced in src/podman_*.zig.
+OK: validatePortMapping() fail-closed port policy enforced in src/podman_*.zig.
+OK: validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_*.zig.
+OK: validateResourceRef() inspect path guard enforced in src/podman_*.zig.
+OK: createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig.
+OK: checkRunPolicy(), writeAuditJson(), and logger.deny() enforced (BUG-019).
+OK: Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser.
+OK: Timeout poll, HostConfig hardening, audit hash-chain verification, and 14-case demo present.
+OK: Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable.
+FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)...
+test
++- run test
+   +- zig test Debug native 6 errors
+src/podman_system.zig:52:33: error: capture shadows declaration of 'v'
+src/podman_system.zig:7:1: note: declared here
+src/podman_system.zig:134:11: error: local constant shadows declaration of 'v'
+src/podman_system.zig:7:1: note: declared here
+src/podman_system.zig:246:17: error: capture shadows declaration of 'v'
+src/podman_system.zig:7:1: note: declared here
+src/podman_system.zig:343:11: error: local constant shadows declaration of 'v'
+src/podman_system.zig:7:1: note: declared here
+src/podman_logs.zig:624:9: error: use of undeclared identifier 'ApiError'
+src/podman_logs.zig:823:9: error: use of undeclared identifier 'ApiError'
+error: the following command failed with 6 compilation errors:
+/home/mitsword/.local/opt/zig-0.13.0/zig test -ODebug -Mroot=/home/mitsword/เอกสาร/zigpodza/src/main.zig --cache-dir /home/mitsword/เอกสาร/zigpodza/.zig-cache --global-cache-dir /home/mitsword/.cache/zig --name test --listen=- 
+Build Summary: 0/3 steps succeeded; 1 failed (disable with --summary none)
+test transitive failure
++- run test transitive failure
+   +- zig test Debug native 6 errors
+error: the following build command failed with exit code 1:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0xea9d1897 -Z8856a25e0cbf5a05 test

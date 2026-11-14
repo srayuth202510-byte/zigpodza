@@ -56,5 +56,8 @@ if [[ -x "$BALOR_BIN" && -d "$BALOR_DATA" ]]; then
 else
     echo "    Info: balorsh data directory not initialized or not accessible in current environment."
 fi
+if [[ -x "$ROOT_DIR/scripts/balor-security-audit.sh" ]]; then
+    echo "    $("$ROOT_DIR/scripts/balor-security-audit.sh" --offline --quiet)"
+fi
 
 echo "Security check completed."
