@@ -339,12 +339,12 @@ flowchart LR
 #### 🛡️ 6A. Balor Toolkit (`balorsh` v1.2.0) Security Integration
 - [x] **1. Offline deterministic log & policy audit pipeline (`scripts/balor-security-audit.sh`)**:
   - `--offline` / `--json` / `--quiet` modes parse `audit.log` (5-column hash-chain format with DENY/ERROR/malformed stats) and `zigpod-policy.json` guardrails (read-only, no-new-privileges, cap-drop-all, allowed networks) with zero network access -- DONE (wired into `scripts/security-check.sh` and `scripts/smoke.sh`)
-- [ ] **1b. AI Log Analyst & Blue-Team live reports (`balorsh llm` on Ollama)**:
-  - `--llm` currently pipes the sanitized summary to `balorsh llm --persona loganalyst` when available; automated **Incident & Threat Reports** written to `/opt/balorsh/data/llm/logs/` with actionable `zigpod-policy.json` hardening recommendations require a running Ollama instance (deterministic offline fallback is complete)
+- [x] **1b. AI Log Analyst & Blue-Team live reports (Ollama)**:
+  - `--llm --persona loganalyst|blueteam|purpleteam|redteam|base` auto-starts `ollama serve` when down, auto-creates `balor:<persona>` from `Modelfile.<persona>` (first run), and generates an **Incident & Threat Report** (`[TYPE] -> [SUMMARY] -> [HYPOTHESES] -> [NEXT STEPS] -> [RECOMMENDATIONS]`) saved to `/opt/balorsh/data/llm/logs/analysis_zigpod_<timestamp>.txt` -- DONE (verified end-to-end with `senecallm-q4_k_m.gguf`; `--llm-timeout` bounds inference; offline deterministic fallback retained)
 - [x] **2a. Container attack-surface discovery from `zigpod inspect --json`**:
   - `--inspect-json FILE` / `--container NAME` extract `NetworkSettings` IPs and `HostConfig.PortBindings` into structured `endpoints` findings for SIEM/automation -- DONE
-- [ ] **2b. Live vulnerability scanner execution (`networkscan` + `webexploit`)**:
-  - `--run-scan` is a readiness stub; actual `nmap -F/-sV -sC --script vuln`, `whatweb`, `nikto`, `gobuster`, `ffuf` invocation against discovered endpoints and piping results into `balor:blueteam` remain TODO (requires balorsh stacks)
+- [x] **2b. Live vulnerability scanner execution (`networkscan` + `webexploit`)**:
+  - `--run-scan` executes real scanners against every discovered endpoint: `nmap -Pn -sV -p <port> --open <ip>` and `whatweb http://<ip>:<port>` (default), plus `nikto` and `gobuster dir` with `--scan-deep`; per-tool `--scan-timeout` bound, ANSI-stripped raw output merged into the report (`scans` JSON key / "Live Scan Results" section) -- DONE (verified against a live local HTTP target: nmap fingerprinted `SimpleHTTPServer 0.6 (Python 3.14)`, whatweb returned `200 OK` + server tech); `ffuf`/`hydra` chaining remains an optional future extension
 - [x] **3a. Offline purple-team policy review**:
   - Rule-based checks of `HostConfig` (`ReadonlyRootfs`, `CapDrop=ALL`, `CapAdd`, `SecurityOpt no-new-privileges`, `NetworkMode=host` → CRITICAL, `PidsLimit`) against `zigpod-policy.json` in the same report -- DONE
 - [ ] **3b. Red-team adversarial demo vectors & JSON export (`purpleteam` / `redteam`)**:

@@ -6,15 +6,21 @@ cd "$ROOT_DIR"
 
 BALOR_BIN="${BALOR_BIN:-/usr/local/bin/balorsh}"
 BALOR_DATA="${BALORSH_DATA_DIR:-/opt/balorsh/data}"
+OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
 
 MODE="audit"
 JSON_OUT=false
 QUIET=false
 USE_LLM=false
 RUN_SCAN=false
+SCAN_DEEP=false
 INSPECT_FILE=""
 CONTAINER=""
 OUT_FILE=""
+PERSONA="loganalyst"
+SCAN_TIMEOUT="${SCAN_TIMEOUT:-120}"
+LLM_TIMEOUT="${LLM_TIMEOUT:-600}"
+OUT_DIR=""
 ENV_ITEMS=()
 
 usage() {
@@ -22,26 +28,40 @@ usage() {
 Usage: scripts/balor-security-audit.sh [OPTIONS]
 
 Phase 6A Deep Balor & Offline Security Audit Pipeline for ZigPod:
-  --offline             Force deterministic offline rule-based analysis (default when balorsh is unavailable)
+  --offline             Force deterministic offline rule-based analysis only
+                        (disables --llm and --run-scan; default when balorsh is unavailable)
   --json                Emit structured JSON report
   --quiet               Compact one-line summary (for security-check.sh)
-  --llm                 Pipe sanitized audit summary to balorsh llm (loganalyst/blueteam) when available
+  --llm                 Generate a live Incident & Threat Report via Ollama
+                        (balor:<persona>; deterministic offline report when Ollama is down)
+  --persona NAME        balor persona model to use: loganalyst|blueteam|purpleteam|redteam|base
+                        (default: loganalyst; created from Modelfile.<persona> on demand)
   --inspect-json FILE   Audit a ContainerInspect JSON file (6A.2 surface + 6A.3 purple-team + 6A.4 env hygiene)
   --container NAME      Run `zigpod inspect --json NAME` and audit the live container
   --env KEY=VALUE       Check an environment variable for secret/hash hygiene (repeatable)
-  --run-scan            When balorsh is available, run networkscan/webexploit against discovered ports
-  --out FILE            Write report to FILE
+  --run-scan            Execute real scanners (nmap -sV, whatweb) against discovered endpoints
+  --scan-deep           Additionally run nikto and gobuster on HTTP endpoints (slow)
+  --scan-timeout SECS   Per-tool timeout for live scans (default: 120)
+  --llm-timeout SECS    Timeout for the Ollama inference step (default: 600)
+  --out FILE            Write final report to FILE
   -h, --help            Show this help
+
+Environment:
+  OLLAMA_URL            Ollama API endpoint (default: http://127.0.0.1:11434)
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --offline) USE_LLM=false; shift ;;
+        --offline) USE_LLM=false; RUN_SCAN=false; shift ;;
         --json) JSON_OUT=true; shift ;;
         --quiet) QUIET=true; shift ;;
         --llm) USE_LLM=true; shift ;;
+        --persona) PERSONA="${2:-}"; shift 2 ;;
         --run-scan) RUN_SCAN=true; shift ;;
+        --scan-deep) SCAN_DEEP=true; shift ;;
+        --scan-timeout) SCAN_TIMEOUT="${2:-120}"; shift 2 ;;
+        --llm-timeout) LLM_TIMEOUT="${2:-600}"; shift 2 ;;
         --inspect-json) INSPECT_FILE="${2:-}"; shift 2 ;;
         --container) CONTAINER="${2:-}"; shift 2 ;;
         --env) ENV_ITEMS+=("${2:-}"); shift 2 ;;
@@ -51,16 +71,27 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+case "$PERSONA" in
+    loganalyst|blueteam|purpleteam|redteam|base) ;;
+    *) echo "Unknown persona: $PERSONA (expected loganalyst|blueteam|purpleteam|redteam|base)" >&2; exit 2 ;;
+esac
+
 BALOR_AVAILABLE=false
 if [[ -x "$BALOR_BIN" && -d "$BALOR_DATA" ]]; then
     BALOR_AVAILABLE=true
 fi
 
 TMP_INSPECT=""
+TMP_EP=""
+TMP_SCAN_TARGETS=""
+TMP_SCAN_RAW=""
+TMP_REPORT=""
 cleanup() {
-    if [[ -n "$TMP_INSPECT" && -f "$TMP_INSPECT" ]]; then
-        rm -f "$TMP_INSPECT"
-    fi
+    for f in "$TMP_INSPECT" "$TMP_EP" "$TMP_SCAN_TARGETS" "$TMP_SCAN_RAW" "$TMP_REPORT"; do
+        if [[ -n "$f" && -f "$f" ]]; then
+            rm -f "$f"
+        fi
+    done
 }
 trap cleanup EXIT
 
@@ -75,7 +106,10 @@ if [[ -n "$CONTAINER" ]]; then
     INSPECT_FILE="$TMP_INSPECT"
 fi
 
-REPORT_OUT="$(python3 - "$ROOT_DIR" "$JSON_OUT" "$QUIET" "$INSPECT_FILE" "$BALOR_AVAILABLE" "${ENV_ITEMS[@]+"${ENV_ITEMS[@]}"}" <<'PYEOF'
+TMP_EP="$(mktemp)"
+TMP_REPORT="$(mktemp)"
+
+python3 - "$ROOT_DIR" "$JSON_OUT" "$QUIET" "$INSPECT_FILE" "$BALOR_AVAILABLE" "$TMP_EP" "${ENV_ITEMS[@]+"${ENV_ITEMS[@]}"}" > "$TMP_REPORT" <<'PYEOF'
 import json
 import re
 import sys
@@ -86,7 +120,8 @@ json_out = sys.argv[2] == "true"
 quiet = sys.argv[3] == "true"
 inspect_path = sys.argv[4]
 balor_available = sys.argv[5] == "true"
-extra_envs = sys.argv[6:]
+ep_path = sys.argv[6]
+extra_envs = sys.argv[7:]
 
 findings = []
 
@@ -216,6 +251,8 @@ if inspect_path:
     for env_entry in (cfg.get("Env") or []):
         check_env_entry(env_entry)
 
+Path(ep_path).write_text(json.dumps(endpoints), encoding="utf-8")
+
 report = {
     "mode": "balor+offline" if balor_available else "offline-deterministic",
     "balor_available": balor_available,
@@ -250,20 +287,165 @@ else:
                 lines.append(f"  - Recommendation: {f['recommendation']}")
     print("\n".join(lines))
 PYEOF
-)"
 
-if [[ "$USE_LLM" == "true" ]]; then
-    if [[ "$BALOR_AVAILABLE" == "true" ]]; then
-        echo "--> Piping sanitized audit summary to balorsh llm (loganalyst)..." >&2
-        printf '%s\n' "$REPORT_OUT" | "$BALOR_BIN" llm --persona loganalyst 2>/dev/null || true
+REPORT_OUT="$(cat "$TMP_REPORT")"
+
+scan_count=0
+if [[ "$RUN_SCAN" == "true" ]]; then
+    if [[ ! -s "$TMP_EP" || "$(cat "$TMP_EP")" == "[]" ]]; then
+        echo "WARN: --run-scan requested but no endpoints discovered (pass --inspect-json or --container)." >&2
     else
-        echo "WARN: --llm requested, but balorsh is not initialized at $BALOR_DATA; using offline report." >&2
+        TMP_SCAN_RAW="$(mktemp)"
+        TMP_SCAN_TARGETS="$(mktemp)"
+        python3 - "$TMP_EP" > "$TMP_SCAN_TARGETS" <<'PYEOF'
+import json, sys
+from pathlib import Path
+for e in json.loads(Path(sys.argv[1]).read_text()):
+    if e.get("host_port"):
+        print(f"{e.get('host_ip') or '127.0.0.1'}|{e['host_port']}|{e.get('container_port','')}")
+PYEOF
+        while IFS='|' read -r sip sport _cport; do
+            [[ -z "$sport" ]] && continue
+            scan_count=$((scan_count + 1))
+            surl="http://${sip}:${sport}"
+            {
+                echo "### target ${sip}:${sport}"
+                if command -v nmap >/dev/null 2>&1; then
+                    echo "--- nmap -Pn -sV -p ${sport} --open ${sip}"
+                    timeout "$SCAN_TIMEOUT" nmap -Pn -sV -p "$sport" --open "$sip" 2>&1 | head -40 || true
+                else
+                    echo "--- nmap not installed, skipped"
+                fi
+                if command -v whatweb >/dev/null 2>&1; then
+                    echo "--- whatweb ${surl}"
+                    timeout "$SCAN_TIMEOUT" whatweb "$surl" --no-errors 2>&1 | sed -e 's/\x1b\[[0-9;]*m//g' | head -20 || true
+                else
+                    echo "--- whatweb not installed, skipped"
+                fi
+                if [[ "$SCAN_DEEP" == "true" ]]; then
+                    if command -v nikto >/dev/null 2>&1; then
+                        echo "--- nikto -h ${surl}"
+                        timeout "$SCAN_TIMEOUT" nikto -h "$surl" -nolookup -nossl -ask no 2>&1 | sed -e 's/\x1b\[[0-9;]*m//g' | head -60 || true
+                    else
+                        echo "--- nikto not installed, skipped"
+                    fi
+                    if command -v gobuster >/dev/null 2>&1 && [[ -f /usr/share/wordlists/dirb/common.txt ]]; then
+                        echo "--- gobuster dir -u ${surl} -w /usr/share/wordlists/dirb/common.txt"
+                        timeout "$SCAN_TIMEOUT" gobuster dir -u "$surl" -w /usr/share/wordlists/dirb/common.txt -q 2>&1 | head -40 || true
+                    else
+                        echo "--- gobuster or wordlist not available, skipped"
+                    fi
+                fi
+                echo
+            } >> "$TMP_SCAN_RAW"
+        done < "$TMP_SCAN_TARGETS"
+
+        if [[ "$JSON_OUT" == "true" && -s "$TMP_SCAN_RAW" ]]; then
+            python3 - "$TMP_REPORT" "$TMP_SCAN_RAW" <<'PYEOF'
+import json, sys
+from pathlib import Path
+rep_path, raw_path = Path(sys.argv[1]), Path(sys.argv[2])
+rep = json.loads(rep_path.read_text(encoding="utf-8"))
+rep["scans"] = {"target_count": len(rep.get("endpoints", [])), "raw": raw_path.read_text(encoding="utf-8")}
+rep_path.write_text(json.dumps(rep, indent=2) + "\n", encoding="utf-8")
+PYEOF
+        elif [[ "$JSON_OUT" != "true" && -s "$TMP_SCAN_RAW" ]]; then
+            {
+                echo ""
+                echo "## Live Scan Results (${scan_count} target(s))"
+                echo ""
+                cat "$TMP_SCAN_RAW"
+            } >> "$TMP_REPORT"
+            REPORT_OUT="$(cat "$TMP_REPORT")"
+        fi
     fi
 fi
 
-if [[ "$RUN_SCAN" == "true" && "$BALOR_AVAILABLE" == "true" ]]; then
-    echo "--> balorsh scan integration ready (networkscan/webexploit)." >&2
+LLM_REPORT_PATH=""
+if [[ "$USE_LLM" == "true" ]]; then
+    if ! command -v ollama >/dev/null 2>&1; then
+        echo "WARN: --llm requested but ollama is not installed; using offline report." >&2
+    else
+        if ! curl -s --max-time 2 "$OLLAMA_URL/api/version" >/dev/null 2>&1; then
+            echo "--> Starting Ollama server in background..." >&2
+            nohup ollama serve > /tmp/zigpod-ollama-serve.log 2>&1 &
+            _started=false
+            for _ in $(seq 1 20); do
+                if curl -s --max-time 1 "$OLLAMA_URL/api/version" >/dev/null 2>&1; then
+                    _started=true
+                    break
+                fi
+                sleep 1
+            done
+            if [[ "$_started" != "true" ]]; then
+                echo "WARN: Ollama server did not come up; using offline report (see /tmp/zigpod-ollama-serve.log)." >&2
+            fi
+        fi
+        if curl -s --max-time 2 "$OLLAMA_URL/api/version" >/dev/null 2>&1; then
+            export OLLAMA_HOST="$OLLAMA_URL"
+            if ! ollama list 2>/dev/null | grep -q "balor:$PERSONA"; then
+                MODELF="$BALOR_DATA/llm/modelfiles/Modelfile.$PERSONA"
+                if [[ -f "$MODELF" ]]; then
+                    echo "--> Creating balor:$PERSONA model (first run only)..." >&2
+                    ollama create "balor:$PERSONA" -f "$MODELF" >/dev/null 2>&1 || true
+                else
+                    echo "WARN: Modelfile not found: $MODELF" >&2
+                fi
+            fi
+            if ollama list 2>/dev/null | grep -q "balor:$PERSONA"; then
+                PROMPT_BODY="${REPORT_OUT}"
+                if [[ -n "$TMP_SCAN_RAW" && -s "$TMP_SCAN_RAW" ]]; then
+                    PROMPT_BODY="${PROMPT_BODY}
+
+--- LIVE SCAN OUTPUT ---
+$(cat "$TMP_SCAN_RAW")"
+                fi
+                PROMPT_BODY="$(printf '%s' "$PROMPT_BODY" | head -c 12000)"
+                LLM_OUT="$(printf '%s\n' "Analyze the following ZigPod security audit report and scan output. Produce an Incident & Threat Report: [TYPE] -> [TECHNICAL SUMMARY] -> [HYPOTHESES & VECTORS] -> [NEXT STEPS & COMMANDS] -> [RECOMMENDATIONS] for zigpod-policy.json hardening.
+
+${PROMPT_BODY}" | timeout "$LLM_TIMEOUT" ollama run "balor:$PERSONA" 2>/dev/null || true)"
+                if [[ -n "${LLM_OUT//[[:space:]]/}" ]]; then
+                    mkdir -p "$BALOR_DATA/llm/logs"
+                    LLM_REPORT_PATH="$BALOR_DATA/llm/logs/analysis_zigpod_$(date +%Y%m%d_%H%M%S).txt"
+                    {
+                        echo "ZigPod Incident & Threat Report"
+                        echo "date: $(date)"
+                        echo "persona: balor:$PERSONA"
+                        echo "source: scripts/balor-security-audit.sh"
+                        echo "=========================================="
+                        echo ""
+                        echo "$LLM_OUT"
+                    } > "$LLM_REPORT_PATH"
+                    if [[ "$JSON_OUT" == "true" ]]; then
+                        python3 - "$TMP_REPORT" "$LLM_REPORT_PATH" <<'PYEOF'
+import json, sys
+from pathlib import Path
+rep_path, llm_path = Path(sys.argv[1]), Path(sys.argv[2])
+rep = json.loads(rep_path.read_text(encoding="utf-8"))
+rep["llm_report_path"] = str(llm_path)
+rep_path.write_text(json.dumps(rep, indent=2) + "\n", encoding="utf-8")
+PYEOF
+                    else
+                        {
+                            echo ""
+                            echo "## Incident & Threat Report (balor:$PERSONA)"
+                            echo "- Saved to: $LLM_REPORT_PATH"
+                            echo ""
+                            echo "$LLM_OUT"
+                        } >> "$TMP_REPORT"
+                    fi
+                    REPORT_OUT="$(cat "$TMP_REPORT")"
+                else
+                    echo "WARN: Ollama produced no output within ${LLM_TIMEOUT}s; using offline report." >&2
+                fi
+            else
+                echo "WARN: balor:$PERSONA model unavailable; using offline report." >&2
+            fi
+        fi
+    fi
 fi
+
+REPORT_OUT="$(cat "$TMP_REPORT")"
 
 if [[ -n "$OUT_FILE" ]]; then
     printf '%s\n' "$REPORT_OUT" > "$OUT_FILE"
