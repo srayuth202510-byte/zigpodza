@@ -8,6 +8,7 @@ pub const api_prefix = "/v1.40";
 
 pub const ApiError = error{
     PodmanApiError,
+    InvalidIdentifier,
 };
 
 pub const HostConfig = struct {
@@ -59,6 +60,17 @@ const PullStatusLine = struct {
     @"error": ?[]const u8 = null,
 };
 
+/// Validates a container ID or name to prevent path traversal, query injection,
+/// and HTTP request-line tampering.
+pub fn validateIdentifier(id: []const u8) ApiError!void {
+    if (id.len == 0 or id.len > 128) return ApiError.InvalidIdentifier;
+    if (std.mem.eql(u8, id, ".") or std.mem.eql(u8, id, "..")) return ApiError.InvalidIdentifier;
+    for (id) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == ':') continue;
+        return ApiError.InvalidIdentifier;
+    }
+}
+
 fn appendQueryEncoded(out: *std.ArrayList(u8), s: []const u8) !void {
     for (s) |c| {
         if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
@@ -86,6 +98,8 @@ pub fn createContainer(
     cfg: ContainerCreateRequest,
     name: ?[]const u8,
 ) ![]u8 {
+    if (name) |n| try validateIdentifier(n);
+
     var path_buf = std.ArrayList(u8).init(client.allocator);
     defer path_buf.deinit();
     try path_buf.appendSlice(api_prefix ++ "/containers/create");
@@ -121,6 +135,8 @@ pub fn createContainer(
 }
 
 pub fn startContainer(client: *const http.Client, logger: *log.Logger, id: []const u8) !void {
+    try validateIdentifier(id);
+
     const path = try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/start", .{ api_prefix, id });
     defer client.allocator.free(path);
 
@@ -135,6 +151,8 @@ pub fn startContainer(client: *const http.Client, logger: *log.Logger, id: []con
 }
 
 pub fn stopContainer(client: *const http.Client, logger: *log.Logger, id: []const u8) !void {
+    try validateIdentifier(id);
+
     const path = try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/stop", .{ api_prefix, id });
     defer client.allocator.free(path);
 
@@ -149,6 +167,8 @@ pub fn stopContainer(client: *const http.Client, logger: *log.Logger, id: []cons
 }
 
 pub fn removeContainer(client: *const http.Client, logger: *log.Logger, id: []const u8, force: bool) !void {
+    try validateIdentifier(id);
+
     const path = try std.fmt.allocPrint(
         client.allocator,
         "{s}/containers/{s}?force={s}",
@@ -167,6 +187,8 @@ pub fn removeContainer(client: *const http.Client, logger: *log.Logger, id: []co
 }
 
 pub fn waitContainer(client: *const http.Client, logger: *log.Logger, id: []const u8) !i64 {
+    try validateIdentifier(id);
+
     const path = try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/wait", .{ api_prefix, id });
     defer client.allocator.free(path);
 
@@ -186,6 +208,8 @@ pub fn waitContainer(client: *const http.Client, logger: *log.Logger, id: []cons
 }
 
 pub fn fetchLogs(client: *const http.Client, logger: *log.Logger, id: []const u8, writer: anytype) !void {
+    try validateIdentifier(id);
+
     const path = try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/logs?stdout=1&stderr=1", .{ api_prefix, id });
     defer client.allocator.free(path);
 
@@ -328,14 +352,17 @@ pub fn demuxLogs(raw: []const u8, writer: anytype) !void {
 
     var pos: usize = 0;
     var valid_frames = false;
-    while (pos + 8 <= raw.len) {
+    while (raw.len - pos >= 8) {
         const stream_type = raw[pos];
         if (stream_type > 2 or raw[pos + 1] != 0 or raw[pos + 2] != 0 or raw[pos + 3] != 0) {
             valid_frames = false;
             break;
         }
         const size = std.mem.readInt(u32, raw[pos + 4 ..][0..4], .big);
-        const next_pos = pos + 8 + @as(usize, size);
+        const next_pos = std.math.add(usize, pos + 8, @as(usize, size)) catch {
+            valid_frames = false;
+            break;
+        };
         if (next_pos > raw.len) {
             valid_frames = false;
             break;
@@ -353,7 +380,7 @@ pub fn demuxLogs(raw: []const u8, writer: anytype) !void {
     }
 
     pos = 0;
-    while (pos + 8 <= raw.len) {
+    while (raw.len - pos >= 8) {
         const size = std.mem.readInt(u32, raw[pos + 4 ..][0..4], .big);
         const start = pos + 8;
         const end = start + @as(usize, size);
@@ -364,9 +391,30 @@ pub fn demuxLogs(raw: []const u8, writer: anytype) !void {
 
 // ---------------------------------------------------------------- tests
 
-test "demuxLogs handles multiplexed docker stream frames" {
+test "validateIdentifier rejects traversal, injection, and invalid sizes" {
+    try validateIdentifier("abcdef123456");
+    try validateIdentifier("web-1");
+    try validateIdentifier("my_container.service");
+    try validateIdentifier("sha256:abcdef0123");
+
+    try std.testing.expectError(ApiError.InvalidIdentifier, validateIdentifier(""));
+    try std.testing.expectError(ApiError.InvalidIdentifier, validateIdentifier("."));
+    try std.testing.expectError(ApiError.InvalidIdentifier, validateIdentifier(".."));
+    try std.testing.expectError(ApiError.InvalidIdentifier, validateIdentifier("../containers"));
+    try std.testing.expectError(ApiError.InvalidIdentifier, validateIdentifier("abc/def"));
+    try std.testing.expectError(ApiError.InvalidIdentifier, validateIdentifier("id?force=true"));
+    try std.testing.expectError(ApiError.InvalidIdentifier, validateIdentifier("id#frag"));
+    try std.testing.expectError(ApiError.InvalidIdentifier, validateIdentifier("id\r\nX-Evil: 1"));
+    try std.testing.expectError(ApiError.InvalidIdentifier, validateIdentifier("has space"));
+
+    const too_long = "a" ** 129;
+    try std.testing.expectError(ApiError.InvalidIdentifier, validateIdentifier(too_long));
+}
+
+test "demuxLogs handles multiplexed docker stream frames and zero-length frame" {
     const frame = [_]u8{
         1, 0, 0, 0, 0, 0, 0, 6, 'h', 'e', 'l', 'l', 'o', '\n',
+        1, 0, 0, 0, 0, 0, 0, 0,
         2, 0, 0, 0, 0, 0, 0, 4, 'e', 'r', 'r', '\n',
     };
     var out = std.ArrayList(u8).init(std.testing.allocator);
@@ -375,12 +423,36 @@ test "demuxLogs handles multiplexed docker stream frames" {
     try std.testing.expectEqualStrings("hello\nerr\n", out.items);
 }
 
-test "demuxLogs falls back to plain text" {
-    const raw = "plain log output\nline 2\n";
+test "demuxLogs falls back to plain text on malformed frames" {
+    const plain = "plain log output\nline 2\n";
     var out = std.ArrayList(u8).init(std.testing.allocator);
     defer out.deinit();
-    try demuxLogs(raw, out.writer());
-    try std.testing.expectEqualStrings(raw, out.items);
+    try demuxLogs(plain, out.writer());
+    try std.testing.expectEqualStrings(plain, out.items);
+
+    // Invalid stream type 3
+    out.clearRetainingCapacity();
+    const bad_stream = [_]u8{ 3, 0, 0, 0, 0, 0, 0, 2, 'h', 'i' };
+    try demuxLogs(&bad_stream, out.writer());
+    try std.testing.expectEqualSlices(u8, &bad_stream, out.items);
+
+    // Non-zero reserved byte
+    out.clearRetainingCapacity();
+    const bad_reserved = [_]u8{ 1, 0, 1, 0, 0, 0, 0, 2, 'h', 'i' };
+    try demuxLogs(&bad_reserved, out.writer());
+    try std.testing.expectEqualSlices(u8, &bad_reserved, out.items);
+
+    // Frame size exceeds buffer length
+    out.clearRetainingCapacity();
+    const truncated_payload = [_]u8{ 1, 0, 0, 0, 0, 0, 0, 99, 'h', 'i' };
+    try demuxLogs(&truncated_payload, out.writer());
+    try std.testing.expectEqualSlices(u8, &truncated_payload, out.items);
+
+    // Truncated header (< 8 bytes)
+    out.clearRetainingCapacity();
+    const short_hdr = [_]u8{ 1, 0, 0, 0, 0 };
+    try demuxLogs(&short_hdr, out.writer());
+    try std.testing.expectEqualSlices(u8, &short_hdr, out.items);
 }
 
 test "demuxLogs handles empty slice" {
@@ -424,4 +496,190 @@ test "JSON deserialize ImageSummary list" {
     try std.testing.expectEqual(@as(usize, 1), parsed.value.len);
     try std.testing.expectEqual(@as(i64, 7340032), parsed.value[0].Size);
     try std.testing.expectEqualStrings("docker.io/library/alpine:3.20", parsed.value[0].RepoTags.?[0]);
+}
+
+fn readHttpRequest(stream: std.net.Stream, buf: []u8) ![]const u8 {
+    var total: usize = 0;
+    var header_end: ?usize = null;
+    var expected_total: ?usize = null;
+    while (total < buf.len) {
+        const n = try stream.read(buf[total..]);
+        if (n == 0) break;
+        total += n;
+        if (header_end == null) {
+            if (std.mem.indexOf(u8, buf[0..total], "\r\n\r\n")) |idx| {
+                header_end = idx;
+                var cl: usize = 0;
+                if (std.ascii.indexOfIgnoreCase(buf[0..idx], "content-length:")) |cl_pos| {
+                    const after = buf[cl_pos + "content-length:".len .. idx];
+                    const eol = std.mem.indexOfScalar(u8, after, '\r') orelse after.len;
+                    cl = std.fmt.parseInt(usize, std.mem.trim(u8, after[0..eol], " \t"), 10) catch 0;
+                }
+                expected_total = idx + 4 + cl;
+            }
+        }
+        if (expected_total) |exp| {
+            if (total >= exp) break;
+        }
+    }
+    return buf[0..total];
+}
+
+const ScriptedReply = struct {
+    expected_prefix: []const u8,
+    raw_response: []const u8,
+};
+
+const MockApiCtx = struct {
+    server: *std.net.Server,
+    replies: []const ScriptedReply,
+    matched: usize = 0,
+};
+
+fn runMockPodmanServer(ctx: *MockApiCtx) void {
+    var buf: [4096]u8 = undefined;
+    for (ctx.replies) |reply| {
+        const conn = ctx.server.accept() catch return;
+        defer conn.stream.close();
+        const req = readHttpRequest(conn.stream, &buf) catch return;
+        if (std.mem.startsWith(u8, req, reply.expected_prefix)) {
+            ctx.matched += 1;
+        }
+        conn.stream.writeAll(reply.raw_response) catch return;
+    }
+}
+
+test "end-to-end container lifecycle over mock Unix socket has zero memory leaks" {
+    const sock_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "/tmp/zp-api-lifecycle-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer std.testing.allocator.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const log_raw = "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n\x01\x00\x00\x00\x00\x00\x00\x03hi\n";
+
+    const replies = [_]ScriptedReply{
+        .{
+            .expected_prefix = "POST /v1.40/containers/create?name=test-box HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 201 Created\r\nContent-Length: 27\r\n\r\n{\"Id\":\"abcdef1234567890ff\"}",
+        },
+        .{
+            .expected_prefix = "POST /v1.40/containers/abcdef1234567890ff/start HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 204 No Content\r\n\r\n",
+        },
+        .{
+            .expected_prefix = "POST /v1.40/containers/abcdef1234567890ff/wait HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\n{\"StatusCode\":0}",
+        },
+        .{
+            .expected_prefix = "GET /v1.40/containers/abcdef1234567890ff/logs?stdout=1&stderr=1 HTTP/1.1\r\n",
+            .raw_response = log_raw,
+        },
+        .{
+            .expected_prefix = "DELETE /v1.40/containers/abcdef1234567890ff?force=false HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 204 No Content\r\n\r\n",
+        },
+        .{
+            .expected_prefix = "DELETE /v1.40/containers/missing?force=false HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 404 Not Found\r\nContent-Length: 21\r\n\r\n{\"message\":\"no such\"}",
+        },
+    };
+
+    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{
+        .allocator = std.testing.allocator,
+        .socket_path = sock_path,
+    };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    // Validation errors fail before hitting the socket.
+    try std.testing.expectError(
+        ApiError.InvalidIdentifier,
+        createContainer(&client, &logger, .{ .Image = "alpine:3.20" }, "../bad"),
+    );
+    try std.testing.expectError(ApiError.InvalidIdentifier, removeContainer(&client, &logger, "../bad", true));
+
+    const id = try createContainer(&client, &logger, .{
+        .Image = "alpine:3.20",
+        .Cmd = &.{ "echo", "hi" },
+    }, "test-box");
+    defer std.testing.allocator.free(id);
+    try std.testing.expectEqualStrings("abcdef1234567890ff", id);
+
+    try startContainer(&client, &logger, id);
+    const exit_code = try waitContainer(&client, &logger, id);
+    try std.testing.expectEqual(@as(i64, 0), exit_code);
+
+    var logs_out = std.ArrayList(u8).init(std.testing.allocator);
+    defer logs_out.deinit();
+    try fetchLogs(&client, &logger, id, logs_out.writer());
+    try std.testing.expectEqualStrings("hi\n", logs_out.items);
+
+    try removeContainer(&client, &logger, id, false);
+    try std.testing.expectError(ApiError.PodmanApiError, removeContainer(&client, &logger, "missing", false));
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
+}
+
+test "listContainers over mock Unix socket" {
+    const sock_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "/tmp/zp-api-ps-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer std.testing.allocator.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const json_body =
+        \\[{"Id":"abcdef1234567890","Image":"alpine:3.20","Status":"Up 5s","Names":["/web"]}]
+    ;
+    const raw_resp = std.fmt.comptimePrint(
+        "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}",
+        .{ json_body.len, json_body },
+    );
+
+    const replies = [_]ScriptedReply{.{
+        .expected_prefix = "GET /v1.40/containers/json?all=true HTTP/1.1\r\n",
+        .raw_response = raw_resp,
+    }};
+
+    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{
+        .allocator = std.testing.allocator,
+        .socket_path = sock_path,
+    };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8).init(std.testing.allocator);
+    defer out.deinit();
+    try listContainers(&client, &logger, true, out.writer());
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(@as(usize, 1), ctx.matched);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "abcdef123456") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "alpine:3.20") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "web") != null);
 }

@@ -69,6 +69,15 @@ pub const Command = union(enum) {
 pub const Parsed = struct {
     global: Global,
     command: Command,
+
+    pub fn deinit(self: Parsed, allocator: std.mem.Allocator) void {
+        switch (self.command) {
+            .run => |r| {
+                if (r.env.len > 0) allocator.free(r.env);
+            },
+            else => {},
+        }
+    }
 };
 
 pub const ParseError = error{
@@ -217,43 +226,89 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
 // ---------------------------------------------------------------- tests
 
 fn testParse(args: []const []const u8) !Parsed {
-    // Leaks into the testing arena below; callers use an arena.
-    return parse(test_arena.allocator(), args);
+    return parse(std.testing.allocator, args);
 }
-var test_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 
 test "run with flags and command" {
     const p = try testParse(&.{ "-v", "run", "--rm", "-e", "A=1", "--env", "B=2", "--name", "web", "alpine:3.20", "echo", "-n", "hi" });
+    defer p.deinit(std.testing.allocator);
     try std.testing.expect(p.global.verbose);
     const r = p.command.run;
     try std.testing.expectEqualStrings("alpine:3.20", r.image);
     try std.testing.expectEqualStrings("web", r.name.?);
     try std.testing.expect(r.remove and !r.detach);
     try std.testing.expectEqual(@as(usize, 2), r.env.len);
+    try std.testing.expectEqualStrings("A=1", r.env[0]);
     try std.testing.expectEqualStrings("B=2", r.env[1]);
     // Flags after IMAGE belong to the container command, like docker.
     try std.testing.expectEqual(@as(usize, 3), r.cmd.len);
     try std.testing.expectEqualStrings("-n", r.cmd[1]);
 }
 
+test "run detached without command or env" {
+    const p = try testParse(&.{ "run", "-d", "nginx:alpine" });
+    defer p.deinit(std.testing.allocator);
+    const r = p.command.run;
+    try std.testing.expect(r.detach);
+    try std.testing.expect(!r.remove);
+    try std.testing.expect(r.name == null);
+    try std.testing.expectEqual(@as(usize, 0), r.env.len);
+    try std.testing.expectEqual(@as(usize, 0), r.cmd.len);
+    try std.testing.expectEqualStrings("nginx:alpine", r.image);
+}
+
+test "run error path frees env allocations without leaks" {
+    try std.testing.expectError(error.MissingValue, testParse(&.{ "run", "-e", "A=1", "--env", "B=2", "--name" }));
+    try std.testing.expectError(error.MissingArgument, testParse(&.{ "run", "-e", "A=1", "--rm" }));
+    try std.testing.expectError(error.UnknownFlag, testParse(&.{ "run", "-e", "A=1", "--bogus", "alpine" }));
+}
+
 test "simple commands" {
     try std.testing.expect((try testParse(&.{})).command == .help);
+    try std.testing.expect((try testParse(&.{ "-h" })).command == .help);
+    try std.testing.expect((try testParse(&.{"--help"})).command == .help);
+    try std.testing.expect((try testParse(&.{"help"})).command == .help);
     try std.testing.expect((try testParse(&.{"--version"})).command == .client_version);
+    try std.testing.expect((try testParse(&.{"version"})).command == .version);
+    try std.testing.expect((try testParse(&.{"images"})).command == .images);
+    try std.testing.expect(!(try testParse(&.{"ps"})).command.ps.all);
     try std.testing.expect((try testParse(&.{ "ps", "-a" })).command.ps.all);
+    try std.testing.expect((try testParse(&.{ "ps", "--all" })).command.ps.all);
     try std.testing.expectEqualStrings("alpine", (try testParse(&.{ "pull", "alpine" })).command.pull);
+    try std.testing.expectEqualStrings("web", (try testParse(&.{ "stop", "web" })).command.stop);
+    try std.testing.expectEqualStrings("web", (try testParse(&.{ "logs", "web" })).command.logs);
+    const rm_plain = (try testParse(&.{ "rm", "abc" })).command.rm;
+    try std.testing.expect(!rm_plain.force);
+    try std.testing.expectEqualStrings("abc", rm_plain.container);
     const rm = (try testParse(&.{ "rm", "-f", "abc" })).command.rm;
     try std.testing.expect(rm.force);
     try std.testing.expectEqualStrings("abc", rm.container);
-    const g = (try testParse(&.{ "--socket", "/tmp/s.sock", "images" })).global;
+    const rm_long = (try testParse(&.{ "rm", "--force", "abc" })).command.rm;
+    try std.testing.expect(rm_long.force);
+    const g = (try testParse(&.{ "--socket", "/tmp/s.sock", "--verbose", "images" })).global;
+    try std.testing.expect(g.verbose);
     try std.testing.expectEqualStrings("/tmp/s.sock", g.socket.?);
 }
 
 test "parse errors" {
     try std.testing.expectError(error.UnknownCommand, testParse(&.{"frobnicate"}));
     try std.testing.expectError(error.UnknownFlag, testParse(&.{"--bogus"}));
+    try std.testing.expectError(error.MissingValue, testParse(&.{"--socket"}));
     try std.testing.expectError(error.MissingArgument, testParse(&.{"run"}));
     try std.testing.expectError(error.MissingArgument, testParse(&.{ "run", "--rm" }));
     try std.testing.expectError(error.MissingValue, testParse(&.{ "run", "--name" }));
     try std.testing.expectError(error.MissingArgument, testParse(&.{"pull"}));
+    try std.testing.expectError(error.UnknownFlag, testParse(&.{ "pull", "--bad" }));
+    try std.testing.expectError(error.TooManyArguments, testParse(&.{ "pull", "a", "b" }));
     try std.testing.expectError(error.TooManyArguments, testParse(&.{ "stop", "a", "b" }));
+    try std.testing.expectError(error.MissingArgument, testParse(&.{"logs"}));
+    try std.testing.expectError(error.TooManyArguments, testParse(&.{ "logs", "a", "b" }));
+    try std.testing.expectError(error.TooManyArguments, testParse(&.{ "images", "extra" }));
+    try std.testing.expectError(error.UnknownFlag, testParse(&.{ "images", "--all" }));
+    try std.testing.expectError(error.TooManyArguments, testParse(&.{ "version", "extra" }));
+    try std.testing.expectError(error.UnknownFlag, testParse(&.{ "ps", "--bogus" }));
+    try std.testing.expectError(error.TooManyArguments, testParse(&.{ "ps", "extra" }));
+    try std.testing.expectError(error.MissingArgument, testParse(&.{ "rm", "-f" }));
+    try std.testing.expectError(error.UnknownFlag, testParse(&.{ "rm", "--bogus", "a" }));
+    try std.testing.expectError(error.TooManyArguments, testParse(&.{ "rm", "a", "b" }));
 }

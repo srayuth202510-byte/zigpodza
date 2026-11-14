@@ -33,7 +33,8 @@ zigpodza/
 │  ├─ log.zig          # Timestamped file logger (system.log & error.log)
 │  └─ utils.zig        # Formatting helpers (shortId, formatSize)
 ├─ scripts/
-│  └─ install.sh       # Build ReleaseSafe binary and install to PATH
+│  ├─ install.sh         # Build ReleaseSafe binary and install to PATH
+│  └─ security-check.sh  # Run leak/security tests, ELF hardening, and optional balorsh check
 ├─ examples/
 │  └─ demo.sh          # End-to-end sample workflow script
 ├─ .github/workflows/
@@ -143,12 +144,32 @@ zig build test
 ```
 
 ชุด unit test ครอบคลุม:
-- CLI argument/flag parsing (`src/cli.zig`)
+- CLI argument/flag parsing และ error-path leak check (`src/cli.zig`)
 - Configuration & socket URI stripping (`src/config.zig`)
-- HTTP/1.1 response parsing ทั้ง `Content-Length` และ `Transfer-Encoding: chunked` (`src/http.zig`)
+- HTTP/1.1 response parsing (`Content-Length` และ `Transfer-Encoding: chunked`), malformed chunked/CRLF injection rejection และ mock Unix-socket round-trip (`src/http.zig`)
 - File logger & UTC timestamp formatting (`src/log.zig`)
 - Helper formatting (`src/utils.zig`)
-- Docker stream log demultiplexing และ JSON response deserialization (`src/podman_api.zig`)
+- Container ID/name validation, Docker stream log demultiplexing, JSON response deserialization และ mock Unix-socket end-to-end lifecycle (`src/podman_api.zig`)
+
+---
+
+## Security & Memory Testing
+
+- **Memory Leak Detection**:
+  - ทุก `test` block ใช้ `std.testing.allocator` เพื่อตรวจจับ memory leak, double-free และ invalid free โดยอัตโนมัติ
+  - ใน runtime (`src/main.zig`) ใช้ `std.heap.GeneralPurposeAllocator` และตรวจสอบ `gpa.deinit() == .leak` ก่อนออกจากโปรแกรม
+- **Input & Protocol Hardening**:
+  - `http.validateRequestTarget` ป้องกัน CRLF/header injection และ whitespace ใน HTTP request path
+  - `http.decodeChunked` ใช้ checked arithmetic (`std.math.add`) และตรวจสอบ CRLF trailer ของทุก chunk เพื่อป้องกัน integer overflow และ out-of-bounds read
+  - `podman_api.validateIdentifier` ป้องกัน path traversal (`..`, `/`) และ query/header injection บน container ID และ name
+- **Automated Security Check Script**:
+
+```bash
+./scripts/security-check.sh
+```
+
+- **Optional Balor (`balorsh`) Integration**:
+  - หากติดตั้ง `balorsh` (`/usr/local/bin/balorsh` / `/opt/balorsh`) สามารถใช้ `balorsh llm` (persona `loganalyst` / `blueteam`) เพื่อวิเคราะห์ไฟล์ `system.log` และ `error.log` รวมถึงใช้ `balorsh networkscan` / `webexploit` ทดสอบ container service ที่เปิดพอร์ตผ่าน ZigPod ได้
 
 ---
 

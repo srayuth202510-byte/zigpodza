@@ -10,9 +10,16 @@ pub const version = "0.1.0";
 
 pub fn main() u8 {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+    var code = run(gpa.allocator());
+    if (gpa.deinit() == .leak) {
+        std.io.getStdErr().writer().writeAll("zigpod: internal error: memory leak detected\n") catch {};
+        if (code == 0) code = 1;
+    }
+    return code;
+}
 
-    var arena_state = std.heap.ArenaAllocator.init(gpa.allocator());
+fn run(gpa_allocator: std.mem.Allocator) u8 {
+    var arena_state = std.heap.ArenaAllocator.init(gpa_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
@@ -137,6 +144,14 @@ fn reportFailure(logger: *log.Logger, cmd: cli.Command, socket_path: []const u8,
         http.Error.InvalidResponse => logger.err(
             "Invalid HTTP response from Podman socket '{s}'.",
             .{socket_path},
+        ),
+        http.Error.InvalidRequestPath => logger.err(
+            "Rejected invalid HTTP request path.",
+            .{},
+        ),
+        pod.ApiError.InvalidIdentifier => logger.err(
+            "Invalid container identifier or name (allowed: alphanumeric, '-', '_', '.', ':').",
+            .{},
         ),
         pod.ApiError.PodmanApiError => {
             // Already logged with HTTP status and response details by podman_api.

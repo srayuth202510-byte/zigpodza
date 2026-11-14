@@ -23,3 +23,6 @@ jobs:
 
       - name: Build ReleaseSafe binary
         run: zig build -Doptimize=ReleaseSafe
+
+      - name: Run security and hardening checks
+        run: ./scripts/security-check.sh --require-zig

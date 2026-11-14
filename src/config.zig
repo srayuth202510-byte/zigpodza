@@ -16,12 +16,21 @@ pub const Config = struct {
     socket_path: []const u8,
     log_dir: []const u8,
 
-    /// All strings are allocated with `allocator` (intended to be an arena).
+    /// Loads configuration into freshly allocated strings owned by `allocator`.
+    /// Call `deinit(allocator)` when no longer needed.
     pub fn load(allocator: std.mem.Allocator, socket_override: ?[]const u8) !Config {
+        const socket_path = try resolveSocket(allocator, socket_override);
+        errdefer allocator.free(socket_path);
+        const log_dir = try resolveLogDir(allocator);
         return .{
-            .socket_path = try resolveSocket(allocator, socket_override),
-            .log_dir = try resolveLogDir(allocator),
+            .socket_path = socket_path,
+            .log_dir = log_dir,
         };
+    }
+
+    pub fn deinit(self: Config, allocator: std.mem.Allocator) void {
+        allocator.free(self.socket_path);
+        allocator.free(self.log_dir);
     }
 };
 
@@ -34,26 +43,35 @@ fn getEnv(allocator: std.mem.Allocator, name: []const u8) !?[]u8 {
 
 fn resolveSocket(allocator: std.mem.Allocator, socket_override: ?[]const u8) ![]const u8 {
     if (socket_override) |s| return allocator.dupe(u8, stripUnixScheme(s));
-    if (try getEnv(allocator, "ZIGPOD_SOCKET")) |s| return stripUnixScheme(s);
+    if (try getEnv(allocator, "ZIGPOD_SOCKET")) |s| {
+        defer allocator.free(s);
+        return allocator.dupe(u8, stripUnixScheme(s));
+    }
 
     inline for (.{ "CONTAINER_HOST", "DOCKER_HOST" }) |name| {
         if (try getEnv(allocator, name)) |s| {
-            if (std.mem.startsWith(u8, s, "unix://")) return stripUnixScheme(s);
+            defer allocator.free(s);
+            if (std.mem.startsWith(u8, s, "unix://")) {
+                return allocator.dupe(u8, stripUnixScheme(s));
+            }
         }
     }
 
     if (try getEnv(allocator, "XDG_RUNTIME_DIR")) |dir| {
+        defer allocator.free(dir);
         const rootless = try std.fs.path.join(allocator, &.{ dir, "podman", "podman.sock" });
         if (std.fs.accessAbsolute(rootless, .{})) |_| {
             return rootless;
-        } else |_| {}
+        } else |_| {
+            allocator.free(rootless);
+        }
     }
-    return "/run/podman/podman.sock";
+    return allocator.dupe(u8, "/run/podman/podman.sock");
 }
 
 fn resolveLogDir(allocator: std.mem.Allocator) ![]const u8 {
     if (try getEnv(allocator, "ZIGPOD_LOG_DIR")) |d| return d;
-    return ".";
+    return allocator.dupe(u8, ".");
 }
 
 /// "unix:///run/podman/podman.sock" -> "/run/podman/podman.sock"
@@ -62,24 +80,33 @@ pub fn stripUnixScheme(s: []const u8) []const u8 {
     return if (std.mem.startsWith(u8, s, prefix)) s[prefix.len..] else s;
 }
 
-test "stripUnixScheme" {
+test "stripUnixScheme handles unix prefix, empty string, and plain paths" {
     try std.testing.expectEqualStrings("/run/podman/podman.sock", stripUnixScheme("unix:///run/podman/podman.sock"));
+    try std.testing.expectEqualStrings("/", stripUnixScheme("unix:///"));
+    try std.testing.expectEqualStrings("", stripUnixScheme("unix://"));
+    try std.testing.expectEqualStrings("", stripUnixScheme(""));
     try std.testing.expectEqualStrings("/tmp/x.sock", stripUnixScheme("/tmp/x.sock"));
+    try std.testing.expectEqualStrings("tcp://127.0.0.1:8080", stripUnixScheme("tcp://127.0.0.1:8080"));
 }
 
-test "socket override wins" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const cfg = try Config.load(arena.allocator(), "unix:///tmp/custom.sock");
+test "socket override wins without leaking memory" {
+    const cfg = try Config.load(std.testing.allocator, "unix:///tmp/custom.sock");
+    defer cfg.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("/tmp/custom.sock", cfg.socket_path);
 }
 
+test "load without override frees intermediate env lookups" {
+    const cfg = try Config.load(std.testing.allocator, null);
+    defer cfg.deinit(std.testing.allocator);
+    try std.testing.expect(cfg.socket_path.len > 0);
+}
+
 test "log_dir defaults to current directory" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const env_log = try getEnv(arena.allocator(), "ZIGPOD_LOG_DIR");
+    const env_log = try getEnv(std.testing.allocator, "ZIGPOD_LOG_DIR");
+    defer if (env_log) |d| std.testing.allocator.free(d);
     if (env_log == null) {
-        const cfg = try Config.load(arena.allocator(), null);
+        const cfg = try Config.load(std.testing.allocator, null);
+        defer cfg.deinit(std.testing.allocator);
         try std.testing.expectEqualStrings(".", cfg.log_dir);
     }
 }
