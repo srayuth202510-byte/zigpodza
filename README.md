@@ -164,9 +164,15 @@ zigpod exec -it demo-alpine sh
 zigpod audit
 zigpod audit --json
 
-# Stop and remove a container
-zigpod stop demo-alpine
-zigpod rm -f demo-alpine
+# Pause, unpause, rename, restart, stop, and remove a container or image
+zigpod pause demo-alpine
+zigpod unpause demo-alpine
+zigpod rename demo-alpine demo-renamed
+zigpod restart -t 5 demo-renamed
+zigpod stop demo-renamed
+zigpod start demo-renamed
+zigpod rm -f demo-renamed
+zigpod rmi alpine:3.20
 ```
 
 ### Global Options

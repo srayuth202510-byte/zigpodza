@@ -31,7 +31,13 @@ pub const usage =
     \\  ps [-a]                        List containers (-a: include stopped)
     \\  images                         List local images
     \\  pull IMAGE                     Pull an image from a registry
+    \\  rmi [-f] IMAGE                 Remove a local image (-f: force)
+    \\  start CONTAINER                Start a created or stopped container
     \\  stop CONTAINER                 Stop a running container
+    \\  restart [-t SECS] CONTAINER    Restart a container (-t: stop timeout seconds)
+    \\  pause CONTAINER                Pause all processes inside a container
+    \\  unpause CONTAINER              Unpause a paused container
+    \\  rename CONTAINER NEW_NAME      Rename an existing container
     \\  kill [-s SIGNAL] CONTAINER     Send a signal to a running container (default: SIGTERM)
     \\  rm [-f] CONTAINER              Remove a container (-f: force)
     \\  logs [-f] CONTAINER            Print a container's logs (-f: follow live output)
@@ -149,6 +155,21 @@ pub const KillOpts = struct {
     signal: []const u8 = "SIGTERM",
 };
 
+pub const RestartOpts = struct {
+    container: []const u8,
+    timeout_secs: ?u32 = null,
+};
+
+pub const RenameOpts = struct {
+    container: []const u8,
+    new_name: []const u8,
+};
+
+pub const RmiOpts = struct {
+    image: []const u8,
+    force: bool = false,
+};
+
 pub const VolumeAction = enum {
     ls,
     create,
@@ -181,8 +202,14 @@ pub const Command = union(enum) {
     ps: struct { all: bool = false },
     images,
     pull: []const u8,
+    rmi: RmiOpts,
     run: RunOpts,
+    start: []const u8,
     stop: []const u8,
+    restart: RestartOpts,
+    pause: []const u8,
+    unpause: []const u8,
+    rename: RenameOpts,
     kill: KillOpts,
     rm: RmOpts,
     logs: LogsOpts,
@@ -285,8 +312,20 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
         try noArgs(rest, .images)
     else if (eql(name, "pull"))
         .{ .pull = try single(rest) }
+    else if (eql(name, "rmi"))
+        try parseRmi(rest)
+    else if (eql(name, "start"))
+        .{ .start = try single(rest) }
     else if (eql(name, "stop"))
         .{ .stop = try single(rest) }
+    else if (eql(name, "restart"))
+        try parseRestart(rest)
+    else if (eql(name, "pause"))
+        .{ .pause = try single(rest) }
+    else if (eql(name, "unpause"))
+        .{ .unpause = try single(rest) }
+    else if (eql(name, "rename"))
+        try parseRename(rest)
     else if (eql(name, "kill"))
         try parseKill(rest)
     else if (eql(name, "rm"))
@@ -822,6 +861,71 @@ fn parseNetwork(args: []const []const u8) ParseError!Command {
     } else {
         return error.UnknownCommand;
     }
+}
+
+/// Parses `restart [-t|--time SECONDS] CONTAINER`.
+fn parseRestart(args: []const []const u8) ParseError!Command {
+    var timeout_secs: ?u32 = null;
+    var container: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (eql(a, "-t") or eql(a, "--time")) {
+            const raw = try takeValue(args, &i);
+            const secs = std.fmt.parseInt(u32, raw, 10) catch return error.InvalidValue;
+            if (secs > 3600) return error.InvalidValue;
+            timeout_secs = secs;
+        } else if (std.mem.startsWith(u8, a, "--time=")) {
+            const raw = a["--time=".len..];
+            const secs = std.fmt.parseInt(u32, raw, 10) catch return error.InvalidValue;
+            if (secs > 3600) return error.InvalidValue;
+            timeout_secs = secs;
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else if (container == null) {
+            container = a;
+        } else {
+            return error.TooManyArguments;
+        }
+    }
+    return .{ .restart = .{
+        .container = container orelse return error.MissingArgument,
+        .timeout_secs = timeout_secs,
+    } };
+}
+
+/// Parses `rename CONTAINER NEW_NAME`.
+fn parseRename(args: []const []const u8) ParseError!Command {
+    if (args.len == 0) return error.MissingArgument;
+    if (isFlag(args[0])) return error.UnknownFlag;
+    if (args.len < 2) return error.MissingArgument;
+    if (isFlag(args[1])) return error.UnknownFlag;
+    if (args.len > 2) return error.TooManyArguments;
+    return .{ .rename = .{
+        .container = args[0],
+        .new_name = args[1],
+    } };
+}
+
+/// Parses `rmi [-f|--force] IMAGE`.
+fn parseRmi(args: []const []const u8) ParseError!Command {
+    var force = false;
+    var image: ?[]const u8 = null;
+    for (args) |a| {
+        if (eql(a, "-f") or eql(a, "--force")) {
+            force = true;
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else if (image == null) {
+            image = a;
+        } else {
+            return error.TooManyArguments;
+        }
+    }
+    return .{ .rmi = .{
+        .image = image orelse return error.MissingArgument,
+        .force = force,
+    } };
 }
 
 // ---------------------------------------------------------------- tests
@@ -1405,4 +1509,40 @@ test "parse kill, top, volume, and network subcommands" {
     defer n_insp.deinit(alloc);
     try std.testing.expectEqual(NetworkAction.inspect, n_insp.command.network.action);
     try std.testing.expectEqualStrings("podman", n_insp.command.network.name.?);
+}
+
+test "parse start, restart, pause, unpause, rename, and rmi subcommands" {
+    const alloc = std.testing.allocator;
+
+    const p_start = try parse(alloc, &.{ "start", "web" });
+    defer p_start.deinit(alloc);
+    try std.testing.expectEqualStrings("web", p_start.command.start);
+
+    const p_restart = try parse(alloc, &.{ "restart", "-t", "5", "web" });
+    defer p_restart.deinit(alloc);
+    try std.testing.expectEqualStrings("web", p_restart.command.restart.container);
+    try std.testing.expectEqual(@as(?u32, 5), p_restart.command.restart.timeout_secs);
+
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "restart", "-t", "99999", "web" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "restart", "--time=abc", "web" }));
+
+    const p_pause = try parse(alloc, &.{ "pause", "web" });
+    defer p_pause.deinit(alloc);
+    try std.testing.expectEqualStrings("web", p_pause.command.pause);
+
+    const p_unpause = try parse(alloc, &.{ "unpause", "web" });
+    defer p_unpause.deinit(alloc);
+    try std.testing.expectEqualStrings("web", p_unpause.command.unpause);
+
+    const p_rename = try parse(alloc, &.{ "rename", "web", "web2" });
+    defer p_rename.deinit(alloc);
+    try std.testing.expectEqualStrings("web", p_rename.command.rename.container);
+    try std.testing.expectEqualStrings("web2", p_rename.command.rename.new_name);
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "rename", "web" }));
+    try std.testing.expectError(error.TooManyArguments, parse(alloc, &.{ "rename", "a", "b", "c" }));
+
+    const p_rmi = try parse(alloc, &.{ "rmi", "-f", "alpine:3.20" });
+    defer p_rmi.deinit(alloc);
+    try std.testing.expectEqualStrings("alpine:3.20", p_rmi.command.rmi.image);
+    try std.testing.expect(p_rmi.command.rmi.force);
 }

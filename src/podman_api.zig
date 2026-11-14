@@ -379,6 +379,108 @@ pub fn stopContainer(client: *const http.Client, logger: *log.Logger, id: []cons
     logger.info("stopped container {s}", .{utils.shortId(id)});
 }
 
+/// Restarts a container (`POST /containers/{id}/restart[?t={secs}]`).
+pub fn restartContainer(client: *const http.Client, logger: *log.Logger, id: []const u8, timeout_secs: ?u32) !void {
+    try validateIdentifier(id);
+    if (timeout_secs) |t| {
+        if (t > 3600) return ApiError.InvalidIdentifier;
+    }
+
+    const path = if (timeout_secs) |t|
+        try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/restart?t={d}", .{ api_prefix, id, t })
+    else
+        try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/restart", .{ api_prefix, id });
+    defer client.allocator.free(path);
+
+    logger.debug("POST {s}", .{path});
+    const resp = try client.request("POST", path, null);
+    defer resp.deinit();
+
+    if (resp.status != 204) {
+        return logApiFailure(logger, "POST", path, resp);
+    }
+    logger.info("restarted container {s}", .{utils.shortId(id)});
+}
+
+/// Pauses all processes inside a container (`POST /containers/{id}/pause`).
+pub fn pauseContainer(client: *const http.Client, logger: *log.Logger, id: []const u8) !void {
+    try validateIdentifier(id);
+
+    const path = try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/pause", .{ api_prefix, id });
+    defer client.allocator.free(path);
+
+    logger.debug("POST {s}", .{path});
+    const resp = try client.request("POST", path, null);
+    defer resp.deinit();
+
+    if (resp.status != 204) {
+        return logApiFailure(logger, "POST", path, resp);
+    }
+    logger.info("paused container {s}", .{utils.shortId(id)});
+}
+
+/// Unpauses a paused container (`POST /containers/{id}/unpause`).
+pub fn unpauseContainer(client: *const http.Client, logger: *log.Logger, id: []const u8) !void {
+    try validateIdentifier(id);
+
+    const path = try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/unpause", .{ api_prefix, id });
+    defer client.allocator.free(path);
+
+    logger.debug("POST {s}", .{path});
+    const resp = try client.request("POST", path, null);
+    defer resp.deinit();
+
+    if (resp.status != 204) {
+        return logApiFailure(logger, "POST", path, resp);
+    }
+    logger.info("unpaused container {s}", .{utils.shortId(id)});
+}
+
+/// Renames an existing container (`POST /containers/{id}/rename?name={new_name}`).
+/// Both `id` and `new_name` are validated with `validateIdentifier`.
+pub fn renameContainer(client: *const http.Client, logger: *log.Logger, id: []const u8, new_name: []const u8) !void {
+    try validateIdentifier(id);
+    try validateIdentifier(new_name);
+
+    const path = try std.fmt.allocPrint(
+        client.allocator,
+        "{s}/containers/{s}/rename?name={s}",
+        .{ api_prefix, id, new_name },
+    );
+    defer client.allocator.free(path);
+
+    logger.debug("POST {s}", .{path});
+    const resp = try client.request("POST", path, null);
+    defer resp.deinit();
+
+    if (resp.status != 204) {
+        return logApiFailure(logger, "POST", path, resp);
+    }
+    logger.info("renamed container {s} -> {s}", .{ utils.shortId(id), new_name });
+}
+
+/// Removes a local container image (`DELETE /images/{name}?force={true|false}`).
+pub fn removeImage(client: *const http.Client, logger: *log.Logger, image: []const u8, force: bool, writer: anytype) !void {
+    try validateResourceRef(image);
+
+    const path = try std.fmt.allocPrint(
+        client.allocator,
+        "{s}/images/{s}?force={s}",
+        .{ api_prefix, image, if (force) "true" else "false" },
+    );
+    defer client.allocator.free(path);
+
+    logger.debug("DELETE {s}", .{path});
+    const resp = try client.request("DELETE", path, null);
+    defer resp.deinit();
+
+    if (resp.status != 204 and !resp.ok()) {
+        return logApiFailure(logger, "DELETE", path, resp);
+    }
+    try writer.print("Removed {s}\n", .{image});
+    logger.info("removed image {s} (force={})", .{ image, force });
+}
+
 /// Sends an allow-listed signal to a running container (`POST /containers/{id}/kill?signal={sig}`).
 pub fn killContainer(client: *const http.Client, logger: *log.Logger, id: []const u8, signal: []const u8) !void {
     try validateIdentifier(id);
@@ -2988,4 +3090,76 @@ test "streamContainerStats streams live chunked JSON metrics (stream=true)" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "32.0 MB / 256.0 MB") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "60.00%") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "64.0 MB / 256.0 MB") != null);
+}
+
+test "restart, pause, unpause, rename, and removeImage endpoints + validation" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-phase5-api-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const replies = [_]ScriptedReply{
+        .{
+            .expected_prefix = "POST /v1.40/containers/web/restart?t=5 HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 204 No Content\r\n\r\n",
+        },
+        .{
+            .expected_prefix = "POST /v1.40/containers/web/pause HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 204 No Content\r\n\r\n",
+        },
+        .{
+            .expected_prefix = "POST /v1.40/containers/web/unpause HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 204 No Content\r\n\r\n",
+        },
+        .{
+            .expected_prefix = "POST /v1.40/containers/web/rename?name=web2 HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 204 No Content\r\n\r\n",
+        },
+        .{
+            .expected_prefix = "DELETE /v1.40/images/alpine:3.20?force=true HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n[]",
+        },
+    };
+
+    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{
+        .allocator = alloc,
+        .socket_path = sock_path,
+    };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    // Pre-flight validation must reject bad identifiers before touching the socket.
+    try std.testing.expectError(ApiError.InvalidIdentifier, restartContainer(&client, &logger, "../bad", 5));
+    try std.testing.expectError(ApiError.InvalidIdentifier, restartContainer(&client, &logger, "web", 99999));
+    try std.testing.expectError(ApiError.InvalidIdentifier, pauseContainer(&client, &logger, "../bad"));
+    try std.testing.expectError(ApiError.InvalidIdentifier, unpauseContainer(&client, &logger, "../bad"));
+    try std.testing.expectError(ApiError.InvalidIdentifier, renameContainer(&client, &logger, "web", "../bad"));
+    try std.testing.expectError(ApiError.InvalidIdentifier, removeImage(&client, &logger, "alpine?evil=1", true, out.writer()));
+
+    try restartContainer(&client, &logger, "web", 5);
+    try pauseContainer(&client, &logger, "web");
+    try unpauseContainer(&client, &logger, "web");
+    try renameContainer(&client, &logger, "web", "web2");
+    try removeImage(&client, &logger, "alpine:3.20", true, out.writer());
+    try std.testing.expectEqualStrings("Removed alpine:3.20\n", out.items);
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
 }
