@@ -153,3 +153,17 @@ status: active
 - **Root Cause**: `openAppend` ใน [src/log.zig](../../src/log.zig) ใช้ `0o644`; เช็กลิสต์เดิมบังคับแค่ "ไม่ world-writable" จึงไม่มีใครสังเกต
 - **Fix**: ลด mode เป็น `0o640` และ `chmod 640` ไฟล์ที่มีอยู่แล้วใน repository
 - **Prevention Rule**: ไฟล์ log/audit ที่สร้างใหม่ต้องใช้ `0o640` ขึ้นไป (group-readable ได้ แต่ห้าม other-readable/world-writable) และ `security-check.sh` ต้องรายงาน mode ปัจจุบันทุกครั้ง
+
+---
+
+## BUG-014: Host Bind Mount Without a Fail-Closed Path Policy `#bug-pattern` `#security-gate`
+
+- **Symptom**: ระหว่างทำ Phase 1 (`-v`/`--volume`) หากส่ง `SRC:DST` เข้าไปใน `Mounts` ตรง ๆ จะสามารถ bind-mount `/`, `/etc`, `/proc`, `/sys`, `/run`, `/var/run/docker.sock`, `/root`, หรือ path ที่มี `..` ได้ ทำให้ container (หรือ AI agent ที่ขับ CLI) อ่าน/เขียนไฟล์ระบบ host, ขโมย container-engine socket แล้วยกระดับสิทธิ์ หรือแก้ `/etc` เพื่อ persistence
+- **Root Cause**: เดิม CLI ไม่รองรับ `-v` จึงไม่มีจุดตรวจ; การเพิ่ม mount โดยไม่มี policy จะเปิดช่องโหว่ path traversal + dangerous-host-path ทันที (จัดอยู่ในคลาสเดียวกับ BUG-005 แต่เป็นฝั่ง host filesystem)
+- **Fix**:
+  - เพิ่ม `podman_api.makeMount()` + `validateHostPath()` / `validateVolumeName()` / `validateContainerPath()` ใน [src/podman_api.zig](../../src/podman_api.zig): source/target ต้องเป็น absolute, ห้าม `..`/`.`/`//`/trailing-slash/control-char, ยาว ≤ 4096
+  - บล็อก subtree ของ `/`, `/etc`, `/proc`, `/sys`, `/dev`, `/boot`, `/run`, `/var/run`, `/var/lib/docker`, `/var/lib/containers`, `/root`
+  - default เป็น read-only; allow-list ของ `/etc` (`localtime`, `timezone`, `hosts`, `resolv.conf`, `nsswitch.conf`, `hostname`) ต้อง `:ro` เท่านั้น
+  - `createContainer` re-validate `Mounts` แบบ defense-in-depth ก่อน stringify JSON
+  - เพิ่มเทส DENY ครบ (traversal, dangerous roots, rw-on-`/etc`) และ smoke E2E ตรวจว่า `-v /etc:/data` ถูกปฏิเสธก่อนถึง daemon
+- **Prevention Rule**: ทุก field ที่อ้างถึง **path บน host** (mounts, volumes, อนาคต `build` context / `--env-file`) ต้องผ่าน validator แบบ fail-closed ที่ absolute+no-traversal+denylist และ default เป็นสิทธิ์ต่ำสุด (read-only) เสมอ — ห้าม serialize ค่าดิบลง request

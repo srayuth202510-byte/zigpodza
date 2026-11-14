@@ -95,6 +95,12 @@ zigpod images
 # Run a container (attached, auto-removed after logs are printed)
 zigpod run --rm -e GREETING=hello alpine:3.20 sh -c 'echo "$GREETING from zigpod"'
 
+# Bind-mount a host directory read-only (default) and a writable cache
+zigpod run --rm -v /srv/data:/data -v /srv/cache:/cache:rw alpine:3.20 ls /data
+
+# Mount a Podman-managed named volume
+zigpod run --rm -v myvol:/var/lib/data alpine:3.20 ls /var/lib/data
+
 # Run a container in the background with a name
 zigpod run -d --name demo-alpine alpine:3.20 sleep 60
 
@@ -150,6 +156,7 @@ zig build test
 - File logger & UTC timestamp formatting (`src/log.zig`)
 - Helper formatting (`src/utils.zig`)
 - Container ID/name validation, Docker stream log demultiplexing, JSON response deserialization และ mock Unix-socket end-to-end lifecycle (`src/podman_api.zig`)
+- Host bind-mount policy validator (`validateHostPath`), bind/volume mount classification และ `Mounts` JSON serialization (`src/podman_api.zig`)
 
 ---
 
@@ -162,6 +169,7 @@ zig build test
   - `http.validateRequestTarget` ป้องกัน CRLF/header injection และ whitespace ใน HTTP request path
   - `http.decodeChunked` ใช้ checked arithmetic (`std.math.add`) และตรวจสอบ CRLF trailer ของทุก chunk เพื่อป้องกัน integer overflow และ out-of-bounds read
   - `podman_api.validateIdentifier` ป้องกัน path traversal (`..`, `/`) และ query/header injection บน container ID และ name
+  - `podman_api.validateHostPath` (BUG-014) บังคับ **fail-closed host mount policy**: บล็อกการ bind-mount `/`, `/etc`, `/proc`, `/sys`, `/dev`, `/boot`, `/run`, `/var/run`, `/var/lib/docker`, `/var/lib/containers`, `/root` และบังคับ default `:ro` สำหรับ sensitive paths
 - **Automated Security Check Script**:
 
 ```bash
@@ -191,10 +199,21 @@ Apply defense-in-depth limits in `HostConfig` when launching containers:
 - `--pids-limit <N>`: Maximum container process count
 - `--read-only`: Mount the container root filesystem read-only (`ReadonlyRootfs`)
 - `--no-new-privileges`: Set `SecurityOpt: ["no-new-privileges"]`
+- `-v, --volume SRC:DST[:ro|rw]`: Bind-mount a host path or named volume (repeatable, default **read-only**)
 
 ```bash
 zigpod run --rm -m 64m --pids-limit 32 --read-only --no-new-privileges alpine:3.20 echo ok
 ```
+
+#### Host Path Policy Validator (`-v`)
+
+`podman_api.validateHostPath` (BUG-014) is fail-closed. Every `-v` source is validated **before** any request reaches the daemon:
+
+- Sources starting with `/` are treated as **bind mounts**; anything else is a **named volume** (name must be alphanumeric, `-`, `_`, `.`).
+- Both host source and container target must be absolute, traversal-free (`..`/`.`/`//`/trailing-slash rejected), control-char-free, and ≤ 4096 bytes.
+- Bind mounts default to **read-only**; pass `:rw` to opt out.
+- The following host subtrees are always rejected: `/`, `/etc` (except a read-only allow-list of `/etc/localtime`, `/etc/timezone`, `/etc/hosts`, `/etc/resolv.conf`, `/etc/nsswitch.conf`, `/etc/hostname`), `/proc`, `/sys`, `/dev`, `/boot`, `/run`, `/var/run`, `/var/lib/docker`, `/var/lib/containers`, and `/root`.
+- Sensitive allow-listed `/etc` files may only be mounted read-only (`:rw` is rejected).
 
 ### Built-In 14-Case Fail-Closed Self-Test (`zigpod demo`)
 

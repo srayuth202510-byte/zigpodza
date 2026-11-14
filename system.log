@@ -73,3 +73,19 @@
 2569-11-14T03:26:06Z [INFO] auto-audit passed (hook=false)
 2026-11-14T03:39:42Z [INFO] auto-audit passed (hook=false)
 2026-11-14T03:40:00Z [INFO] auto-audit passed (hook=false)
+2026-11-14T04:16:08Z [INFO] zigpod 0.1.0 command=run socket=/tmp/zp-vol-38887.sock
+2026-11-14T04:16:08Z [DEBUG] POST /v1.40/containers/create body={"Image":"alpine:3.20","Cmd":["echo","ok"],"Mounts":[{"Type":"bind","Source":"/srv/data","Target":"/data","ReadOnly":true},{"Type":"bind","Source":"/srv/cache","Target":"/cache","ReadOnly":false},{"Type":"volume","Source":"myvol","Target":"/vol","ReadOnly":true}]}
+2026-11-14T04:16:08Z [INFO] created container vol123456789 (image=alpine:3.20)
+2026-11-14T04:16:08Z [DEBUG] POST /v1.40/containers/vol1234567890abcd/start
+2026-11-14T04:16:08Z [INFO] started container vol123456789
+2026-11-14T04:16:08Z [DEBUG] POST /v1.40/containers/vol1234567890abcd/wait
+2026-11-14T04:16:08Z [DEBUG] container vol123456789 exited with status 0
+2026-11-14T04:16:08Z [DEBUG] GET /v1.40/containers/vol1234567890abcd/logs?stdout=1&stderr=1
+2026-11-14T04:16:08Z [DEBUG] DELETE /v1.40/containers/vol1234567890abcd?force=false
+2026-11-14T04:16:08Z [INFO] removed container vol123456789
+2026-11-14T04:16:08Z [INFO] zigpod 0.1.0 command=run socket=/tmp/zp-vol-38887.sock
+2026-11-14T04:16:08Z [ERROR] Rejected unsafe host path or volume name. Bind mounts must be absolute, traversal-free, and may not target /, /etc, /proc, /sys, /dev, /boot, /run, /root, or container-engine state; sensitive /etc files are read-only.
+2026-11-14T04:16:08Z [INFO] zigpod 0.1.0 command=run socket=/tmp/zp-vol-38887.sock
+2026-11-14T04:16:08Z [ERROR] Rejected unsafe host path or volume name. Bind mounts must be absolute, traversal-free, and may not target /, /etc, /proc, /sys, /dev, /boot, /run, /root, or container-engine state; sensitive /etc files are read-only.
+2026-11-14T04:17:19Z [INFO] auto-audit passed (hook=false)
+2026-11-14T04:17:21Z [INFO] auto-audit passed (hook=false)

@@ -13,6 +13,7 @@ pub const usage =
     \\      --rm                       Remove the container when it exits
     \\      --name NAME                Assign a name to the container
     \\      -e, --env KEY=VALUE        Set an environment variable (repeatable)
+    \\      -v, --volume SRC:DST[:ro|rw]  Bind mount a host path (default: read-only)
     \\      -m, --memory BYTES         Memory limit (e.g., 64m, 1g, 1048576)
     \\      --pids-limit N             Limit container PIDs
     \\      --read-only                Mount container root filesystem as read-only
@@ -45,10 +46,18 @@ pub const Global = struct {
     socket: ?[]const u8 = null,
 };
 
+pub const Volume = struct {
+    source: []const u8,
+    destination: []const u8,
+    /// Read-only unless the user explicitly opts out with `:rw` (BUG-014).
+    readonly: bool = true,
+};
+
 pub const RunOpts = struct {
     image: []const u8,
     cmd: []const []const u8 = &.{},
     env: []const []const u8 = &.{},
+    volumes: []const Volume = &.{},
     name: ?[]const u8 = null,
     detach: bool = false,
     remove: bool = false,
@@ -86,6 +95,7 @@ pub const Parsed = struct {
         switch (self.command) {
             .run => |r| {
                 if (r.env.len > 0) allocator.free(r.env);
+                if (r.volumes.len > 0) allocator.free(r.volumes);
             },
             else => {},
         }
@@ -267,10 +277,35 @@ fn parsePidsLimit(s: []const u8) ParseError!i64 {
     return limit;
 }
 
+/// Parses a `SRC:DST[:ro|rw]` volume specification. Only syntax is checked
+/// here; the host-path security policy is enforced by `podman_api.makeMount`.
+fn parseVolumeSpec(spec: []const u8) ParseError!Volume {
+    const first = std.mem.indexOfScalar(u8, spec, ':') orelse return error.InvalidValue;
+    const source = spec[0..first];
+    const rest = spec[first + 1 ..];
+
+    var destination = rest;
+    var readonly = true;
+    if (std.mem.indexOfScalar(u8, rest, ':')) |second| {
+        destination = rest[0..second];
+        const opt = rest[second + 1 ..];
+        if (std.mem.indexOfScalar(u8, opt, ':') != null) return error.InvalidValue;
+        if (eql(opt, "ro")) {
+            readonly = true;
+        } else if (eql(opt, "rw")) {
+            readonly = false;
+        } else return error.InvalidValue;
+    }
+    if (source.len == 0 or destination.len == 0) return error.InvalidValue;
+    return .{ .source = source, .destination = destination, .readonly = readonly };
+}
+
 fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!RunOpts {
     var opts = RunOpts{ .image = "" };
     var env = std.ArrayList([]const u8).init(allocator);
     errdefer env.deinit();
+    var volumes = std.ArrayList(Volume).init(allocator);
+    errdefer volumes.deinit();
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -295,6 +330,10 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
             opts.name = try takeValue(args, &i);
         } else if (eql(a, "-e") or eql(a, "--env")) {
             try env.append(try takeValue(args, &i));
+        } else if (eql(a, "-v") or eql(a, "--volume")) {
+            try volumes.append(try parseVolumeSpec(try takeValue(args, &i)));
+        } else if (std.mem.startsWith(u8, a, "--volume=")) {
+            try volumes.append(try parseVolumeSpec(a["--volume=".len..]));
         } else if (isFlag(a)) {
             return error.UnknownFlag;
         } else break; // first positional = IMAGE; everything after is the command
@@ -303,6 +342,8 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
     opts.image = args[i];
     opts.cmd = args[i + 1 ..];
     opts.env = try env.toOwnedSlice();
+    errdefer allocator.free(opts.env);
+    opts.volumes = try volumes.toOwnedSlice();
     return opts;
 }
 
@@ -453,6 +494,44 @@ test "parse rejects invalid hardening values" {
     try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--pids-limit", "nope", "alpine" }));
     try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--pids-limit=", "alpine" }));
     try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "run", "--pids-limit" }));
+}
+
+test "parse run volume mounts with default read-only and explicit options" {
+    const alloc = std.testing.allocator;
+    var parsed = try parse(alloc, &.{
+        "run",
+        "-v",
+        "/srv/data:/data",
+        "--volume",
+        "/srv/cache:/cache:rw",
+        "--volume=/etc/hosts:/etc/hosts:ro",
+        "alpine:3.20",
+    });
+    defer parsed.deinit(alloc);
+
+    const r = parsed.command.run;
+    try std.testing.expectEqual(@as(usize, 3), r.volumes.len);
+    try std.testing.expectEqualStrings("/srv/data", r.volumes[0].source);
+    try std.testing.expectEqualStrings("/data", r.volumes[0].destination);
+    try std.testing.expect(r.volumes[0].readonly); // default is read-only
+    try std.testing.expectEqualStrings("/srv/cache", r.volumes[1].source);
+    try std.testing.expect(!r.volumes[1].readonly);
+    try std.testing.expectEqualStrings("/etc/hosts", r.volumes[2].source);
+    try std.testing.expect(r.volumes[2].readonly);
+    try std.testing.expectEqualStrings("alpine:3.20", r.image);
+}
+
+test "parse rejects malformed volume specs without leaking allocations" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "-v", "/onlysource", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "-v", ":/dest", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "-v", "/src:", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "-v", "/src:/dst:bogus", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "-v", "/a:/b:ro:extra", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--volume=", "alpine" }));
+    try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "run", "-v" }));
+    // A parsed volume must be freed when a later error aborts the parse.
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "run", "-v", "/src:/dst" }));
 }
 
 test "parse demo and audit subcommands" {

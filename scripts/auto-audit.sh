@@ -79,6 +79,13 @@ else
     fail "validateIdentifier() is not called in src/podman_api.zig."
 fi
 
+# 5b. Require the fail-closed host bind-mount policy (BUG-014)
+if has_match "pub fn validateHostPath\(" "src/podman_api.zig" && has_match "try validateHostPath\(" "src/podman_api.zig"; then
+    pass "validateHostPath() fail-closed host mount policy enforced in src/podman_api.zig."
+else
+    fail "Missing validateHostPath() host mount policy in src/podman_api.zig (see BUG-014)."
+fi
+
 # 6. Require checked arithmetic in parsers & decoders
 if has_match "std\.math\.add" "src/http.zig" && has_match "std\.math\.add" "src/podman_api.zig" && has_match "std\.math\.mul" "src/cli.zig"; then
     pass "Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser."

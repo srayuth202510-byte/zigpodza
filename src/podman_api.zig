@@ -9,6 +9,8 @@ pub const api_prefix = "/v1.40";
 pub const ApiError = error{
     PodmanApiError,
     InvalidIdentifier,
+    InvalidHostPath,
+    InvalidMountTarget,
 };
 
 pub const HostConfig = struct {
@@ -19,10 +21,20 @@ pub const HostConfig = struct {
     SecurityOpt: ?[]const []const u8 = null,
 };
 
+/// A bind mount or named-volume mount, serialized into the container-create
+/// request. `Type` is `"bind"` or `"volume"`; `Target` is the in-container path.
+pub const Mount = struct {
+    Type: []const u8,
+    Source: []const u8,
+    Target: []const u8,
+    ReadOnly: bool = true,
+};
+
 pub const ContainerCreateRequest = struct {
     Image: []const u8,
     Cmd: ?[]const []const u8 = null,
     Env: ?[]const []const u8 = null,
+    Mounts: ?[]const Mount = null,
     HostConfig: ?HostConfig = null,
 };
 
@@ -75,6 +87,108 @@ pub fn validateIdentifier(id: []const u8) ApiError!void {
     }
 }
 
+/// Host directories whose subtree must never be bind-mounted into a container.
+/// Matched as `path == prefix` or `path` living under `prefix/`.
+const blocked_host_prefixes = [_][]const u8{
+    "/proc",
+    "/sys",
+    "/dev",
+    "/boot",
+    "/run",
+    "/var/run",
+    "/var/lib/docker",
+    "/var/lib/containers",
+    "/etc",
+    "/root",
+};
+
+/// Specific `/etc` files that are safe to bind-mount, but only read-only.
+const safe_etc_files = [_][]const u8{
+    "/etc/localtime",
+    "/etc/timezone",
+    "/etc/hosts",
+    "/etc/resolv.conf",
+    "/etc/nsswitch.conf",
+    "/etc/hostname",
+};
+
+/// True when `path` equals `prefix` or is a descendant of `prefix/`.
+fn isUnder(path: []const u8, prefix: []const u8) bool {
+    if (!std.mem.startsWith(u8, path, prefix)) return false;
+    return path.len == prefix.len or path[prefix.len] == '/';
+}
+
+/// Rejects empty, relative, over-long, control-char, `..`/`.`-containing, and
+/// `//`/trailing-slash paths. Used for both host sources and container targets.
+fn validateAbsolutePath(path: []const u8) ApiError!void {
+    if (path.len == 0 or path.len > 4096) return ApiError.InvalidHostPath;
+    if (path[0] != '/') return ApiError.InvalidHostPath;
+    for (path) |c| {
+        if (c < 0x20 or c == 0x7f) return ApiError.InvalidHostPath;
+    }
+    var it = std.mem.splitScalar(u8, path, '/');
+    _ = it.next(); // leading empty component produced by the root slash
+    while (it.next()) |comp| {
+        if (comp.len == 0) return ApiError.InvalidHostPath; // "//" or trailing "/"
+        if (std.mem.eql(u8, comp, ".") or std.mem.eql(u8, comp, "..")) return ApiError.InvalidHostPath;
+    }
+}
+
+/// Fail-closed host-path policy for bind mounts (BUG-014). Rejects dangerous
+/// system roots, traversal, and read-write mounts of sensitive `/etc` files.
+pub fn validateHostPath(path: []const u8, readonly: bool) ApiError!void {
+    try validateAbsolutePath(path);
+
+    for (safe_etc_files) |f| {
+        if (std.mem.eql(u8, path, f)) {
+            if (!readonly) return ApiError.InvalidHostPath;
+            return;
+        }
+    }
+    for (blocked_host_prefixes) |prefix| {
+        if (isUnder(path, prefix)) return ApiError.InvalidHostPath;
+    }
+}
+
+/// Validates the in-container mount destination (must be an absolute,
+/// traversal-free path).
+pub fn validateContainerPath(path: []const u8) ApiError!void {
+    return validateAbsolutePath(path) catch ApiError.InvalidMountTarget;
+}
+
+/// Validates a Podman named volume (no host path involved).
+pub fn validateVolumeName(name: []const u8) ApiError!void {
+    if (name.len == 0 or name.len > 128) return ApiError.InvalidHostPath;
+    if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return ApiError.InvalidHostPath;
+    for (name) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.') continue;
+        return ApiError.InvalidHostPath;
+    }
+}
+
+/// Classifies and validates a `-v` mount: absolute sources become `bind`
+/// mounts (policy-checked), everything else a named `volume`.
+pub fn makeMount(source: []const u8, target: []const u8, readonly: bool) ApiError!Mount {
+    try validateContainerPath(target);
+    if (std.mem.startsWith(u8, source, "/")) {
+        try validateHostPath(source, readonly);
+        return .{ .Type = "bind", .Source = source, .Target = target, .ReadOnly = readonly };
+    }
+    try validateVolumeName(source);
+    return .{ .Type = "volume", .Source = source, .Target = target, .ReadOnly = readonly };
+}
+
+fn validateMount(m: Mount) ApiError!void {
+    if (std.mem.eql(u8, m.Type, "bind")) {
+        try validateHostPath(m.Source, m.ReadOnly);
+    } else if (std.mem.eql(u8, m.Type, "volume")) {
+        try validateVolumeName(m.Source);
+    } else {
+        return ApiError.InvalidHostPath;
+    }
+    try validateContainerPath(m.Target);
+}
+
 fn appendQueryEncoded(out: *std.ArrayList(u8), s: []const u8) !void {
     for (s) |c| {
         if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
@@ -103,6 +217,11 @@ pub fn createContainer(
     name: ?[]const u8,
 ) ![]u8 {
     if (name) |n| try validateIdentifier(n);
+    // Defense in depth: never serialize an unsafe mount even if a caller
+    // constructed `Mount` values by hand (BUG-014).
+    if (cfg.Mounts) |mounts| {
+        for (mounts) |m| try validateMount(m);
+    }
 
     var path_buf = std.ArrayList(u8).init(client.allocator);
     defer path_buf.deinit();
@@ -419,8 +538,74 @@ test "validateIdentifier rejects traversal, injection, and invalid sizes" {
     try std.testing.expectError(ApiError.InvalidIdentifier, validateIdentifier(too_long));
 }
 
-test "demuxLogs handles multiplexed docker stream frames and zero-length frame" {
-    const frame = [_]u8{
+test "validateHostPath enforces the fail-closed bind-mount policy" {
+    try validateHostPath("/home/user/data", true);
+    try validateHostPath("/home/user/data", false);
+    try validateHostPath("/srv/app", false);
+    try validateHostPath("/etc/hosts", true);
+    try validateHostPath("/etc/localtime", true);
+
+    const bad = [_][]const u8{
+        "",               "relative/path",        "/",
+        "/etc",           "/etc/passwd",          "/etc/ssh",
+        "/proc",          "/proc/1",              "/sys",
+        "/dev",           "/dev/sda",             "/boot",
+        "/run",           "/run/podman/podman.sock",
+        "/var/run/docker.sock",                    "/root",
+        "/root/.ssh",     "/var/lib/docker",      "/var/lib/containers",
+        "/home/user/../etc", "/home/user/..",     "/home//user",
+        "/srv/data/",     "/etc/../etc/hosts",
+    };
+    for (bad) |p| {
+        try std.testing.expectError(ApiError.InvalidHostPath, validateHostPath(p, true));
+    }
+
+    // Sensitive /etc files may only be mounted read-only.
+    try std.testing.expectError(ApiError.InvalidHostPath, validateHostPath("/etc/hosts", false));
+    try std.testing.expectError(ApiError.InvalidHostPath, validateHostPath("/etc/resolv.conf", false));
+    // Control characters are rejected.
+    try std.testing.expectError(ApiError.InvalidHostPath, validateHostPath("/srv/\x00evil", true));
+    try std.testing.expectError(ApiError.InvalidHostPath, validateHostPath("/srv/a\nb", true));
+}
+
+test "makeMount classifies bind vs named volume and validates the target" {
+    const b = try makeMount("/srv/data", "/data", true);
+    try std.testing.expectEqualStrings("bind", b.Type);
+    try std.testing.expectEqualStrings("/srv/data", b.Source);
+    try std.testing.expectEqualStrings("/data", b.Target);
+    try std.testing.expect(b.ReadOnly);
+
+    const v = try makeMount("myvol", "/var/lib/data", false);
+    try std.testing.expectEqualStrings("volume", v.Type);
+    try std.testing.expect(!v.ReadOnly);
+
+    try std.testing.expectError(ApiError.InvalidHostPath, makeMount("/etc", "/data", true));
+    try std.testing.expectError(ApiError.InvalidHostPath, makeMount("../evil", "/data", true));
+    try std.testing.expectError(ApiError.InvalidHostPath, makeMount("bad/name", "/data", true));
+    try std.testing.expectError(ApiError.InvalidMountTarget, makeMount("/srv/data", "data", true));
+    try std.testing.expectError(ApiError.InvalidMountTarget, makeMount("/srv/data", "/data/../etc", true));
+}
+
+test "ContainerCreateRequest serializes bind mounts" {
+    const alloc = std.testing.allocator;
+    const mounts = [_]Mount{
+        .{ .Type = "bind", .Source = "/srv/data", .Target = "/data", .ReadOnly = true },
+        .{ .Type = "volume", .Source = "myvol", .Target = "/vol", .ReadOnly = false },
+    };
+    const req = ContainerCreateRequest{ .Image = "alpine:3.20", .Mounts = &mounts };
+    const json = try std.json.stringifyAlloc(alloc, req, .{ .emit_null_optional_fields = false });
+    defer alloc.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Mounts\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Type\":\"bind\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Source\":\"/srv/data\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Target\":\"/data\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"ReadOnly\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Type\":\"volume\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"ReadOnly\":false") != null);
+}
+
+test "demuxLogs handles multiplexed docker stream frames and zero-length frame" {    const frame = [_]u8{
         1, 0, 0, 0, 0, 0, 0, 6, 'h', 'e', 'l', 'l', 'o', '\n',
         1, 0, 0, 0, 0, 0, 0, 0,
         2, 0, 0, 0, 0, 0, 0, 4, 'e', 'r', 'r', '\n',
@@ -658,6 +843,13 @@ test "end-to-end container lifecycle over mock Unix socket has zero memory leaks
         createContainer(&client, &logger, .{ .Image = "alpine:3.20" }, "../bad"),
     );
     try std.testing.expectError(ApiError.InvalidIdentifier, removeContainer(&client, &logger, "../bad", true));
+
+    // Unsafe bind mounts fail closed before any socket traffic.
+    const bad_mounts = [_]Mount{.{ .Type = "bind", .Source = "/etc", .Target = "/data", .ReadOnly = true }};
+    try std.testing.expectError(
+        ApiError.InvalidHostPath,
+        createContainer(&client, &logger, .{ .Image = "alpine:3.20", .Mounts = &bad_mounts }, null),
+    );
 
     const id = try createContainer(&client, &logger, .{
         .Image = "alpine:3.20",

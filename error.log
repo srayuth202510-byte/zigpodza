@@ -83,3 +83,5 @@ test transitive failure
 +- run test 39/40 passed, 1 failed
 error: the following build command failed with exit code 1:
 /home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0xd3052c4d -Zb9f6ac0a378a2523 test
+2026-11-14T04:16:08Z [ERROR] Rejected unsafe host path or volume name. Bind mounts must be absolute, traversal-free, and may not target /, /etc, /proc, /sys, /dev, /boot, /run, /root, or container-engine state; sensitive /etc files are read-only.
+2026-11-14T04:16:08Z [ERROR] Rejected unsafe host path or volume name. Bind mounts must be absolute, traversal-free, and may not target /, /etc, /proc, /sys, /dev, /boot, /run, /root, or container-engine state; sensitive /etc files are read-only.

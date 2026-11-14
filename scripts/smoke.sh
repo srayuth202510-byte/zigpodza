@@ -129,12 +129,13 @@ while [ ! -S "$SOCK" ] && [ "$i" -lt 40 ]; do
 done
 [ -S "$SOCK" ]
 
-RUN_OUT=$("$BIN" --socket "$SOCK" run --rm -m 64m --pids-limit 32 --read-only --no-new-privileges alpine:3.20 echo ok)
+RUN_OUT=$("$BIN" --socket "$SOCK" run --rm -m 64m --pids-limit 32 --read-only --no-new-privileges -v /srv/data:/data alpine:3.20 echo ok)
 echo "$RUN_OUT" | grep -q "ok"
 grep -q '"ReadonlyRootfs":true' "$REQ_LOG"
 grep -q '"Memory":67108864' "$REQ_LOG"
 grep -q '"PidsLimit":32' "$REQ_LOG"
 grep -q '"SecurityOpt":\["no-new-privileges"\]' "$REQ_LOG"
+grep -q '"Mounts":\[{"Type":"bind","Source":"/srv/data","Target":"/data","ReadOnly":true}\]' "$REQ_LOG"
 
 PS_OUT=$("$BIN" --socket "$SOCK" ps -a)
 echo "$PS_OUT" | grep -q "smoke1234567"
@@ -142,6 +143,11 @@ echo "$PS_OUT" | grep -q "smoke1234567"
 # Adversarial input must fail closed before reaching daemon.
 if "$BIN" --socket "$SOCK" rm ../evil >/dev/null 2>&1; then
     echo "[FAIL] expected path traversal container identifier to fail" >&2
+    exit 1
+fi
+
+if "$BIN" --socket "$SOCK" run -v /etc:/data alpine:3.20 >/dev/null 2>&1; then
+    echo "[FAIL] expected dangerous host bind mount (/etc) to fail closed" >&2
     exit 1
 fi
 

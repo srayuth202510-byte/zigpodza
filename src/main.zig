@@ -150,10 +150,19 @@ fn dispatch(
                 .PidsLimit = r.pids_limit,
                 .SecurityOpt = if (r.no_new_privileges) sec_opts else null,
             } else null;
+
+            // Validate and classify each -v mount (bind vs named volume).
+            var mount_buf = std.ArrayList(pod.Mount).init(client.allocator);
+            defer mount_buf.deinit();
+            for (r.volumes) |v| {
+                try mount_buf.append(try pod.makeMount(v.source, v.destination, v.readonly));
+            }
+
             const req = pod.ContainerCreateRequest{
                 .Image = r.image,
                 .Cmd = if (r.cmd.len > 0) r.cmd else null,
                 .Env = if (r.env.len > 0) r.env else null,
+                .Mounts = if (mount_buf.items.len > 0) mount_buf.items else null,
                 .HostConfig = host_cfg,
             };
             const id = try pod.createContainer(client, logger, req, r.name);
@@ -217,6 +226,14 @@ fn reportFailure(logger: *log.Logger, cmd: cli.Command, socket_path: []const u8,
         ),
         pod.ApiError.InvalidIdentifier => logger.err(
             "Invalid container identifier or name (allowed: alphanumeric, '-', '_', '.', ':').",
+            .{},
+        ),
+        pod.ApiError.InvalidHostPath => logger.err(
+            "Rejected unsafe host path or volume name. Bind mounts must be absolute, traversal-free, and may not target /, /etc, /proc, /sys, /dev, /boot, /run, /root, or container-engine state; sensitive /etc files are read-only.",
+            .{},
+        ),
+        pod.ApiError.InvalidMountTarget => logger.err(
+            "Rejected invalid container mount target (must be an absolute, traversal-free path).",
             .{},
         ),
         pod.ApiError.PodmanApiError => {

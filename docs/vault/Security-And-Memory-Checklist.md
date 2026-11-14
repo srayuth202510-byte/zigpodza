@@ -34,6 +34,9 @@ status: active
 - [ ] `podman_api.zig` เรียก `validateIdentifier` กับทุก `id` และ `name` ที่สร้าง URL
 - [ ] `podman_api.demuxLogs` ใช้ `std.math.add` และ fallback เมื่อ frame ไม่สมบูรณ์
 - [ ] Hardening flags (`-m`/`--memory`, `--pids-limit`, `--read-only`, `--no-new-privileges`) ใช้ checked `std.math.mul` และส่งผ่าน `HostConfig`
+- [ ] Host bind mounts (`-v`) ผ่าน `podman_api.makeMount()` → `validateHostPath()` (fail-closed: บล็อก `/`, `/etc`, `/proc`, `/sys`, `/dev`, `/boot`, `/run`, `/var/run`, `/var/lib/docker`, `/var/lib/containers`, `/root`) และ default เป็น read-only (BUG-014)
+- [ ] Sensitive `/etc` allow-list (`localtime`, `timezone`, `hosts`, `resolv.conf`, `nsswitch.conf`, `hostname`) ต้อง mount แบบ read-only เท่านั้น
+- [ ] Container mount target ผ่าน `validateContainerPath()` (absolute, traversal-free) และ `createContainer` re-validate `Mounts` แบบ defense-in-depth
 - [ ] Lifecycle `run` มี best-effort cleanup: start fail → force-remove; `--rm` + fetchLogs fail → remove (BUG-012)
 
 ## 3. Logging, Tamper Evidence & Operations
