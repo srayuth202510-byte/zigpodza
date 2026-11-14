@@ -52,7 +52,7 @@ mkdir -p "$ZIGPOD_LOG_DIR"
 "$BIN" --version | grep -q "zigpod version"
 "$BIN" demo | grep -q "14/14 cases passed"
 
-SOCK="/tmp/zp-smoke-$$.sock"
+SOCK="$TMPDIR/smoke.sock"
 REQ_LOG="$TMPDIR/captured-req.txt"
 export ZP_SMOKE_SOCK="$SOCK"
 export ZP_SMOKE_REQ="$REQ_LOG"
@@ -120,7 +120,7 @@ with open(req_path, "wb") as out:
             elif req.startswith(b"POST ") and b"/containers/" in req and b"/exec" in req:
                 reply(conn, "201 Created", b'{"Id":"exec123"}')
             elif req.startswith(b"POST ") and b"/exec/" in req and b"/start" in req:
-                reply(conn, "200 OK", b"\x01\x00\x00\x00\x00\x00\x00\x0Ahello-exec\n")
+                reply(conn, "200 OK", b"\x01\x00\x00\x00\x00\x00\x00\x0Bhello-exec\n")
             elif req.startswith(b"GET ") and b"/exec/" in req and b"/json" in req:
                 reply(conn, "200 OK", b'{"Running":false,"ExitCode":0}')
             else:

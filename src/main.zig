@@ -134,7 +134,12 @@ fn dispatch(
         .rm => |opts| try pod.removeContainer(client, logger, opts.container, opts.force),
         .logs => |container| try pod.fetchLogs(client, logger, container, stdout),
         .inspect => |target| try pod.inspect(client, logger, target, stdout),
-        .stats => |opts| try pod.statsContainers(client, logger, opts.containers, opts.all, stdout),
+        .stats => |opts| {
+            if (!opts.no_stream) {
+                logger.info("stats live streaming not yet implemented; using --no-stream snapshot", .{});
+            }
+            try pod.statsContainers(client, logger, opts.containers, opts.all, stdout);
+        },
         .exec => |opts| {
             const req = pod.ExecCreateRequest{
                 .Cmd = opts.cmd,
