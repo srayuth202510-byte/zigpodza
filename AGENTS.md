@@ -22,3 +22,6 @@
 
 5. **Logging**:
    - ระบบบันทึกรายละเอียดการทำงานลง `system.log` และบันทึกเฉพาะ error ลง `error.log`
+
+6. **Shell & Data Querying (Nushell)**:
+   - ปฏิบัติตามแนวทางการรันคำสั่งและประมวลผลข้อมูล structured data ด้วย Nushell ใน `.agents/rules/nushell-usage.md` (ใช้ `nu --error-style plain -n -c`, pipe ออก `to md` / `to json -r` เพื่อประหยัด token)
