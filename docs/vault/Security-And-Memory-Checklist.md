@@ -24,6 +24,7 @@ status: active
 - [ ] โมดูลที่มีการจอง heap (`main.zig`, `cli.zig`, `config.zig`, `http.zig`, `podman_api.zig`, `log.zig`, `policy.zig`) ต้องมีเทสที่ใช้ `std.testing.allocator`
 - [ ] ห้ามเก็บ slice ที่อ้างอิงข้อมูลใน `std.json.Parsed(T)` ข้ามขอบเขตบล็อกที่มี `defer parsed.deinit()` (BUG-020)
 - [ ] Error paths ที่มี `ArrayList` / temporary allocation ต้องมี `errdefer` และมี unit test พิสูจน์ว่าไม่ leak
+- [ ] Slice/array ที่ populate ตาม index แบบไม่เรียงลำดับ (เช่น `topoSortServices`) ต้องใช้ nullable slots (`?T` + `@memset(..., null)`) และ caller/callee ownership ต้องตรง doc comment (BUG-038)
 - [ ] ห้ามฝังการจองหน่วยความจำ (`alloc.dupe`) ไว้ภายใน argument list ของฟังก์ชันที่อาจคืน error — ต้องมี `errdefer` ชัดเจน (BUG-035)
 - [ ] `repairAuditTail` ต้องทำงานใน **write path** ของ `audit.log` ไม่ใช่เฉพาะตอน `Logger.init` (BUG-030)
 
@@ -45,6 +46,7 @@ status: active
 - [ ] `inspect TARGET` ผ่าน `validateResourceRef()` ก่อนประกอบ URL path ตัด space/control char/`?`/`#` เพื่อกัน request-line injection (BUG-017)
 - [ ] `exec` ตรวจ container ID/`--user`/`--workdir` และ exec ID จาก daemon ก่อนประกอบ `/exec/{id}/start` กับ `/exec/{id}/json`; demultiplex output และคืนค่า exit code (BUG-018)
 - [ ] `--profile=sandbox` และ `--policy` ผ่าน `policy.applySandboxDefaults()` + `policy.checkRunPolicy()` แบบ pre-flight ก่อนคุยกับ socket และบันทึก `logger.deny()` ลง `audit.log` พร้อมตรวจด้วย `zigpod audit --json` (`writeAuditJson`) (BUG-019)
+- [ ] Validation domain ใหม่ต้องมี `ApiError` และ `api.<validator>` deny rule เฉพาะของตัวเอง (ห้าม reuse ข้าม flag เช่น `InvalidShmSize`) และ unit/mock tests ต้องใช้ `std.testing.expectError` + `Content-Length` จาก `body.len` (BUG-040, BUG-041)
 - [ ] คำสั่ง tar transfer (`save`, `load`, `export`, `import`) ใน `podman_transfer.zig` ตรวจ `realpathAlloc` + regular file (กัน symlink escape), เขียน output แบบ atomic เมื่อ 2xx สำเร็จเท่านั้น, และส่ง `application/x-tar` สำหรับ upload (BUG-023)
 - [ ] Lifecycle `run` มี best-effort cleanup: start fail → force-remove; `--rm` + fetchLogs fail → remove (BUG-012)
 - [ ] Request body ที่อาจบรรจุ credential (`Env`, `Cmd`, `Labels`) ต้อง redact ก่อน log และไฟล์ log ต้องไม่ถูก track ใน git (BUG-024)
@@ -66,4 +68,5 @@ status: active
 - [ ] Timestamp จากทุกผู้เขียน log (Zig + shell scripts) ต้องเป็น ค.ศ. UTC — สคริปต์ต้อง pin `LC_ALL=C` (BUG-011)
 - [ ] `zigpod demo` ผ่านครบ 18 cases (fail-closed ALLOW/DENY) โดยใช้ `std.testing.allocator` ไม่ leak
 - [ ] CI / `Makefile` / Vault parity ผ่าน `python3 scripts/check-ci-parity.py`, `scripts/smoke.sh`, และ `scripts/graph-query.py`
+- [ ] สคริปต์ E2E (`scripts/*.sh`) ต้อง capture multi-line output ลงตัวแปรก่อน `grep -q` (ห้าม pipe ตรงจนเกิด `BrokenPipe` ตัดตอน `compose down`) และ `Makefile` fallback ต้องครอบ `{ ...; }` (BUG-039)
 - [ ] Release binary (`zig build -Doptimize=ReleaseSafe`) ไม่มี executable stack (`GNU_STACK` ต้องไม่เป็น `RWE`) และไม่มี `RWX` PT_LOAD segment

@@ -430,3 +430,48 @@ status: active
   - ใช้ timeout ที่เหมาะสมกับขนาด payload และคืน `Error.Timeout` เมื่อหมดเวลา
   - เพิ่ม unit test: mock socket ที่อ่านช้า/ไม่อ่าน ต้องได้ `Error.Timeout` แทนการค้าง
 - **Prevention Rule**: ฝั่งเขียนและฝั่งอ่านของ socket ต้องมี deadline เท่ากัน — ทุก `writeAll` บน socket ต้องมี guard เวลา
+
+---
+
+## BUG-038: Out-of-Order Topological Cleanup & `loadComposeFile` Project Leak `#bug-pattern` `#memory-leak`
+
+- **Symptom**: ใน `executeCompose` ของ [src/compose.zig](../../src/compose.zig) เมื่อ `topoSortServices` คืนลำดับไม่เรียงจาก `0` (เช่น `[1, 0]` เพราะ service `0` มี `depends_on` ต่อ `1`) แล้ว service ถัดไปไม่ผ่าน pre-flight policy การวนล้าง `resolved_envs[0..env_init_count]` จะเข้าถึง slot `0` ที่ยังไม่ถูกกำหนดค่าและทำ memory leak ใน slot `1`; นอกจากนี้ `loadComposeFile` ใช้ `errdefer alloc.free(project)` ทั้งที่ `parseComposeYaml` ทำ `dupe` ใหม่ ทำให้ `project` leak ทุกรอบที่สำเร็จ
+- **Root Cause**: ใช้ตัวนับแบบเส้นตรง (`0..count`) กับ array ที่ assign ด้วย random topological index และ contract ระหว่าง caller กับ callee เรื่อง ownership ไม่ตรงกับ doc comment
+- **Fix**:
+  - เปลี่ยน `resolved_envs` และ `resolved_vols` เป็น slice ของ optional (`?pod.validate.MergedEnv`, `?[]cli.Volume`) ที่ `@memset(..., null)` ก่อนลูป และ free เฉพาะ slot ที่ไม่เป็น `null` ใน `defer`
+  - เปลี่ยน `loadComposeFile` เป็น `defer alloc.free(project)` และแก้ docstring ของ `parseComposeYaml` ให้ตรงความจริง
+  - เพิ่ม mock-socket + `std.testing.allocator` test ทดสอบเคส `[1, 0]` pre-flight denial และ `up`→`ps`→`down`
+- **Prevention Rule**: ทุก buffer ที่เติมค่าตาม index ไม่เรียงลำดับต้องใช้ nullable/optional slots + `@memset(..., null)` ก่อนเข้า loop และทุก `load*` helper ต้องมี `std.testing.allocator` test ครอบกรณีทั้งสำเร็จและ error
+
+---
+
+## BUG-039: Multi-Line CLI Piped to `grep -q` Causing `BrokenPipe` Teardown Abort `#bug-pattern` `#reliability`
+
+- **Symptom**: ใน [scripts/podman-e2e.sh](../../scripts/podman-e2e.sh) การรัน `"$BIN" compose down ... | grep -q ...` ทำให้ `grep -q` ปิด pipe ทิ้งทันทีที่เจอบรรทัดแรก → `zigpod` เกิด `BrokenPipe` ก่อนลบบรรทัดถัดไป/network ส่งผลให้เหลือ network ค้าง (`zpe2ecmp_net_*`) แต่ exit code ของ pipeline กลับถูก `grep -q` กลบเป็น `0`
+- **Root Cause**: พฤติกรรม short-circuit ของ `grep -q` ปิด fd ฝั่งอ่านก่อนที่ multi-line CLI จะเขียน/clean up ครบ และ shell precedence ของ `||` กับ `;` ใน `Makefile` เคยทำให้ค่า fallback ต่อท้ายแม้ฝั่งซ้ายสำเร็จ
+- **Fix**:
+  - เปลี่ยนเป็น capture stdout ลงตัวแปร (`CMP_DOWN_OUT=$("$BIN" ...)`) ก่อนตรวจด้วย `printf '%s\n' "$CMP_DOWN_OUT" | grep -q ...` ใน [scripts/podman-e2e.sh](../../scripts/podman-e2e.sh) และ [scripts/smoke.sh](../../scripts/smoke.sh)
+  - เพิ่ม gate ใน [scripts/auto-audit.sh](../../scripts/auto-audit.sh) ห้าม `compose .*| grep -q` ใน `scripts/` และครอบ `{ ...; }` ใน `Makefile`
+- **Prevention Rule**: ห้าม pipe output จาก CLI ที่ทำงานหลายขั้นตอนหรือพิมพ์หลายบรรทัดเข้า `grep -q` โดยตรง — ให้ capture output ลงตัวแปรก่อนตรวจเสมอ
+
+---
+
+## BUG-040: Silent `else |_| {}` Test Swallowing & Hardcoded Mock `Content-Length` `#bug-pattern` `#reliability`
+
+- **Symptom**: Adversarial tar test ใน [src/podman_transfer.zig](../../src/podman_transfer.zig) ใช้ `if (...) ... else |_| {}` ซ่อนชนิด error จริงจาก `std.tar.iterator` ขณะที่ mock server tests ใน [src/main.zig](../../src/main.zig) ที่ hardcode `Content-Length: N` นับ byte ผิด 1 byte ทำให้ client ได้ `UnexpectedEndOfInput` และ mock thread ค้าง
+- **Root Cause**: ใช้ catch-all ละทิ้งรายละเอียด error และคำนวณความยาว payload HTTP ด้วยมือแทนที่จะผูกกับ `body.len`
+- **Fix**:
+  - เปลี่ยนเป็น `try std.testing.expectError(error.TarInsufficientBuffer, ...)` และ `error.EndOfStream` ใน [src/podman_transfer.zig](../../src/podman_transfer.zig)
+  - คำนวณ `Content-Length` จาก `body.len` ด้วย `std.fmt.comptimePrint` / `allocPrint`, ใส่ `poll` + stop flag ใน mock server, และเพิ่มตัวจับ `else |_| {}` ใน [scripts/auto-audit.sh](../../scripts/auto-audit.sh)
+- **Prevention Rule**: Test ทุกตัวต้อง assert error variant เจาะจงด้วย `expectError` และห้าม hardcode `Content-Length` ใน HTTP mock response
+
+---
+
+## BUG-041: `--shm-size` Error Aliasing (`InvalidCpuLimit`) Corrupting Audit Telemetry `#bug-pattern` `#security-gate`
+
+- **Symptom**: `validateShmSize` ใน [src/podman_validate.zig](../../src/podman_validate.zig) คืน `ApiError.InvalidCpuLimit` แทนที่จะมี error ของตัวเอง ทำให้ `reportFailure` ใน [src/main.zig](../../src/main.zig) บันทึก `audit.log` ด้วย rule `"api.validateCpu"` ผิดประเภทจาก `--shm-size`
+- **Root Cause**: นำ `ApiError` จาก validator เดิมมา reuse ข้ามโดเมนเมื่อเพิ่ม flag ใหม่
+- **Fix**:
+  - เพิ่ม `ApiError.InvalidShmSize` ใน [src/podman_types.zig](../../src/podman_types.zig), คืนจาก `validateShmSize` พร้อม `max_shm_bytes`, map เป็น `"api.validateShmSize"` ใน [src/main.zig](../../src/main.zig), และเพิ่ม boundary test ใน [src/policy.zig](../../src/policy.zig)
+  - เพิ่ม static check ใน [scripts/auto-audit.sh](../../scripts/auto-audit.sh)
+- **Prevention Rule**: ทุก validation domain ใหม่ต้องมี `ApiError` variant และ audit rule เฉพาะของตัวเอง — ห้าม alias ไปใช้ error ของ flag อื่น

@@ -17,6 +17,7 @@
 
 4. **กลไกจับผิดอัตโนมัติ (ต้องรันหลังแก้โค้ด)**:
    - หลังแก้ไขไฟล์ใน `src/` ต้องรัน `./scripts/auto-audit.sh` (และ `./scripts/security-check.sh --require-zig` เมื่อมี `zig`) เพื่อยืนยันว่าไม่ละเมิด invariants
+   - ปฏิบัติตามกฎการเขียน test, mock server, error mapping และ shell E2E เพิ่มเติมใน `.agents/rules/testing-and-shell-safety.md` (ป้องกัน `BUG-038`–`BUG-041`)
 
 5. **Logging**:
    - ระบบบันทึกรายละเอียดการทำงานลง `system.log` และบันทึกเฉพาะ error ลง `error.log`

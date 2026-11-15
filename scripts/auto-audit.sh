@@ -147,6 +147,34 @@ else
     fail "Verification scripts missing executable (+x) permission."
 fi
 
+# 8b. Require optional-slot pre-flight cleanup & project free in compose (BUG-038)
+if has_match "\?pod\.validate\.MergedEnv" "src/compose.zig" && has_match "@memset\(resolved_envs, null\)" "src/compose.zig" && has_match "defer alloc\.free\(project\);" "src/compose.zig"; then
+    pass "Nullable topological cleanup and loadComposeFile project defer enforced (BUG-038)."
+else
+    fail "Missing nullable pre-flight cleanup or defer alloc.free(project) in src/compose.zig (see BUG-038)."
+fi
+
+# 8c. Forbid piping compose output directly to grep -q & enforce Makefile subshell grouping (BUG-039)
+if has_match 'compose .+\|[[:space:]]*grep -q' "scripts/smoke.sh" || has_match 'compose .+\|[[:space:]]*grep -q' "scripts/podman-e2e.sh" || ! has_match '\{ for p in .*echo zig; \}' "Makefile"; then
+    fail "Found unsafe direct compose pipe to grep -q in E2E scripts or ungrouped Makefile fallback (see BUG-039)."
+else
+    pass "No unsafe direct compose pipe to grep -q and Makefile ZIG fallback uses { ...; } (BUG-039)."
+fi
+
+# 8d. Forbid silent error swallowing in hardened compose/transfer test modules (BUG-040)
+if has_match 'else \|_\| \{\}' "src/compose.zig" || has_match 'else \|_\| \{\}' "src/podman_transfer.zig"; then
+    fail "Found silent 'else |_| {}' error swallowing in src/compose.zig or src/podman_transfer.zig (see BUG-040)."
+else
+    pass "No silent 'else |_| {}' swallowing in src/compose.zig or src/podman_transfer.zig (BUG-040)."
+fi
+
+# 8e. Require dedicated InvalidShmSize error variant and audit deny rule (BUG-041)
+if has_match "InvalidShmSize" "src/podman_types.zig" && has_match "return ApiError\.InvalidShmSize;" "src/podman_validate.zig" && has_match "api\.validateShmSize" "src/main.zig"; then
+    pass "Dedicated ApiError.InvalidShmSize and api.validateShmSize telemetry enforced (BUG-041)."
+else
+    fail "Missing InvalidShmSize variant or api.validateShmSize deny rule (see BUG-041)."
+fi
+
 # 9. Run security-check.sh (includes zig build test & ELF hardening when zig is installed)
 SEC_OUT=""
 if SEC_OUT="$("$ROOT_DIR/scripts/security-check.sh" 2>&1)"; then
