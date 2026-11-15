@@ -262,3 +262,171 @@ status: active
   - ใน [src/podman_transfer.zig](../../src/podman_transfer.zig): เพิ่ม `validateOutputPath()` ตรวจ `realpathAlloc` ของ parent dir + บล็อก leaf symlink และ non-regular target; ใช้ `StreamOutput` + atomic temp-file/rename เฉพาะเมื่อ `streamRequest` คืน 2xx ครบ; เพิ่มการตรวจ `realpathAlloc` + `stat.kind == .file` ใน `openInput()`; และใช้ `requestWithContentType(..., "application/x-tar", ...)` ใน `postTarUpload()`
   - เพิ่ม `_ = transfer;` ใน [src/main.zig](../../src/main.zig) และ `_ = th;` ใน [src/podman_api.zig](../../src/podman_api.zig) พร้อมตรวจใน [scripts/auto-audit.sh](../../scripts/auto-audit.sh)
 - **Prevention Rule**: ทุกคำสั่งที่อ่าน/เขียนไฟล์บน host จาก CLI (`save`/`load`/`export`/`import`/`build`) ต้องตรวจทั้ง lexical path, `realpathAlloc`, ชนิด regular file, และเขียนไฟล์ปลายทางแบบ atomic หลังยืนยัน response สำเร็จเท่านั้น
+
+---
+
+## BUG-024: Secrets Logged Verbatim in Request Bodies (`Env` / `Cmd`) `#bug-pattern` `#security-gate`
+
+- **Symptom**: `zigpod run -e DB_PASSWORD=hunter2 alpine` เขียน `"Env":["DB_PASSWORD=hunter2"]` ลง `system.log` และ `audit.log` แบบ plaintext เพราะ `createContainer` ใน [src/podman_api.zig](../../src/podman_api.zig) บันทึก body ทั้งก้อน (`logger.debug("POST {s} body={s}")`) และ `Logger.log` เขียนทุก level ลงไฟล์โดยไม่ผูกกับ flag verbosity (verbosity คุมเฉพาะ stderr echo) — ทำให้ secret ถูกส่งออกนอก trust boundary ไปยังเครื่องมือวิเคราะห์ภายนอก (`balorsh` / `zigpod audit --json`) และถูก commit เข้า git เพราะ `system.log` / `error.log` / `audit.log` ถูก track ไว้แต่ไม่ได้อยู่ใน `.gitignore`; `createExec` มีรูปแบบเดียวกันทำให้ argv อย่าง `mysql -pSECRET` หลุดออกมา
+- **Root Cause**: แนวคิด "debug log = ปลอดภัย" ผิด เพราะ `Logger.log` เขียนลง `system.log` + hash-chained `audit.log` เสมอ และไม่มีชั้น redaction สำหรับ field ที่เป็นความลับ (`Env`, `Cmd`, `Labels`) ก่อน serialize
+- **Fix**:
+  - เปลี่ยน `logger.debug("POST {s} body={s}", ...)` ใน [src/podman_api.zig](../../src/podman_api.zig) เป็น log เฉพาะ path + ความยาว body (`body_len={d}`) หรือ redact ค่าใน `Env`/`Cmd` ให้เหลือแต่ชื่อ key
+  - ตรวจจุดอื่นที่ log body เต็ม: `createExec` ใน [src/podman_api.zig](../../src/podman_api.zig) และ `createNetwork`/`createVolume` ใน [src/podman_system.zig](../../src/podman_system.zig)
+  - เพิ่ม `system.log`, `error.log`, `audit.log` เข้า `.gitignore` และ `git rm --cached` ไฟล์เหล่านั้นออกจาก index
+  - เพิ่ม unit test ที่สร้าง container ด้วย `Env = &.{"SECRET=xyz"}` แล้ว assert ว่า `"xyz"` ไม่ปรากฏใน `system.log`/`audit.log`
+- **Prevention Rule**: ห้าม log request body ที่อาจบรรจุ credential แบบ verbatim — field ที่เป็นความลับ (`Env`, `Cmd`, `Labels`, token) ต้อง redact ให้เหลือ key เสมอ และไฟล์ log ที่อาจมีข้อมูลลับต้องไม่ถูก track ใน git
+
+---
+
+## BUG-025: Bind-Mount Deny-List Bypass via Symlinked Host Path `#bug-pattern` `#security-gate`
+
+- **Symptom**: `zigpod run -v /home/user/link:/data ...` ที่ `/home/user/link` เป็น symlink ไป `/etc` ผ่านการตรวจสอบและถูกส่งไป bind-mount จริง เพราะ `validateHostPath` ใน [src/podman_validate.zig](../../src/podman_validate.zig) ตรวจเฉพาะรูปแบบข้อความ (lexical) และ `makeMount` ไม่ resolve symlink — ผลคือ deny-list ของ BUG-014 (`/etc`, `/root`, `/proc`, `/run`, `/var/lib/containers`, ...) ถูกหลบทั้งหมด เพราะ daemon resolve symlink เอง
+- **Root Cause**: BUG-022 (build context) และ BUG-023 (tar transfer) ได้รับ `realpathAlloc` + re-validate แล้ว แต่เส้นทาง `-v`/`--volume` ซึ่งเป็น trust boundary เดียวกัน (host filesystem) ไม่เคยได้รับการรักษาแบบเดียวกัน
+- **Fix**:
+  - ใน `makeMount`/`validateHostPath` ทำ `std.fs.cwd().realpathAlloc()` ของ source แล้ว validate ทั้ง path ดิบและ path ที่ resolve แล้ว (deny-list ต้องครอบคลุม realpath)
+  - ปฏิเสธกรณี source เป็น symlink ที่ชี้ absolute path หรือชี้นอก allow-list
+  - `createContainer` re-validate `Mounts` ด้วย realpath แบบ defense-in-depth ก่อน stringify JSON
+  - เพิ่ม unit test: symlink → `/etc` ต้องได้ `ApiError.InvalidHostPath` และ symlink → `/tmp` ต้องผ่าน
+- **Prevention Rule**: ทุก path บน host ที่ผ่านเข้า daemon ต้องผ่านการตรวจ 3 ชั้นเสมอ: lexical (absolute + no-traversal) → `realpathAlloc` (symlink resolution) → deny-list/allow-list บน path ที่ resolve แล้ว
+
+---
+
+## BUG-026: `cp` Symlink Escape After Common-Root Strip `#bug-pattern` `#security-gate`
+
+- **Symptom**: `zigpod cp <container>:/data ./out` ที่ daemon ส่ง tar ที่มี `top/` (dir), `top/link` (symlink → `../x`), `top/f` (file) จะสร้าง symlink `out/link -> ../x` ซึ่งชี้ออกนอก `out/` — เพราะ `scanCpArchive` ใน [src/podman_transfer.zig](../../src/podman_transfer.zig) ตรวจ `validateTarSymlinkTarget` ด้วย path **ก่อน** ตัด common root แต่ `extractCpArchiveToDir` สร้าง symlink ที่ path **หลัง** ตัด ด้วย target ดิบ (คลาสเดียวกับ BUG-023 แต่คนละช่องทาง)
+- **Root Cause**: `validateTarSymlinkTarget` ใน [src/podman_validate.zig](../../src/podman_validate.zig) คำนวณ depth ของ `..` จาก `dirname(entry_rel_path)` ของ entry ก่อน strip ทำให้ได้ "โควตา" การหลุดออก 1 ระดับที่ไม่ควรมี
+- **Fix**:
+  - ใน `extractCpArchiveToDir` re-validate target ซ้ำด้วย path หลัง strip ก่อนเรียก `symLink()`
+  - ปฏิเสธ archive ที่มี symlink ซึ่ง escape เมื่อคิดจาก common root
+  - เพิ่ม unit test: archive ที่มี common root + symlink `../x` ต้องถูกปฏิเสธ
+- **Prevention Rule**: ทุก validation ที่คำนวณ "ระดับความลึก" ของ path ต้องคำนวณจาก path สุดท้ายที่จะถูกใช้จริงหลังทุกขั้นของการ transform (strip/rename) — validate ซ้ำที่ปลายทางสุดท้ายเสมอ
+
+---
+
+## BUG-027: compose.yaml Scalar List Values Silently Dropped `#bug-pattern` `#reliability`
+
+- **Symptom**: ใน `compose.yaml` เมื่อเขียน `environment: FOO=bar`, `depends_on: db` หรือ `volumes: ./data:/data` ในรูปแบบ scalar ค่าเหล่านั้นถูก **ทิ้งเงียบ** ทำให้ `compose up` สร้าง container ที่ไม่มี env, ไม่มี dependency ordering และไม่มี mount โดยไม่มี error ใด ๆ; long syntax (`- type: bind` / `source:` / `target:`) ถูก parse เป็น volume ปลอม (`source='type'`, `destination=' bind'`) และ `read_only: true` ถูกละทิ้ง
+- **Root Cause**: `applyServiceScalarOrFlow` ใน [src/compose.zig](../../src/compose.zig) มี `if/else if` chain ที่ครอบคลุมเฉพาะ key ที่รองรับ scalar (`command`, `entrypoint`, `env_file`) และไม่มี `else` สุดท้าย ทำให้ key ที่เป็น list (ซึ่งรองรับเฉพาะ list/map form) หลุดออกไปเงียบ ๆ
+- **Fix**:
+  - เพิ่ม `switch (key)` ใน `applyServiceScalarOrFlow`: key ที่เป็น list ให้ส่งเข้า `applyServiceListItem` (รองรับรูปแบบ scalar ด้วย) และรูปแบบ map/long syntax ให้คืน `ComposeError.InvalidComposeSyntax` อย่างชัดเจนแทนการ parse เพี้ยน
+  - เพิ่ม `else` สุดท้ายที่คืน `InvalidComposeSyntax` สำหรับ key ที่รู้จักแต่ parse ไม่ได้ เพื่อไม่ให้มีการทิ้งค่าแบบเงียบ
+  - เพิ่ม unit test ครอบคลุม scalar และ long syntax ของ `environment`/`depends_on`/`volumes`
+- **Prevention Rule**: parser ต้อง fail-closed — ถ้าไม่รู้จักหรือไม่รองรับรูปแบบของ key ที่เป็นรูปแบบรายการ ต้องคืน error เสมอ ห้ามทิ้งค่าโดยไม่แจ้งเตือน
+
+---
+
+## BUG-028: compose Service `networks:` Never Applied to Containers `#bug-pattern` `#reliability`
+
+- **Symptom**: `compose up` สร้าง compose network ตาม section `networks:` ของไฟล์ แต่ **ไม่มี container ใดถูก join** เข้ากับ network นั้น เพราะ `ComposeService.networks` ถูก parse และ validate แล้ว (ใน [src/compose.zig](../../src/compose.zig)) แต่ไม่เคยถูกอ่านในขั้นตอนสร้าง container — `HostConfig.NetworkMode` มาจาก `network_mode` เท่านั้น ทำให้ traffic เดินผ่าน default bridge และ `compose down` พยายามลบ network ที่ยังมี container ผูกอยู่
+- **Root Cause**: ฟีลด์ถูกเพิ่มในระดับ parser แต่ไม่มีขั้นตอน "apply" ที่เชื่อม parser กับ request ที่ส่ง daemon ทำให้เกิด dead field ที่ผ่านการตรวจสอบแต่ไม่มีผล
+- **Fix**:
+  - ในขั้นตอนสร้าง container ให้ map `svc.networks` → `HostConfig.NetworkMode` (เลือก network แรกที่ประกาศไว้) และตั้ง label `com.docker.compose.network`
+  - เพิ่ม unit test ที่ยืนยันว่า container ที่สร้างมี `NetworkMode` ตรงกับ `networks:` ในไฟล์
+  - ถ้ายังไม่รองรับ ให้คืน `ComposeError.InvalidComposeSyntax` พร้อมข้อความชัดเจนแทนการเงียบ ๆ
+- **Prevention Rule**: ทุกฟีลด์ที่ parser รับเข้ามาต้องมี consumer ที่ชัดเจนในขั้นตอน apply/execute — ฟีลด์ที่ยังไม่ได้ใช้งานต้องถูกปฏิเสธอย่างชัดเจน ไม่ใช่ถูกเก็บไว้เฉย ๆ
+
+---
+
+## BUG-029: `compose up` Missing Rollback on Partial Failure `#bug-pattern` `#reliability`
+
+- **Symptom**: `compose up` ที่มี 3 services และ service ที่ 3 สร้างไม่สำเร็จ จะทิ้ง container ของ service 1-2 ไว้ทำงานอยู่ และ network ที่สร้างไว้ก็ค้าง โดยคำสั่งจบด้วย error แต่ daemon อยู่ในสถานะ "applied ครึ่งเดียว" (คลาสเดียวกับ BUG-012 ที่แก้ให้เฉพาะเส้นทาง `run`)
+- **Root Cause**: ขั้นตอน create/start ใน [src/compose.zig](../../src/compose.zig) ใช้ `try` ตรง ๆ ทุก service โดยไม่มี tracking ของ resource ที่สร้างสำเร็จแล้ว และไม่มี best-effort cleanup path
+- **Fix**:
+  - เก็บรายชื่อ container ที่สร้างสำเร็จลง list และเมื่อพบ error ให้ best-effort `DELETE /containers/{name}?force=true` ย้อนกลับตาม reverse topological order พร้อมลบ network ที่สร้างในรอบนี้
+  - เพิ่ม unit test ผ่าน mock socket ที่ให้ service ที่ 2 ตอบ 500 แล้วยืนยันว่า service ที่ 1 ถูกลบ
+- **Prevention Rule**: lifecycle ที่สร้าง resource หลายรายการบน daemon ต้องมี rollback ที่ครอบคลุมทุก failure path หลังจุดที่ resource แรกถูกสร้าง — ใช้หลักเดียวกับ BUG-012 ทุก entry point
+
+---
+
+## BUG-030: Audit Tail Repair Only Runs at `Logger.init` `#bug-pattern` `#memory-safety`
+
+- **Symptom**: ถ้า `writeAll` ลง `audit.log` ไม่ครบ (เช่น disk เต็ม → `ENOSPC`/`EIO`) process ที่ยังทำงานอยู่จะ append entry ถัดไปต่อท้ายบรรทัดที่ค้าง ทำให้กลายเป็นบรรทัดเดียวที่ malformed และ `verifyAuditFile` รายงาน `AuditTampered`/`InvalidAuditFormat` **ทั้งไฟล์** ถาวร เพราะ `lastHashFromFd` อ่านหัว chain ไม่ได้อีก ทำให้ทุก entry ถัดไปต่อจาก genesis hash
+- **Root Cause**: `repairAuditTail` ถูกเรียกเฉพาะใน [src/log.zig](../../src/log.zig) ที่ `Logger.init` แต่ write path (`Logger.log`) ซึ่งเป็นจุดที่เกิด partial write จริง ไม่ได้ repair tail ก่อนอ่าน chain head
+- **Fix**:
+  - เรียก `repairAuditTail(f)` ภายใน critical section เดียวกับ `lastHashFromFd` ใน `Logger.log` (หรือตรวจว่าไฟล์จบด้วย `'\n'` แล้ว `ftruncate` ส่วนที่ค้าง) โดยต้องอยู่ใต้ `LOCK_EX` เดียวกันเพื่อให้ repair + re-read + append เป็น atomic
+  - เพิ่ม unit test: เขียน entry แล้ว append partial line ลง `audit.log` โดยไม่ re-init จากนั้นเขียน entry ถัดไปผ่าน logger เดิม แล้ว `verifyAuditFile` ต้องยังผ่าน
+- **Prevention Rule**: กลไก self-healing ของไฟล์ append-only ต้องทำงานใน **write path** ไม่ใช่เฉพาะตอนเปิดไฟล์ — เพราะ partial write เกิดได้ทุกครั้งที่เขียน ไม่ใช่แค่ตอน crash
+
+---
+
+## BUG-031: Log Files Follow Symlinks and Do Not Enforce Mode 0640 `#bug-pattern` `#security-gate`
+
+- **Symptom**: (1) ถ้ามีคนวาง `audit.log -> /tmp/attacker.log` ในโฟลเดอร์ log (ค่า default คือ CWD ตาม [src/config.zig](../../src/config.zig)) `openAppend` จะเปิดผ่าน symlink เพราะเรียก `openat` โดยไม่มี `O_NOFOLLOW` — audit trail ทั้งหมดจึงถูกเขียนลงไฟล์ที่ผู้โจมตีคุม และเมื่อผู้โจมตีแก้ไฟล์นั้น `zigpod audit` ยังรายงาน `valid: true` เพราะ chain ยังสอดคล้องภายใน (ทำลายหลักฐานการตรวจจับการแก้ไขของ BUG-008/BUG-009 ทั้งหมด) (2) argument mode `0o640` มีผลเฉพาะตอนสร้างไฟล์ใหม่ — ไฟล์ที่มีอยู่แล้วแบบ `0644` คงอยู่ `0644` ต่อไป ซึ่งขัดกับ invariant ของ BUG-013
+- **Root Cause**: `openAppend` ใน [src/log.zig](../../src/log.zig) ไม่ตรวจชนิดไฟล์ ไม่ใช้ `O_NOFOLLOW` และไม่มี `fchmod` หลังเปิด
+- **Fix**:
+  - เพิ่ม `.NOFOLLOW = true` ใน flags ของ `openat` และปฏิเสธถ้าเป้าหมายเป็น symlink (fail-closed)
+  - เรียก `std.posix.fchmod(fd, 0o640)` หลังเปิด เพื่อบังคับโหมดของไฟล์ที่มีอยู่แล้ว
+  - เพิ่ม unit test: สร้าง symlink `audit.log` ใน tmpdir แล้วยืนยันว่า `Logger.init` ไม่เขียนผ่าน symlink และไฟล์เดิม mode `0644` กลายเป็น `0640`
+- **Prevention Rule**: ไฟล์ที่เป็น tamper-evidence (audit) หรือเก็บข้อมูลลับต้องเปิดแบบ fail-closed: ห้าม symlink (`O_NOFOLLOW`) และบังคับ permission หลังเปิดทุกครั้ง ไม่พึ่งแค่ mode argument ตอน create
+
+---
+
+## BUG-032: Attach/Exec Poll Timeout Discarded → Infinite Loop `#bug-pattern` `#security-gate`
+
+- **Symptom**: `zigpod attach` และ `zigpod exec -it` แฮงก์ไม่จบเมื่อ daemon ยอมรับการ upgrade แล้วไม่ส่งข้อมูลต่อ (หรือ container ถูก kill ขณะ daemon ยังถือ attach socket ไว้) เพราะ `std.posix.poll` คืนค่า `0` เมื่อ timeout แต่ถูกทิ้งด้วย `_ =` ใน [src/podman_api.zig](../../src/podman_api.zig) → ลูปวนต่อไปเรื่อย ๆ โดยไม่เคยคืน `Error.Timeout` (ต่างจากทุก endpoint อื่นที่บังคับ deadline ผ่าน `waitReadable`)
+- **Root Cause**: ผู้เรียก `poll` ไม่ตรวจค่าที่คืนมา ทำให้ timeout กลายเป็น no-op
+- **Fix**:
+  - ตรวจผลลัพธ์ของ `std.posix.poll` และคืน `http.Error.Timeout` เมื่อค่าเป็น `0` (รวมถึงกรณี `POLLERR`/`POLLHUP` ที่ไม่ได้จัดการ)
+  - ใช้ deadline ที่สั้นลงสำหรับ session แบบ interactive แทน `blocking_timeout_ms` (12 ชม.)
+  - เพิ่ม unit test ด้วย mock socket ที่ไม่ส่งข้อมูลหลัง upgrade แล้วยืนยันว่าคืน `Error.Timeout`
+- **Prevention Rule**: ทุกการเรียก `poll`/`select` ต้องตรวจค่าที่คืนมาเสมอ — `0` หมายถึง timeout และต้องถูกแปลงเป็น error ที่ผู้เรียกจัดการได้ ไม่ใช่ทิ้งค่า
+
+---
+
+## BUG-033: Implicit `zigpod.toml` Can Redirect the API Socket `#bug-pattern` `#security-gate`
+
+- **Symptom**: [src/config.zig](../../src/config.zig) โหลด `zigpod.toml` จาก current working directory โดยอัตโนมัติ ไม่มีการตรวจ owner/permission และไม่มีการ validate path ของ socket ที่ระบุ ค่านี้มีสิทธิ์เหนือ `$XDG_RUNTIME_DIR/podman/podman.sock` → ใครก็ตามที่วางไฟล์ `zigpod.toml` ไว้ในไดเรกทอรีที่ผู้ใช้จะรัน `zigpod` (repo ที่ clone มา, shared build dir, CI workspace) สามารถเปลี่ยนปลายทางทั้ง CLI ไปยัง Unix socket ของตัวเอง ทำให้ request ที่มี `-e SECRET=...`, mount source และชื่อ image ถูกส่งไปยัง daemon ปลอมที่ผู้โจมตีควบคุม
+- **Root Cause**: ไฟล์ config ที่โหลดโดยไม่มีการยืนยันความเป็นเจ้าของ (ownership) ถือเป็น trust input โดยปริยาย
+- **Fix**:
+  - ตรวจว่า `zigpod.toml` เป็นของ uid ปัจจุบันและไม่ group/world-writable ก่อนยอมรับ (ใช้กฎเดียวกับที่ใช้กับไฟล์ log ใน BUG-013)
+  - validate socket path ด้วยนโยบาม absolute path + ไม่มี control char เหมือน path อื่น
+  - พิจารณาให้โหลดเฉพาะเมื่อมี `--config` หรือ env var ระบุชัดเจน
+  - เพิ่ม unit test สำหรับกรณีไฟล์ที่ world-writable ต้องถูกปฏิเสธ
+- **Prevention Rule**: ไฟล์ config ที่โหลดอัตโนมัติจาก CWD ต้องผ่านการตรวจ ownership + permission และค่า path ที่อ่านมาต้องผ่าน validator เดียวกับ path อื่นที่ชี้ไปยังทรัพยากรของ host
+
+---
+
+## BUG-034: `HostConfig.PortBindings` Not Re-Validated → `catch unreachable` Panic `#bug-pattern` `#memory-safety`
+
+- **Symptom**: `createContainer` ใน [src/podman_api.zig](../../src/podman_api.zig) re-validate `ExposedPorts` แต่ **ไม่** re-validate `HostConfig.PortBindings` ดังนั้น `PortMapping` ที่มี `proto` นอก allow-list จะไปถึง `std.fmt.bufPrint` ที่ใช้ buffer ขนาด 16 ไบต์ใน [src/podman_types.zig](../../src/podman_types.zig) แล้วไปถึง `catch unreachable` → panic ทำให้ process abort แทนที่จะคืน error แบบ fail-closed (ปัจจุบัน CLI ยังเข้าถึงไม่ได้ เพราะสร้าง `PortBindings` จาก `makePortMapping` ที่ validate แล้ว แต่ contract ของ BUG-015 ไม่ครบ)
+- **Root Cause**: defense-in-depth re-validation ในชั้น API ครอบคลุม `ExposedPorts` แต่ลืม `HostConfig.PortBindings` ซึ่งเป็นฟิลด์คู่ขนานที่ถูก serialize ด้วย custom `jsonStringify`
+- **Fix**:
+  - เพิ่ม `if (hc.PortBindings) |pb| for (pb.ports) |p| try validatePortMapping(p);` ใน `createContainer`
+  - เปลี่ยน `catch unreachable` ใน `PortBindings.jsonStringify` ให้เป็น error ที่ propagate ได้ (`ApiError.InvalidPort`) หรือใช้ buffer ที่โตตามขนาดจริง
+  - เพิ่ม unit test ที่ส่ง `PortBindings` ที่มี proto ผิดรูปแล้วยืนยันว่าได้ error ไม่ใช่ panic
+- **Prevention Rule**: เมื่อมีการ serialize ฟิลด์เดียวกันในสองตำแหน่ง (เช่น `ExposedPorts` กับ `PortBindings`) ต้องมี validator ชุดเดียวกันถูกเรียกที่ **ทุก** ตำแหน่งในชั้น API — และห้ามใช้ `catch unreachable` ใน path ที่ข้อมูลมาจากภายนอก
+
+---
+
+## BUG-035: Build Context Entry Name Leak on Append Failure `#bug-pattern` `#memory-leak`
+
+- **Symptom**: ใน `collectEntries` ของ [src/podman_build.zig](../../src/podman_build.zig) ค่า `w.path` ที่ถูก `dupe` แล้วจะ leak เมื่อ `list.append` ล้มเหลว เพราะ `errdefer` มีแต่ `linkname` และ entry ที่ append ไม่สำเร็จไม่ได้อยู่ใน `list` จึงไม่ถูก `errdefer` ของชั้นนอกกวาด
+- **Root Cause**: `alloc.dupe` ถูกเรียก "inline" ใน argument list ของ `list.append(...)` ทำให้ ownership ของ allocation ถูกสร้างขึ้นก่อนที่ append จะคืน error
+- **Fix**:
+  - แยก `const name = try alloc.dupe(u8, w.path); errdefer alloc.free(name);` ออกมา แล้วค่อย `try list.append(.{ .name = name, ... })`
+  - เพิ่ม regression test ที่ใช้ failing allocator เพื่อยืนยันว่าไม่มี allocation ค้าง
+- **Prevention Rule**: ห้ามฝังการจองหน่วยความจำไว้ภายใน argument list ของฟังก์ชันที่อาจคืน error — ต้องจัดการ ownership ด้วย `errdefer` ให้ชัดเจนเสมอ
+
+---
+
+## BUG-036: `verifyAuditFile` Ignores a Complete Final Entry Without Trailing Newline `#bug-pattern` `#security-gate`
+
+- **Symptom**: การลบ `\n` ท้ายบรรทัดสุดท้ายของ `audit.log` (ซึ่งเป็น entry ที่ commit สำเร็จแล้ว) ทำให้ `verifyAuditFile` ใน [src/log.zig](../../src/log.zig) ข้ามบรรทัดนั้นทิ้งทั้งที่มัน parse เป็น entry ที่สมบูรณ์ — ผลคือการตัดหางท้ายไฟล์ (ลบทั้ง entry) ไม่ถูกตรวจจับ และ `zigpod audit` ยังรายงาน `valid: true` พร้อมจำนวน entry ที่น้อยลง (คนละ root cause กับ BUG-030 แต่อยู่ในโฟลเดอร์เดียวกัน)
+- **Root Cause**: `verifyAuditFile` แยก "บรรทัดที่ยังไม่ commit" ออกจาก "บรรทัดปกติ" ด้วยเงื่อนไขเดียวคือ `lines.peek() == null` ซึ่งตัดทิ้งทั้งกรณีที่ไม่มี `\n` ปิดท้ายจริง และกรณีที่เป็น entry สมบูรณ์ที่ถูกตัด newline ทิ้ง
+- **Fix**:
+  - แยกให้ชัดว่าส่วนท้ายที่ไม่มี `\n` เป็น "uncommitted" เฉพาะเมื่อเนื้อหาไม่ได้ parse เป็น entry ที่สมบูรณ์ (5 field, hash 64 hex) — ถ้า parse ได้ให้ verify และนับตามปกติ
+  - publish `head_hash` (มีอยู่แล้วใน `writeAuditJson`) ไปยังจุดยึดภายนอก เพื่อให้ตรวจจับการตัดท้ายไฟล์แบบ pure-tail ได้
+  - เพิ่ม unit test: entry สมบูรณ์ที่ถูกลบ newline ต้องถูกรายงานว่าเสีย
+- **Prevention Rule**: การแยก "uncommitted tail" ออกจาก "ข้อมูลที่ commit แล้ว" ต้องอิงจากความสมบูรณ์ของ **เนื้อหา** ไม่ใช่แค่การมี newline ปิดท้าย
+
+---
+
+## BUG-037: Unbounded Socket Write in `connectAndSend` `#bug-pattern` `#security-gate`
+
+- **Symptom**: `stream.writeAll(req.items)` ใน [src/http.zig](../../src/http.zig) เขียน request ทั้งก้อน (รวม tar ขนาดใหญ่ของ `podman build`) โดยไม่มี deadline — ถ้า daemon หยุดอ่าน socket การเขียนจะ block ไปตลอด ทั้งที่ฝั่งอ่านของ request เดียวกันมี deadline 12 ชั่วโมง (ความไม่สมมาตรที่ไม่ได้ตั้งใจ)
+- **Root Cause**: `connectAndSend` บังคับ timeout เฉพาะฝั่งอ่าน (`waitReadable`) แต่ไม่มีกลไกเดียวกันสำหรับฝั่งเขียน
+- **Fix**:
+  - ห่อการเขียนด้วย poll-for-writable ที่มีขอบเขตเวลา หรือตั้ง `SO_SNDTIMEO` บน socket ก่อนเขียน
+  - ใช้ timeout ที่เหมาะสมกับขนาด payload และคืน `Error.Timeout` เมื่อหมดเวลา
+  - เพิ่ม unit test: mock socket ที่อ่านช้า/ไม่อ่าน ต้องได้ `Error.Timeout` แทนการค้าง
+- **Prevention Rule**: ฝั่งเขียนและฝั่งอ่านของ socket ต้องมี deadline เท่ากัน — ทุก `writeAll` บน socket ต้องมี guard เวลา

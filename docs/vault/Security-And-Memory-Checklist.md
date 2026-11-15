@@ -24,6 +24,8 @@ status: active
 - [ ] โมดูลที่มีการจอง heap (`main.zig`, `cli.zig`, `config.zig`, `http.zig`, `podman_api.zig`, `log.zig`, `policy.zig`) ต้องมีเทสที่ใช้ `std.testing.allocator`
 - [ ] ห้ามเก็บ slice ที่อ้างอิงข้อมูลใน `std.json.Parsed(T)` ข้ามขอบเขตบล็อกที่มี `defer parsed.deinit()` (BUG-020)
 - [ ] Error paths ที่มี `ArrayList` / temporary allocation ต้องมี `errdefer` และมี unit test พิสูจน์ว่าไม่ leak
+- [ ] ห้ามฝังการจองหน่วยความจำ (`alloc.dupe`) ไว้ภายใน argument list ของฟังก์ชันที่อาจคืน error — ต้องมี `errdefer` ชัดเจน (BUG-035)
+- [ ] `repairAuditTail` ต้องทำงานใน **write path** ของ `audit.log` ไม่ใช่เฉพาะตอน `Logger.init` (BUG-030)
 
 ## 2. Protocol & Input Security Gates `#security-gate`
 
@@ -45,6 +47,14 @@ status: active
 - [ ] `--profile=sandbox` และ `--policy` ผ่าน `policy.applySandboxDefaults()` + `policy.checkRunPolicy()` แบบ pre-flight ก่อนคุยกับ socket และบันทึก `logger.deny()` ลง `audit.log` พร้อมตรวจด้วย `zigpod audit --json` (`writeAuditJson`) (BUG-019)
 - [ ] คำสั่ง tar transfer (`save`, `load`, `export`, `import`) ใน `podman_transfer.zig` ตรวจ `realpathAlloc` + regular file (กัน symlink escape), เขียน output แบบ atomic เมื่อ 2xx สำเร็จเท่านั้น, และส่ง `application/x-tar` สำหรับ upload (BUG-023)
 - [ ] Lifecycle `run` มี best-effort cleanup: start fail → force-remove; `--rm` + fetchLogs fail → remove (BUG-012)
+- [ ] Request body ที่อาจบรรจุ credential (`Env`, `Cmd`, `Labels`) ต้อง redact ก่อน log และไฟล์ log ต้องไม่ถูก track ใน git (BUG-024)
+- [ ] Host bind mount (`-v`) ต้องผ่าน **realpath** (`realpathAlloc`) และ deny-list ต้องถูกตรวจซ้ำบน path ที่ resolve แล้ว ไม่ใช่เฉพาะรูปแบบข้อความ (BUG-025)
+- [ ] Tar symlink target ต้อง validate ซ้ำหลัง common-root strip / path transform ทุกครั้ง (BUG-026)
+- [ ] `createContainer` ต้อง re-validate `HostConfig.PortBindings` เช่นเดียวกับ `ExposedPorts` และห้ามใช้ `catch unreachable` ใน path ที่ข้อมูลมาจากภายนอก (BUG-034)
+- [ ] ทุกการเรียก `std.posix.poll` ต้องตรวจค่าที่คืนมา — `0` = timeout ต้องกลายเป็น `Error.Timeout` ไม่ใช่ no-op (BUG-032)
+- [ ] ทุก `writeAll` บน socket ต้องมี deadline เท่ากับฝั่งอ่าน (BUG-037)
+- [ ] ไฟล์ log/audit ต้องเปิดแบบ fail-closed: `O_NOFOLLOW` (ห้าม symlink) + `fchmod 0o640` หลังเปิด ไม่พึ่งแค่ mode argument ตอน create (BUG-031)
+- [ ] `verifyAuditFile` ต้องแยก "uncommitted tail" จาก "entry ที่ commit แล้ว" ด้วยความสมบูรณ์ของเนื้อหา ไม่ใช่แค่การมี newline ปิดท้าย (BUG-036)
 
 ## 3. Logging, Tamper Evidence & Operations
 
