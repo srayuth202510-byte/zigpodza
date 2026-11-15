@@ -508,3 +508,4 @@
 2026-11-15T10:50:28Z [INFO] zigpod 0.1.0 command=system socket=/tmp/zigpod-real-e2e.PfLzSQ/podman.sock
 2026-11-15T10:50:28Z [DEBUG] GET /v1.40/_ping
 2026-11-15T10:50:28Z [INFO] system ping succeeded
+2026-11-15T11:04:20Z [INFO] auto-audit passed (hook=false)
