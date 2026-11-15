@@ -35,7 +35,8 @@ zigpodza/
 │  ├─ podman_types.zig # Podman/Docker v1.40 DTO structs, JSON serializers & stats calculators
 │  ├─ podman_api.zig   # Docker/Podman v1.40 API endpoints, security validators & LogDemuxer
 │  ├─ podman_build.zig # Deterministic ustar build-context archiver & POST /v1.40/build client
-│  ├─ podman_pods.zig  # Libpod /v4.0.0/libpod/pods lifecycle endpoints
+    │  ├─ podman_pods.zig  # Libpod /v4.0.0/libpod/pods lifecycle endpoints
+    │  ├─ podman_transfer.zig # search/save/load/export/import tar-stream transfer endpoints
 │  ├─ policy.zig       # --profile=sandbox & zigpod-policy.json pre-flight engine
 │  ├─ log.zig          # Timestamped file logger (system.log, error.log & SHA-256 hash-chained audit.log)
 │  └─ utils.zig        # Formatting helpers (shortId, formatSize)
@@ -172,6 +173,18 @@ zigpod exec -it demo-alpine sh
 zigpod audit
 zigpod audit --json
 
+# Tag, history, and commit images
+zigpod tag alpine:3.20 myrepo/app:v1
+zigpod history alpine:3.20
+zigpod commit -m "snapshot" -a "alice" demo-alpine myrepo/snap:v2
+
+# Search a registry, then move image/container tarballs in and out of the daemon
+zigpod search alpine
+zigpod save -o /srv/images/alpine.tar alpine:3.20
+zigpod load -i /srv/images/alpine.tar
+zigpod export -o /srv/images/rootfs.tar demo-alpine
+zigpod import /srv/images/rootfs.tar myrepo/app:v2
+
 # Pause, unpause, rename, restart, stop, and remove a container or image
 zigpod pause demo-alpine
 zigpod unpause demo-alpine
@@ -230,6 +243,9 @@ zig build test
 - Exec (`exec` → `POST /containers/{id}/exec` + `POST /exec/{id}/start` + `GET /exec/{id}/json`) ทั้งโหมดปกติและ interactive TTY (`101 Switching Protocols` + `RawTermGuard`), demultiplex output, propagation ของ exit code และ validation ของ exec ID (`src/podman_api.zig`)
 - Container resource stats (`stats --no-stream` → `GET /containers/{id}/stats?stream=false`), streaming `pullImage`, `logs -f` (`LogDemuxer`), และ `attachContainer` (`src/podman_api.zig`, `src/podman_types.zig`)
 - Sandbox security profile (`--profile=sandbox`), `zigpod-policy.json` pre-flight guardrails (`src/policy.zig`), `dispatch()` orphan cleanup (`BUG-012`) และ `DENY` audit JSON telemetry (`src/main.zig`, `src/log.zig`)
+- Image/container transfer endpoints (`search` → `GET /images/search`, `save` → `GET /images/{ref}/get`, `export` → `GET /containers/{id}/export`, `load`/`import` → `POST /images/load`) พร้อม fail-closed host-path policy กับไฟล์ local และ blocking timeout สำหรับ tar transfer (`src/podman_transfer.zig`)
+- Pod lifecycle endpoints (`pod create|ps|stop|rm`) ครบ happy/error/malformed/boundary path (`src/podman_pods.zig`)
+- Mock Unix-socket request framing helpers (`readHttpRequest`, `ScriptedReply`) (`src/podman_test_helpers.zig`)
 - Deterministic PRNG property & fuzz tests สำหรับ `parseResponse`/`decodeChunked`, `demuxLogs`/`LogDemuxer`, `parseMemoryBytes`/`cli.parse`, และ `verifyAuditFile`/`writeAuditJson`
 
 ---

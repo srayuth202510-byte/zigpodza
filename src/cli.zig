@@ -140,6 +140,16 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
         try parseHistory(rest)
     else if (eql(name, "commit"))
         try parseCommit(rest)
+    else if (eql(name, "search"))
+        .{ .search = .{ .term = try single(rest) } }
+    else if (eql(name, "save"))
+        try parseSave(rest)
+    else if (eql(name, "load"))
+        try parseLoad(rest)
+    else if (eql(name, "export"))
+        try parseExport(rest)
+    else if (eql(name, "import"))
+        try parseImport(rest)
     else if (eql(name, "policy"))
         try parsePolicyCmd(rest)
     else if (eql(name, "build"))
@@ -825,6 +835,104 @@ fn parseCommit(args: []const []const u8) ParseError!Command {
     return .{ .commit = opts };
 }
 
+fn parseSave(args: []const []const u8) ParseError!Command {
+    var image: ?[]const u8 = null;
+    var output: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (eql(a, "-o") or eql(a, "--output")) {
+            output = try takeValue(args, &i);
+        } else if (std.mem.startsWith(u8, a, "--output=")) {
+            output = try flagValue(a, "--output=");
+        } else if (std.mem.startsWith(u8, a, "-o=")) {
+            output = try flagValue(a, "-o=");
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else if (image == null) {
+            image = a;
+        } else {
+            return error.TooManyArguments;
+        }
+    }
+    if (image == null) return error.MissingArgument;
+    if (output == null) return error.MissingValue;
+    return .{ .save = .{ .image = image.?, .output = output.? } };
+}
+
+fn parseLoad(args: []const []const u8) ParseError!Command {
+    var input: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (eql(a, "-i") or eql(a, "--input")) {
+            input = try takeValue(args, &i);
+        } else if (std.mem.startsWith(u8, a, "--input=")) {
+            input = try flagValue(a, "--input=");
+        } else if (std.mem.startsWith(u8, a, "-i=")) {
+            input = try flagValue(a, "-i=");
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else {
+            return error.TooManyArguments;
+        }
+    }
+    if (input == null) return error.MissingValue;
+    return .{ .load = .{ .input = input.? } };
+}
+
+fn parseExport(args: []const []const u8) ParseError!Command {
+    var container: ?[]const u8 = null;
+    var output: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (eql(a, "-o") or eql(a, "--output")) {
+            output = try takeValue(args, &i);
+        } else if (std.mem.startsWith(u8, a, "--output=")) {
+            output = try flagValue(a, "--output=");
+        } else if (std.mem.startsWith(u8, a, "-o=")) {
+            output = try flagValue(a, "-o=");
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else if (container == null) {
+            container = a;
+        } else {
+            return error.TooManyArguments;
+        }
+    }
+    if (container == null) return error.MissingArgument;
+    if (output == null) return error.MissingValue;
+    return .{ .@"export" = .{ .container = container.?, .output = output.? } };
+}
+
+fn parseImport(args: []const []const u8) ParseError!Command {
+    var input: ?[]const u8 = null;
+    var ref: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else if (input == null) {
+            input = a;
+        } else if (ref == null) {
+            ref = a;
+        } else {
+            return error.TooManyArguments;
+        }
+    }
+    if (input == null or ref == null) return error.MissingArgument;
+    return .{ .import = .{ .input = input.?, .ref = ref.? } };
+}
+
+/// Returns the flag value embedded after `prefix` (e.g. `-o=/x.tar`).
+fn flagValue(a: []const u8, comptime prefix: []const u8) ParseError![]const u8 {
+    const v = a[prefix.len..];
+    if (v.len == 0) return error.MissingValue;
+    return v;
+}
+
 /// Parses `policy show|check [--json] [FILE]`.
 fn parsePolicyCmd(args: []const []const u8) ParseError!Command {
     if (args.len == 0) return error.MissingArgument;
@@ -924,6 +1032,47 @@ test "simple commands" {
     const g = (try testParse(&.{ "--socket", "/tmp/s.sock", "--verbose", "images" })).global;
     try std.testing.expect(g.verbose);
     try std.testing.expectEqualStrings("/tmp/s.sock", g.socket.?);
+}
+
+test "search, save, load, export, and import parsers" {
+    const s = (try testParse(&.{ "search", "alpine" })).command.search;
+    try std.testing.expectEqualStrings("alpine", s.term);
+    try std.testing.expectError(error.MissingArgument, testParse(&.{"search"}));
+    try std.testing.expectError(error.TooManyArguments, testParse(&.{ "search", "a", "b" }));
+    try std.testing.expectError(error.UnknownFlag, testParse(&.{ "search", "--bad" }));
+
+    const sv = (try testParse(&.{ "save", "-o", "/tmp/img.tar", "alpine:3.20" })).command.save;
+    try std.testing.expectEqualStrings("alpine:3.20", sv.image);
+    try std.testing.expectEqualStrings("/tmp/img.tar", sv.output);
+    const sv2 = (try testParse(&.{ "save", "--output=/x.tar", "alpine" })).command.save;
+    try std.testing.expectEqualStrings("/x.tar", sv2.output);
+    const sv3 = (try testParse(&.{ "save", "-o=/y.tar", "alpine", })).command.save;
+    try std.testing.expectEqualStrings("/y.tar", sv3.output);
+    try std.testing.expectError(error.MissingValue, testParse(&.{ "save", "alpine" }));
+    try std.testing.expectError(error.MissingArgument, testParse(&.{ "save", "-o", "/x.tar" }));
+    try std.testing.expectError(error.MissingValue, testParse(&.{ "save", "-o" }));
+    try std.testing.expectError(error.TooManyArguments, testParse(&.{ "save", "a", "b" }));
+
+    const ld = (try testParse(&.{ "load", "-i", "/tmp/in.tar" })).command.load;
+    try std.testing.expectEqualStrings("/tmp/in.tar", ld.input);
+    const ld2 = (try testParse(&.{ "load", "--input=/a.tar" })).command.load;
+    try std.testing.expectEqualStrings("/a.tar", ld2.input);
+    try std.testing.expectError(error.MissingValue, testParse(&.{"load"}));
+    try std.testing.expectError(error.TooManyArguments, testParse(&.{ "load", "-i", "/a.tar", "/b.tar" }));
+
+    const ex = (try testParse(&.{ "export", "-o", "/tmp/fs.tar", "web" })).command.@"export";
+    try std.testing.expectEqualStrings("web", ex.container);
+    try std.testing.expectEqualStrings("/tmp/fs.tar", ex.output);
+    try std.testing.expectError(error.MissingArgument, testParse(&.{"export"}));
+    try std.testing.expectError(error.MissingArgument, testParse(&.{ "export", "-o", "/x.tar" }));
+
+    const im = (try testParse(&.{ "import", "/tmp/rootfs.tar", "myrepo/app:v2" })).command.import;
+    try std.testing.expectEqualStrings("/tmp/rootfs.tar", im.input);
+    try std.testing.expectEqualStrings("myrepo/app:v2", im.ref);
+    try std.testing.expectError(error.MissingArgument, testParse(&.{"import"}));
+    try std.testing.expectError(error.MissingArgument, testParse(&.{ "import", "/a.tar" }));
+    try std.testing.expectError(error.TooManyArguments, testParse(&.{ "import", "/a.tar", "repo", "extra" }));
+    try std.testing.expectError(error.UnknownFlag, testParse(&.{ "import", "--bad", "/a.tar" }));
 }
 
 test "parse errors" {

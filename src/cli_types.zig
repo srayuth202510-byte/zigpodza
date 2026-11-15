@@ -60,6 +60,11 @@ pub const usage =
     \\  tag SRC_IMAGE TARGET_IMAGE     Create a tag for a local image
     \\  history [--json] IMAGE         Show the history of an image
     \\  commit [-m MSG] [-a AUTHOR] CONTAINER REPO[:TAG]  Create a new image from a container
+    \\  search TERM                    Search a registry for images
+    \\  save -o FILE IMAGE             Stream an image tarball to a host file
+    \\  load -i FILE                   Upload a local image tarball to the daemon
+    \\  export -o FILE CONTAINER       Stream a container rootfs tarball to a host file
+    \\  import FILE REPO[:TAG]         Upload a local rootfs tarball as a new image
     \\  policy show|check [--json] [FILE]  Inspect or validate a zigpod-policy.json file
     \\  build -t TAG DIR               Build an image from a build-context directory
     \\  pod create NAME|pod ps|pod stop ID|pod rm [-f] ID  Manage pods
@@ -282,6 +287,29 @@ pub const CommitOpts = struct {
     author: ?[]const u8 = null,
 };
 
+pub const SearchOpts = struct {
+    term: []const u8,
+};
+
+pub const SaveOpts = struct {
+    image: []const u8,
+    output: []const u8,
+};
+
+pub const LoadOpts = struct {
+    input: []const u8,
+};
+
+pub const ExportOpts = struct {
+    container: []const u8,
+    output: []const u8,
+};
+
+pub const ImportOpts = struct {
+    input: []const u8,
+    ref: []const u8,
+};
+
 pub const PolicyAction = enum {
     show,
     check,
@@ -327,6 +355,11 @@ pub const Command = union(enum) {
     tag: TagOpts,
     history: HistoryOpts,
     commit: CommitOpts,
+    search: SearchOpts,
+    save: SaveOpts,
+    load: LoadOpts,
+    @"export": ExportOpts,
+    import: ImportOpts,
     policy: PolicyOpts,
     build: BuildOpts,
     pod: PodOpts,

@@ -146,6 +146,14 @@ pub const ImageSummary = struct {
     Created: i64 = 0,
 };
 
+/// One entry of `GET /images/search?term=...`.
+pub const ImageSearchItem = struct {
+    Description: []const u8 = "",
+    IsOfficial: bool = false,
+    Name: []const u8 = "",
+    StarCount: i64 = 0,
+};
+
 pub const WaitResponse = struct {
     StatusCode: i64 = 0,
 };
@@ -486,9 +494,9 @@ test "ContainerCreateRequest serializes with omit-null optionals" {
 
 test "ContainerCreateRequest serializes full HostConfig with all fields" {
     const alloc = std.testing.allocator;
-    const cap_drop = [_][]const u8{ "ALL" };
-    const cap_add = [_][]const u8{ "NET_ADMIN" };
-    const sec_opt = [_][]const u8{ "no-new-privileges" };
+    const cap_drop = [_][]const u8{"ALL"};
+    const cap_add = [_][]const u8{"NET_ADMIN"};
+    const sec_opt = [_][]const u8{"no-new-privileges"};
     const mounts = [_]Mount{
         .{ .Type = "bind", .Source = "/srv/data", .Target = "/data", .ReadOnly = true },
     };
@@ -497,8 +505,8 @@ test "ContainerCreateRequest serializes full HostConfig with all fields" {
     };
     const req = ContainerCreateRequest{
         .Image = "alpine:3.20",
-        .Cmd = &.{ "sh" },
-        .Env = &.{ "A=1" },
+        .Cmd = &.{"sh"},
+        .Env = &.{"A=1"},
         .ExposedPorts = .{ .ports = &ports },
         .WorkingDir = "/work",
         .User = "1000:1000",
@@ -597,7 +605,7 @@ test "VersionInfo default values" {
 }
 
 test "ExecCreateRequest default values" {
-    const e = ExecCreateRequest{ .Cmd = &.{ "ls" } };
+    const e = ExecCreateRequest{ .Cmd = &.{"ls"} };
     try std.testing.expect(e.AttachStdin == false);
     try std.testing.expect(e.AttachStdout == true);
     try std.testing.expect(e.AttachStderr == true);

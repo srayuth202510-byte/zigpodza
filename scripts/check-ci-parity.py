@@ -78,6 +78,11 @@ CLI_SUBCOMMANDS = [
     "version",
     "audit",
     "demo",
+    "search",
+    "save",
+    "load",
+    "export",
+    "import",
 ]
 
 HARDENING_FLAGS = [

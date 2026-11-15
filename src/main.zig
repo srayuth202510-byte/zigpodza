@@ -9,6 +9,7 @@ const log = @import("log.zig");
 const pod = @import("podman_api.zig");
 const pods = @import("podman_pods.zig");
 const build_mod = @import("podman_build.zig");
+const transfer = @import("podman_transfer.zig");
 const policy = @import("policy.zig");
 
 pub const version = "0.1.0";
@@ -232,6 +233,11 @@ fn dispatch(
         .events => |opts| try pod.fetchEvents(client, logger, opts.since, opts.until, opts.json, stdout),
         .tag => |opts| try pod.tagImage(client, logger, opts.src_image, opts.target_image),
         .history => |opts| try pod.imageHistory(client, logger, opts.image, opts.json, stdout),
+        .search => |opts| try transfer.searchImages(client, logger, opts.term, stdout),
+        .save => |opts| try transfer.saveImage(client, logger, opts.image, opts.output, stdout),
+        .load => |opts| try transfer.loadImage(client, logger, opts.input, stdout),
+        .@"export" => |opts| try transfer.exportContainer(client, logger, opts.container, opts.output, stdout),
+        .import => |opts| try transfer.importImage(client, logger, opts.input, opts.ref, stdout),
         .commit => |opts| try pod.commitContainer(
             client,
             logger,
@@ -490,7 +496,7 @@ fn reportFailure(logger: *log.Logger, cmd: cli.Command, socket_path: []const u8,
             .{},
         ),
         pod.ApiError.BuildContextTooLarge => logger.err(
-            "Build context exceeds the 512 MiB limit.",
+            "Build context or input tarball exceeds the size limit.",
             .{},
         ),
         pod.ApiError.BuildFailed => {

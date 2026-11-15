@@ -93,9 +93,9 @@ def reply(conn, status, body=b""):
     hdr = f"HTTP/1.1 {status}\r\nContent-Length: {len(body)}\r\n\r\n".encode("ascii")
     conn.sendall(hdr + body)
 
-# Expect 16 requests: create, start, wait, logs, delete (--rm), ps -a, inspect, exec-create, exec-start, exec-inspect, stats-list, stats-one, kill, top, volume-ls, network-ls
+# Expect 21 requests: create, start, wait, logs, delete (--rm), ps -a, inspect, exec-create, exec-start, exec-inspect, stats-list, stats-one, kill, top, volume-ls, network-ls, search, save, load, export, import
 with open(req_path, "wb") as out:
-    for step in range(16):
+    for step in range(21):
         conn, _ = srv.accept()
         try:
             req = read_req(conn)
@@ -131,6 +131,16 @@ with open(req_path, "wb") as out:
                 reply(conn, "200 OK", b"\x01\x00\x00\x00\x00\x00\x00\x0Bhello-exec\n")
             elif req.startswith(b"GET ") and b"/exec/" in req and b"/json" in req:
                 reply(conn, "200 OK", b'{"Running":false,"ExitCode":0}')
+            elif req.startswith(b"GET ") and b"/images/search?term=alpine" in req:
+                reply(conn, "200 OK", b'[{"Description":"A minimal container","IsOfficial":true,"Name":"alpine","StarCount":9000}]')
+            elif req.startswith(b"GET ") and b"/images/alpine:3.20/get" in req:
+                reply(conn, "200 OK", b"TAR-PAYLOAD-SAVE")
+            elif req.startswith(b"POST ") and b"/images/load?quiet=0" in req:
+                reply(conn, "200 OK", b'{"status":"Loaded image: alpine:3.20"}')
+            elif req.startswith(b"GET ") and b"/export" in req:
+                reply(conn, "200 OK", b"TAR-PAYLOAD-EXPORT")
+            elif req.startswith(b"POST ") and b"/images/load?fromSrc=-&repo=" in req:
+                reply(conn, "200 OK", b'{"status":"Imported"}')
             else:
                 reply(conn, "404 Not Found", b'{"message":"unexpected"}')
         finally:
@@ -186,6 +196,29 @@ echo "$VOL_OUT" | grep -q "app-data"
 NET_OUT=$("$BIN" --socket "$SOCK" network ls)
 echo "$NET_OUT" | grep -q "podman"
 
+SEARCH_OUT=$("$BIN" --socket "$SOCK" search alpine)
+echo "$SEARCH_OUT" | grep -q "alpine"
+
+SAVE_OUT=$("$BIN" --socket "$SOCK" save -o "$TMPDIR/save.tar" alpine:3.20)
+echo "$SAVE_OUT" | grep -q "Saved alpine:3.20"
+grep -q "TAR-PAYLOAD-SAVE" "$TMPDIR/save.tar"
+
+LOAD_TAR="$TMPDIR/load.tar"
+printf 'LOAD-TAR-PAYLOAD' > "$LOAD_TAR"
+LOAD_OUT=$("$BIN" --socket "$SOCK" load -i "$LOAD_TAR")
+echo "$LOAD_OUT" | grep -q "Loaded image: alpine:3.20"
+grep -q "LOAD-TAR-PAYLOAD" "$REQ_LOG"
+
+EXPORT_OUT=$("$BIN" --socket "$SOCK" export -o "$TMPDIR/export.tar" smoke1234567890ab)
+echo "$EXPORT_OUT" | grep -q "Exported smoke1234567890ab"
+grep -q "TAR-PAYLOAD-EXPORT" "$TMPDIR/export.tar"
+
+IMPORT_TAR="$TMPDIR/import.tar"
+printf 'IMPORT-TAR-PAYLOAD' > "$IMPORT_TAR"
+IMPORT_OUT=$("$BIN" --socket "$SOCK" import "$IMPORT_TAR" "myrepo/app:v2")
+echo "$IMPORT_OUT" | grep -q "Imported"
+grep -q "IMPORT-TAR-PAYLOAD" "$REQ_LOG"
+
 # Adversarial input must fail closed before reaching daemon.
 if "$BIN" --socket "$SOCK" kill -s SIGBAD smoke1234567890ab >/dev/null 2>&1; then
     echo "[FAIL] expected invalid kill signal (SIGBAD) to fail closed" >&2
@@ -212,6 +245,21 @@ fi
 
 if "$BIN" --socket "$SOCK" run --network bogus alpine:3.20 >/dev/null 2>&1; then
     echo "[FAIL] expected invalid network mode (bogus) to fail closed" >&2
+    exit 1
+fi
+
+if "$BIN" --socket "$SOCK" save -o /etc/shadow alpine:3.20 >/dev/null 2>&1; then
+    echo "[FAIL] expected dangerous save output path (/etc/shadow) to fail closed" >&2
+    exit 1
+fi
+
+if "$BIN" --socket "$SOCK" load -i /root/../etc/passwd >/dev/null 2>&1; then
+    echo "[FAIL] expected traversal load input path (..) to fail closed" >&2
+    exit 1
+fi
+
+if "$BIN" --socket "$SOCK" import "$IMPORT_TAR" 'bad?x=1' >/dev/null 2>&1; then
+    echo "[FAIL] expected invalid import reference (bad?x=1) to fail closed" >&2
     exit 1
 fi
 
