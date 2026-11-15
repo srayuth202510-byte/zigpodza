@@ -45,4 +45,8 @@ rg -n "#memory-safety|#security-gate" docs/vault/
 
 # รันตัวตรวจจับผิดอัตโนมัติ
 ./scripts/auto-audit.sh
+
+# ซิงก์ Knowledge Graph และ Bug-Dashboard อัตโนมัติ (หรือเปิดใช้ผ่าน .agents/hooks.json Stop hook & git pre-commit)
+python3 scripts/knowledge-sync.py --sync
+make install-hooks
 ```

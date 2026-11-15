@@ -181,7 +181,13 @@ def evaluate_static_gates() -> list[dict[str, Any]]:
     log_txt = src_texts.get("src/log.zig", "")
     demo_txt = src_texts.get("src/demo.zig", "")
 
-    req_execs = ("scripts/check-ci-parity.py", "scripts/graph-query.py", "scripts/smoke.sh")
+    req_execs = (
+        "scripts/check-ci-parity.py",
+        "scripts/graph-query.py",
+        "scripts/knowledge-sync.py",
+        "scripts/smoke.sh",
+        ".githooks/pre-commit",
+    )
     exec_ok = all((ROOT / s).is_file() and os.access(ROOT / s, os.X_OK) for s in req_execs)
     test_alloc_mods = ("src/cli.zig", "src/config.zig", "src/http.zig", "src/podman_api.zig", "src/log.zig", "src/demo.zig")
 

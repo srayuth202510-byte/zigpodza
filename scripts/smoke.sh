@@ -28,8 +28,9 @@ python3 scripts/graph-query.py query "BUG-002" >/dev/null
 python3 scripts/graph-query.py explain verifyAuditFile >/dev/null
 python3 scripts/graph-query.py path bug:BUG-002 module:src/cli.zig >/dev/null
 python3 scripts/bug-dashboard.py generate >/dev/null
+python3 scripts/knowledge-sync.py --self-test >/dev/null
 [ -f .zig-cache/bug-dashboard.html ] && [ -f docs/vault/Bug-Dashboard.md ]
-echo "[PASS] graph-query and bug-dashboard generation succeeded."
+echo "[PASS] graph-query, bug-dashboard, and knowledge-sync verification succeeded."
 
 echo "==> [3/4] Static memory & security audit"
 ./scripts/auto-audit.sh

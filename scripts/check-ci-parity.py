@@ -21,8 +21,11 @@ REQUIRED_FILES = [
     "scripts/smoke.sh",
     "scripts/podman-e2e.sh",
     "scripts/graph-query.py",
+    "scripts/knowledge-sync.py",
     "scripts/bug-dashboard.py",
     "scripts/check-ci-parity.py",
+    ".agents/hooks.json",
+    ".githooks/pre-commit",
     "docs/vault/00-Index.md",
     "docs/vault/Architecture-Map.md",
     "docs/vault/Bug-Playbook.md",
@@ -60,8 +63,10 @@ EXECUTABLES = [
     "scripts/smoke.sh",
     "scripts/podman-e2e.sh",
     "scripts/graph-query.py",
+    "scripts/knowledge-sync.py",
     "scripts/bug-dashboard.py",
     "scripts/check-ci-parity.py",
+    ".githooks/pre-commit",
 ]
 
 MAKEFILE_TARGETS = [
@@ -82,6 +87,8 @@ MAKEFILE_TARGETS = [
     "triage",
     "debug-logs",
     "graph-update",
+    "knowledge-sync",
+    "install-hooks",
     "bugs",
     "dashboard",
     "dashboard-serve",

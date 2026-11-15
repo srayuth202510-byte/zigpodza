@@ -242,6 +242,17 @@ else
     fail "Missing writeAllWithTimeout guard or unguarded 'try stream.writeAll' remains (see BUG-037)."
 fi
 
+# 8m. Require automatic knowledge-sync Stop hook and executable pre-commit hook
+if [[ -x "$ROOT_DIR/scripts/knowledge-sync.py" && -x "$ROOT_DIR/.githooks/pre-commit" ]] && has_match 'knowledge-sync\.py --stop-hook' ".agents/hooks.json" && has_match 'knowledge-sync\.py.*--pre-commit' ".githooks/pre-commit"; then
+    if [[ "$HOOK_MODE" == "true" ]] || python3 "$ROOT_DIR/scripts/knowledge-sync.py" --self-test >/dev/null 2>&1; then
+        pass "Automatic knowledge-sync Stop/pre-commit hooks are configured and verified."
+    else
+        fail "scripts/knowledge-sync.py --self-test failed."
+    fi
+else
+    fail "Missing executable knowledge-sync.py / .githooks/pre-commit or Stop hook config in .agents/hooks.json."
+fi
+
 # 9. Run security-check.sh (includes zig build test & ELF hardening when zig is installed)
 SEC_OUT=""
 if SEC_OUT="$("$ROOT_DIR/scripts/security-check.sh" 2>&1)"; then

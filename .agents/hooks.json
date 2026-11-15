@@ -12,5 +12,14 @@
         ]
       }
     ]
+  },
+  "knowledge-sync": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "../scripts/knowledge-sync.py --stop-hook",
+        "timeout": 20
+      }
+    ]
   }
 }

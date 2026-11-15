@@ -1,4 +1,4 @@
-.PHONY: help build test test-one test-adv demo e2e real-e2e check-ci verify ci query path explain triage debug-logs graph-update bugs dashboard dashboard-serve debug-test clean
+.PHONY: help build test test-one test-adv demo e2e real-e2e check-ci verify ci query path explain triage debug-logs graph-update knowledge-sync install-hooks bugs dashboard dashboard-serve debug-test clean
 .DEFAULT_GOAL := help
 
 ZIG ?= $(shell command -v zig 2>/dev/null || { for p in "$$HOME/.config/Code - OSS/User/globalStorage/ziglang.vscode-zig/zig/x86_64-linux-0.13.0/zig" "$$HOME/.config/Code/User/globalStorage/ziglang.vscode-zig/zig/x86_64-linux-0.13.0/zig" "$$HOME/.local/opt/zig-0.13.0/zig" "$$HOME/.local/bin/zig"; do if [ -x "$$p" ]; then echo "$$p"; exit 0; fi; done; echo zig; })
@@ -34,6 +34,13 @@ check-ci: ## Check CI, Makefile, CLI, vault, and README parity
 
 graph-update: ## Rebuild offline knowledge graph index (.zig-cache/knowledge-graph.json)
 	$(PYTHON) ./scripts/graph-query.py update
+
+knowledge-sync: ## Sync knowledge graph & Bug-Dashboard.md and report unrecorded src/ knowledge gaps
+	$(PYTHON) ./scripts/knowledge-sync.py --sync
+
+install-hooks: ## Activate tracked .githooks/pre-commit for automatic knowledge sync on git commit
+	git config core.hooksPath .githooks
+	chmod +x .githooks/pre-commit scripts/knowledge-sync.py
 
 query: ## Search knowledge graph (usage: make query Q=memory)
 	@test -n "$(Q)" || (echo "Usage: make query Q=<term>" >&2; exit 2)

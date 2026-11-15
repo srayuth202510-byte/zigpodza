@@ -46,6 +46,7 @@ zigpodza/
 │  ├─ check-ci-parity.py # CI workflow, Makefile, CLI, vault & README parity verifier
 │  ├─ graph-query.py     # Offline Knowledge Graph CLI
 │  ├─ install.sh         # Build ReleaseSafe binary and install to PATH
+│  ├─ knowledge-sync.py  # Automatic Knowledge Graph, Bug-Dashboard & hook/pre-commit drift sync
 │  ├─ security-check.sh  # Run leak/security tests, ELF hardening, and optional balorsh check
 │  └─ smoke.sh           # 4-stage parity, graph, static audit, and mock-daemon E2E test suite
 ├─ examples/
@@ -404,6 +405,8 @@ make debug-logs N=15             # summarize top errors in error.log and recent 
 # Bug Tracking Dashboard (CLI / Obsidian Note / Web UI)
 make bugs            # terminal summary of tracked bugs, module tests, and security gates
 make dashboard       # update docs/vault/Bug-Dashboard.md & .zig-cache/bug-dashboard.html
+make knowledge-sync  # auto-sync graph/dashboard + detect unrecorded src/ BUG-NNN/validator/error gaps
+make install-hooks   # activate tracked .githooks/pre-commit (pairs with .agents/hooks.json Stop hook)
 make dashboard-serve # start local web UI on http://127.0.0.1:8765
 python3 scripts/bug-dashboard.py summary --json
 ```
