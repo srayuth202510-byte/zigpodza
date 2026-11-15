@@ -542,6 +542,10 @@ fn extractCpArchiveToDir(tar_file: std.fs.File, dst_dir: std.fs.Dir, strip_prefi
                 if (rel.len == 0) continue;
             }
         }
+        // Re-validate symlink depth against the final stripped extraction path (BUG-026).
+        if (f.kind == .sym_link) {
+            try validateTarSymlinkTarget(rel, f.link_name);
+        }
 
         const leaf = std.fs.path.basename(rel);
         const parent_rel = std.fs.path.dirname(rel) orelse "";
@@ -1504,4 +1508,59 @@ test "scanCpArchive rejects hardlink escapes, oversized PAX headers, and truncat
         defer f.close();
         try std.testing.expectError(error.EndOfStream, scanCpArchive(alloc, f));
     }
+}
+
+test "BUG-026: cpFromContainer rejects symlink escape exposed after common-root strip" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(alloc, "/tmp/zp-cp-strip-{d}.sock", .{std.time.nanoTimestamp()});
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root_dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root_dir);
+    const out_new_dir = try std.fs.path.join(alloc, &.{ root_dir, "extracted" });
+    defer alloc.free(out_new_dir);
+
+    var tar_buf = std.ArrayList(u8).init(alloc);
+    defer tar_buf.deinit();
+    try build_mod.writeTarHeader(&tar_buf, "wrap/", 0, '5', "");
+    try build_mod.writeTarHeader(&tar_buf, "wrap/ok.txt", 3, '0', "");
+    try tar_buf.appendSlice("ok\n");
+    try build_mod.writePad(&tar_buf, 3);
+    try build_mod.writeTarHeader(&tar_buf, "wrap/escape", 0, '2', "../secret");
+    try build_mod.writeTarTrailer(&tar_buf);
+
+    const resp = try std.fmt.allocPrint(alloc, "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ tar_buf.items.len, tar_buf.items });
+    defer alloc.free(resp);
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const replies = [_]ScriptedReply{.{
+        .expected_prefix = "GET /v1.40/containers/web/archive?path=%2Fwrap HTTP/1.1\r\n",
+        .raw_response = resp,
+    }};
+    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    try std.testing.expectError(
+        ApiError.InvalidHostPath,
+        cpFromContainer(&client, &logger, "web", "/wrap", out_new_dir, out.writer()),
+    );
+    try std.testing.expectError(error.FileNotFound, std.fs.accessAbsolute(out_new_dir, .{}));
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
 }

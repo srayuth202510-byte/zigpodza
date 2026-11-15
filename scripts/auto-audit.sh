@@ -175,6 +175,34 @@ else
     fail "Missing InvalidShmSize variant or api.validateShmSize deny rule (see BUG-041)."
 fi
 
+# 8f. Forbid raw request body logging (BUG-024) and ensure runtime logs stay ignored
+if ! has_match 'body=\{s\}' "src/" && has_match '^system\.log$' ".gitignore" && has_match '^error\.log$' ".gitignore" && has_match '^audit\.log$' ".gitignore"; then
+    pass "No raw 'body={s}' request logging and runtime logs are gitignored (BUG-024)."
+else
+    fail "Found raw 'body={s}' logging in src/ or missing runtime log rules in .gitignore (see BUG-024)."
+fi
+
+# 8g. Require symlink-resolved host mount check & post-strip cp symlink check (BUG-025 / BUG-026)
+if has_match 'validateHostPathSymlinks' "src/podman_validate.zig" && has_match 'validateTarSymlinkTarget\(rel,' "src/podman_transfer.zig"; then
+    pass "Symlink-aware host mount validation and post-strip cp symlink validation enforced (BUG-025/BUG-026)."
+else
+    fail "Missing symlink-aware host mount check or post-strip cp symlink validation (see BUG-025/BUG-026)."
+fi
+
+# 8h. Require O_NOFOLLOW + fchmod(0o640) on logs and trust/value checks on zigpod.toml (BUG-031 / BUG-033)
+if has_match '\.NOFOLLOW = true' "src/log.zig" && has_match 'fchmod\(fd, 0o640\)' "src/log.zig" && has_match 'InsecureConfigFile' "src/config.zig"; then
+    pass "O_NOFOLLOW/0640 log hardening and trusted zigpod.toml verification enforced (BUG-031/BUG-033)."
+else
+    fail "Missing O_NOFOLLOW/fchmod in src/log.zig or InsecureConfigFile guard in src/config.zig (see BUG-031/BUG-033)."
+fi
+
+# 8i. Require HostConfig.PortBindings re-validation and non-panicking port key serialization (BUG-034)
+if has_match 'hc\.PortBindings' "src/podman_api.zig" && ! has_match 'bufPrint\(&key_buf.*catch unreachable' "src/podman_types.zig"; then
+    pass "HostConfig.PortBindings re-validated and safe port key serialization active (BUG-034)."
+else
+    fail "Missing HostConfig.PortBindings validation or unsafe catch unreachable remains (see BUG-034)."
+fi
+
 # 9. Run security-check.sh (includes zig build test & ELF hardening when zig is installed)
 SEC_OUT=""
 if SEC_OUT="$("$ROOT_DIR/scripts/security-check.sh" 2>&1)"; then

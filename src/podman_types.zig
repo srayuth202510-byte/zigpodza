@@ -94,6 +94,32 @@ pub const PortMapping = struct {
     proto: []const u8 = "tcp",
 };
 
+/// Validates port protocol allow-list shared with `podman_validate.validatePortMapping`.
+pub fn isValidPortProto(proto: []const u8) bool {
+    return std.mem.eql(u8, proto, "tcp") or std.mem.eql(u8, proto, "udp") or std.mem.eql(u8, proto, "sctp");
+}
+
+fn writePortObjectField(jw: anytype, p: PortMapping) !void {
+    var key_buf: [64]u8 = undefined;
+    if (std.fmt.bufPrint(&key_buf, "{d}/{s}", .{ p.container_port, p.proto })) |key| {
+        try jw.objectField(key);
+    } else |_| {
+        // Dynamically allocate on ArrayList-backed writers (stringifyAlloc) so arbitrary lengths never panic (BUG-034).
+        if (@hasField(@TypeOf(jw.stream), "context") and @TypeOf(jw.stream.context) == *std.ArrayList(u8)) {
+            const dyn_alloc = jw.stream.context.allocator;
+            const dyn_key = try std.fmt.allocPrint(dyn_alloc, "{d}/{s}", .{ p.container_port, p.proto });
+            defer dyn_alloc.free(dyn_key);
+            try jw.objectField(dyn_key);
+        } else {
+            var fbs = std.io.fixedBufferStream(&key_buf);
+            fbs.writer().print("{d}/", .{p.container_port}) catch {};
+            const rem = key_buf.len - fbs.pos;
+            fbs.writer().writeAll(p.proto[0..@min(p.proto.len, rem)]) catch {};
+            try jw.objectField(fbs.getWritten());
+        }
+    }
+}
+
 /// Serializes the Docker `ExposedPorts` object: `{"80/tcp":{},...}`.
 pub const ExposedPorts = struct {
     ports: []const PortMapping,
@@ -101,9 +127,7 @@ pub const ExposedPorts = struct {
     pub fn jsonStringify(self: ExposedPorts, jw: anytype) !void {
         try jw.beginObject();
         for (self.ports) |p| {
-            var key_buf: [16]u8 = undefined;
-            const key = std.fmt.bufPrint(&key_buf, "{d}/{s}", .{ p.container_port, p.proto }) catch unreachable;
-            try jw.objectField(key);
+            try writePortObjectField(jw, p);
             try jw.beginObject();
             try jw.endObject();
         }
@@ -120,9 +144,7 @@ pub const PortBindings = struct {
         try jw.beginObject();
         for (self.ports) |p| {
             const host_port = p.host_port orelse continue;
-            var key_buf: [16]u8 = undefined;
-            const key = std.fmt.bufPrint(&key_buf, "{d}/{s}", .{ p.container_port, p.proto }) catch unreachable;
-            try jw.objectField(key);
+            try writePortObjectField(jw, p);
             try jw.beginArray();
             try jw.beginObject();
             if (p.host_ip) |ip| {
@@ -130,8 +152,7 @@ pub const PortBindings = struct {
                 try jw.write(ip);
             }
             try jw.objectField("HostPort");
-            var port_buf: [8]u8 = undefined;
-            try jw.write(std.fmt.bufPrint(&port_buf, "{d}", .{host_port}) catch unreachable);
+            try jw.print("\"{d}\"", .{host_port});
             try jw.endObject();
             try jw.endArray();
         }
@@ -998,4 +1019,21 @@ test "LabelsMap, Hostname, Entrypoint, NanoCpus, RestartPolicy, and NetworkCreat
     defer alloc.free(njson);
     try std.testing.expect(std.mem.indexOf(u8, njson, "\"Name\":\"iso-net\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, njson, "\"Internal\":true") != null);
+}
+
+test "BUG-034: ExposedPorts and PortBindings serialize oversized protos cleanly without panicking" {
+    const alloc = std.testing.allocator;
+    const huge_proto = "p" ** 160;
+    const long_ports = [_]PortMapping{.{
+        .host_port = 8080,
+        .container_port = 80,
+        .proto = huge_proto,
+    }};
+    const pb_json = try std.json.stringifyAlloc(alloc, PortBindings{ .ports = &long_ports }, .{});
+    defer alloc.free(pb_json);
+    try std.testing.expect(std.mem.indexOf(u8, pb_json, "80/" ++ huge_proto) != null);
+
+    const ep_json = try std.json.stringifyAlloc(alloc, ExposedPorts{ .ports = &long_ports }, .{});
+    defer alloc.free(ep_json);
+    try std.testing.expect(std.mem.indexOf(u8, ep_json, "80/" ++ huge_proto) != null);
 }

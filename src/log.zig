@@ -402,14 +402,32 @@ pub fn writeAuditJson(allocator: std.mem.Allocator, path: []const u8, writer: an
 
 /// Opens a file with O_APPEND so concurrent zigpod processes never overwrite each other.
 /// `readable` requests RDWR (needed by the audit file for tail repair/re-reads).
+/// Refuses symlinks (O_NOFOLLOW), non-regular files, and wrong ownership, and
+/// enforces mode 0640 on pre-existing files (BUG-013, BUG-031).
 fn openAppend(dir: std.fs.Dir, name: []const u8, readable: bool) ?std.fs.File {
     const fd = std.posix.openat(dir.fd, name, .{
         .ACCMODE = if (readable) .RDWR else .WRONLY,
         .CREAT = true,
         .APPEND = true,
         .CLOEXEC = true,
+        .NOFOLLOW = true,
     }, 0o640) catch |e| {
         std.debug.print("zigpod: warning: cannot open log file '{s}': {s}\n", .{ name, @errorName(e) });
+        return null;
+    };
+    const st = std.posix.fstat(fd) catch |e| {
+        std.posix.close(fd);
+        std.debug.print("zigpod: warning: cannot stat log file '{s}': {s}\n", .{ name, @errorName(e) });
+        return null;
+    };
+    if (!std.posix.S.ISREG(st.mode) or st.uid != std.os.linux.getuid()) {
+        std.posix.close(fd);
+        std.debug.print("zigpod: warning: refusing insecure log file '{s}' (type/owner mismatch)\n", .{name});
+        return null;
+    }
+    std.posix.fchmod(fd, 0o640) catch |e| {
+        std.posix.close(fd);
+        std.debug.print("zigpod: warning: cannot enforce 0640 mode on log file '{s}': {s}\n", .{ name, @errorName(e) });
         return null;
     };
     return std.fs.File{ .handle = fd };
@@ -708,4 +726,42 @@ test "fuzz verifyAuditFile and writeAuditJson over corrupted and random audit lo
         defer json_out.deinit();
         _ = try writeAuditJson(alloc, audit_path, json_out.writer());
     }
+}
+
+test "BUG-031: Logger.init blocks symlinks and enforces mode 0640 on existing log files" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir_path);
+
+    const victim = try tmp.dir.createFile("victim.txt", .{});
+    victim.close();
+    try tmp.dir.symLink("victim.txt", "audit.log", .{});
+
+    const sys_f = try tmp.dir.createFile("system.log", .{});
+    try sys_f.chmod(0o644);
+    sys_f.close();
+
+    const err_f = try tmp.dir.createFile("error.log", .{});
+    try err_f.chmod(0o666);
+    err_f.close();
+
+    var logger = Logger.init(dir_path, false);
+    logger.echo_stderr = false;
+    logger.err("probe event", .{});
+    logger.deinit();
+
+    // Audit symlink must never be followed or appended to.
+    try std.testing.expect(logger.audit_file == null);
+    const victim_contents = try tmp.dir.readFileAlloc(alloc, "victim.txt", 4096);
+    defer alloc.free(victim_contents);
+    try std.testing.expectEqualStrings("", victim_contents);
+
+    // Pre-existing permissive log files must be tightened to 0640.
+    const sys_stat = try tmp.dir.statFile("system.log");
+    const err_stat = try tmp.dir.statFile("error.log");
+    try std.testing.expectEqual(@as(std.fs.File.Mode, 0o640), sys_stat.mode & 0o777);
+    try std.testing.expectEqual(@as(std.fs.File.Mode, 0o640), err_stat.mode & 0o777);
 }

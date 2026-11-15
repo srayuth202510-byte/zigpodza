@@ -82,15 +82,57 @@ pub fn parseToml(allocator: std.mem.Allocator, content: []const u8) !TomlConfig 
     return out;
 }
 
-fn loadTomlFile(allocator: std.mem.Allocator, path: []const u8) !?TomlConfig {
-    const file = std.fs.cwd().openFile(path, .{}) catch |e| switch (e) {
+pub const ConfigError = error{
+    InsecureConfigFile,
+    InvalidConfigValue,
+};
+
+fn validateConfigPathValue(val: []const u8, require_absolute: bool) ConfigError!void {
+    if (val.len == 0 or val.len > 4096) return ConfigError.InvalidConfigValue;
+    if (require_absolute and val[0] != '/') return ConfigError.InvalidConfigValue;
+    for (val) |c| {
+        if (c < 0x20 or c == 0x7f) return ConfigError.InvalidConfigValue;
+    }
+}
+
+fn validateTomlConfig(cfg: TomlConfig) ConfigError!void {
+    if (cfg.default_socket) |s| {
+        try validateConfigPathValue(stripUnixScheme(s), true);
+    }
+    if (cfg.log_dir) |d| {
+        try validateConfigPathValue(d, false);
+    }
+}
+
+fn loadTomlFromDir(allocator: std.mem.Allocator, dir: std.fs.Dir, sub_path: []const u8) !?TomlConfig {
+    // Reject symlinks, wrong owner, and group/world-writable config files (BUG-033).
+    const fd = std.posix.openat(dir.fd, sub_path, .{
+        .ACCMODE = .RDONLY,
+        .CLOEXEC = true,
+        .NOFOLLOW = true,
+    }, 0) catch |e| switch (e) {
         error.FileNotFound => return null,
+        error.SymLinkLoop, error.IsDir, error.NotDir, error.AccessDenied => return ConfigError.InsecureConfigFile,
         else => return e,
     };
+    const file = std.fs.File{ .handle = fd };
     defer file.close();
+
+    const st = std.posix.fstat(fd) catch return ConfigError.InsecureConfigFile;
+    if (!std.posix.S.ISREG(st.mode)) return ConfigError.InsecureConfigFile;
+    if (st.uid != std.os.linux.getuid()) return ConfigError.InsecureConfigFile;
+    if ((st.mode & 0o022) != 0) return ConfigError.InsecureConfigFile;
+
     const content = try file.readToEndAlloc(allocator, 64 * 1024);
     defer allocator.free(content);
-    return try parseToml(allocator, content);
+    const parsed = try parseToml(allocator, content);
+    errdefer parsed.deinit(allocator);
+    try validateTomlConfig(parsed);
+    return parsed;
+}
+
+fn loadTomlFile(allocator: std.mem.Allocator, path: []const u8) !?TomlConfig {
+    return loadTomlFromDir(allocator, std.fs.cwd(), path);
 }
 
 pub const Config = struct {
@@ -98,10 +140,15 @@ pub const Config = struct {
     log_dir: []const u8,
     verbose: bool = false,
 
-    /// Loads configuration into freshly allocated strings owned by `allocator`.
-    /// Call `deinit(allocator)` when no longer needed.
+    /// Loads configuration from CWD (`zigpod.toml` if present and trusted) +
+    /// environment variables + CLI override. Call `deinit(allocator)` when done.
     pub fn load(allocator: std.mem.Allocator, socket_override: ?[]const u8) !Config {
-        const toml_opt = loadTomlFile(allocator, "zigpod.toml") catch null;
+        return loadFromDir(allocator, std.fs.cwd(), socket_override);
+    }
+
+    /// Loads configuration using `config_dir` as the base directory for `zigpod.toml`.
+    pub fn loadFromDir(allocator: std.mem.Allocator, config_dir: std.fs.Dir, socket_override: ?[]const u8) !Config {
+        const toml_opt = try loadTomlFromDir(allocator, config_dir, "zigpod.toml");
         defer if (toml_opt) |t| t.deinit(allocator);
 
         const socket_path = try resolveSocket(allocator, socket_override, toml_opt);
@@ -240,4 +287,62 @@ test "parseToml parses socket and logging sections without leaks" {
     try std.testing.expectEqualStrings("unix:///tmp/custom-toml.sock", parsed.default_socket.?);
     try std.testing.expectEqualStrings("/var/log/zigpod", parsed.log_dir.?);
     try std.testing.expectEqual(true, parsed.verbose.?);
+}
+
+test "BUG-033: world-writable, group-writable, symlinked, or invalid zigpod.toml is rejected" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir_path);
+
+    const evil_data =
+        \\[socket]
+        \\default_path = "unix:///tmp/attacker-sock.sock"
+        \\
+    ;
+    const toml_file = try tmp.dir.createFile("zigpod.toml", .{});
+    try toml_file.writeAll(evil_data);
+    try toml_file.chmod(0o666);
+    toml_file.close();
+
+    // 1) World-writable (0666) must fail closed both directly and via Config.loadFromDir.
+    const ww_path = try std.fs.path.join(alloc, &.{ dir_path, "zigpod.toml" });
+    defer alloc.free(ww_path);
+    try std.testing.expectError(ConfigError.InsecureConfigFile, loadTomlFile(alloc, ww_path));
+    try std.testing.expectError(ConfigError.InsecureConfigFile, Config.loadFromDir(alloc, tmp.dir, null));
+
+    // 2) Group-writable (0660) must also be rejected.
+    const rw_f = try tmp.dir.openFile("zigpod.toml", .{});
+    try rw_f.chmod(0o660);
+    rw_f.close();
+    try std.testing.expectError(ConfigError.InsecureConfigFile, Config.loadFromDir(alloc, tmp.dir, null));
+
+    // 3) Symlinked zigpod.toml pointing to a 0600 target must be rejected.
+    const real_file = try tmp.dir.createFile("real.toml", .{});
+    try real_file.writeAll(evil_data);
+    try real_file.chmod(0o600);
+    real_file.close();
+    try tmp.dir.symLink("real.toml", "sym.toml", .{});
+
+    const sym_path = try std.fs.path.join(alloc, &.{ dir_path, "sym.toml" });
+    defer alloc.free(sym_path);
+    try std.testing.expectError(ConfigError.InsecureConfigFile, loadTomlFile(alloc, sym_path));
+
+    // 4) Trusted 0600 file with non-absolute default_path must be rejected as InvalidConfigValue.
+    const bad_val_file = try tmp.dir.createFile("zigpod.toml", .{});
+    try bad_val_file.writeAll("[socket]\ndefault_path = \"relative.sock\"\n");
+    try bad_val_file.chmod(0o600);
+    bad_val_file.close();
+    try std.testing.expectError(ConfigError.InvalidConfigValue, Config.loadFromDir(alloc, tmp.dir, null));
+
+    // 5) Trusted 0600 file with valid absolute socket loads cleanly.
+    const ok_file = try tmp.dir.createFile("zigpod.toml", .{});
+    try ok_file.writeAll(evil_data);
+    try ok_file.chmod(0o600);
+    ok_file.close();
+    const cfg = try Config.loadFromDir(alloc, tmp.dir, "unix:///tmp/override.sock");
+    defer cfg.deinit(alloc);
+    try std.testing.expectEqualStrings("/tmp/override.sock", cfg.socket_path);
 }

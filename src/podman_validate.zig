@@ -96,20 +96,78 @@ fn validateAbsolutePath(path: []const u8) ApiError!void {
     }
 }
 
-/// Fail-closed host-path policy for bind mounts (BUG-014). Rejects dangerous
-/// system roots, traversal, and read-write mounts of sensitive `/etc` files.
-pub fn validateHostPath(path: []const u8, readonly: bool) ApiError!void {
+fn isSafeEtcFile(path: []const u8) bool {
+    for (safe_etc_files) |f| {
+        if (std.mem.eql(u8, path, f)) return true;
+    }
+    return false;
+}
+
+fn validateHostPathLexical(path: []const u8, readonly: bool) ApiError!void {
     try validateAbsolutePath(path);
 
-    for (safe_etc_files) |f| {
-        if (std.mem.eql(u8, path, f)) {
-            if (!readonly) return ApiError.InvalidHostPath;
-            return;
-        }
+    if (isSafeEtcFile(path)) {
+        if (!readonly) return ApiError.InvalidHostPath;
+        return;
     }
     for (blocked_host_prefixes) |prefix| {
         if (isUnder(path, prefix)) return ApiError.InvalidHostPath;
     }
+}
+
+/// Checks symlink targets along `path` (or its deepest existing ancestor when
+/// `path` does not exist yet) so symlinks into blocked roots cannot bypass the
+/// lexical bind-mount deny-list (BUG-025).
+fn validateHostPathSymlinks(path: []const u8, readonly: bool) ApiError!void {
+    var real_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    if (std.fs.cwd().realpath(path, &real_buf)) |real| {
+        if (!std.mem.eql(u8, real, path)) {
+            try validateHostPathLexical(real, readonly);
+        }
+        return;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return ApiError.InvalidHostPath,
+    }
+
+    // Walk up missing components: reject dangling symlinks on any missing node
+    // and re-check the resolved deepest existing ancestor combined with the tail.
+    var cur: []const u8 = path;
+    while (true) {
+        var link_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        if (std.fs.cwd().readLink(cur, &link_buf)) |_| {
+            return ApiError.InvalidHostPath; // dangling symlink cannot be safely verified
+        } else |lerr| switch (lerr) {
+            error.FileNotFound, error.NotLink => {},
+            else => return ApiError.InvalidHostPath,
+        }
+
+        const parent = std.fs.path.dirname(cur) orelse "/";
+        if (std.fs.cwd().realpath(parent, &real_buf)) |real_parent| {
+            const tail = if (std.mem.eql(u8, parent, "/")) path else path[parent.len..];
+            var combined_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            const combined = if (std.mem.eql(u8, real_parent, "/"))
+                tail
+            else
+                std.fmt.bufPrint(&combined_buf, "{s}{s}", .{ real_parent, tail }) catch return ApiError.InvalidHostPath;
+            try validateHostPathLexical(combined, readonly);
+            return;
+        } else |perr| switch (perr) {
+            error.FileNotFound => {
+                if (std.mem.eql(u8, parent, "/")) return;
+                cur = parent;
+            },
+            else => return ApiError.InvalidHostPath,
+        }
+    }
+}
+
+/// Fail-closed host-path policy for bind mounts (BUG-014, BUG-025). Rejects
+/// dangerous system roots, traversal, symlink escapes into blocked prefixes,
+/// dangling symlinks, and read-write mounts of sensitive `/etc` files.
+pub fn validateHostPath(path: []const u8, readonly: bool) ApiError!void {
+    try validateHostPathLexical(path, readonly);
+    try validateHostPathSymlinks(path, readonly);
 }
 
 /// Validates the in-container mount destination (must be an absolute,
@@ -158,7 +216,7 @@ pub fn validatePortMapping(p: PortMapping) ApiError!void {
     if (p.host_port) |hp| {
         if (hp == 0) return ApiError.InvalidPort;
     }
-    if (!(std.mem.eql(u8, p.proto, "tcp") or std.mem.eql(u8, p.proto, "udp") or std.mem.eql(u8, p.proto, "sctp"))) {
+    if (!types.isValidPortProto(p.proto)) {
         return ApiError.InvalidPort;
     }
     if (p.host_ip) |ip| {
@@ -906,5 +964,45 @@ test "loadAndMergeEnv parses safe env files, rejects malformed/symlinks, and fre
 
     // Relative path must fail closed.
     try std.testing.expectError(ApiError.InvalidHostPath, loadAndMergeEnv(alloc, &.{"relative.env"}, &.{}));
+}
+
+test "BUG-025: validateHostPath and makeMount reject symlinks to denied paths" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir_path);
+
+    try tmp.dir.makeDir("safe_dir");
+    const safe_sub = try std.fs.path.join(alloc, &.{ dir_path, "safe_dir" });
+    defer alloc.free(safe_sub);
+
+    try tmp.dir.symLink(safe_sub, "ok_link", .{});
+    try tmp.dir.symLink("/etc", "etc_link", .{});
+    try tmp.dir.symLink("/etc/hosts", "hosts_link", .{});
+    try tmp.dir.symLink("/etc/nonexistent_zigpod_target", "dangling_link", .{});
+
+    const ok_link = try std.fs.path.join(alloc, &.{ dir_path, "ok_link" });
+    defer alloc.free(ok_link);
+    const etc_link = try std.fs.path.join(alloc, &.{ dir_path, "etc_link" });
+    defer alloc.free(etc_link);
+    const etc_link_sub = try std.fs.path.join(alloc, &.{ dir_path, "etc_link", "future_sub" });
+    defer alloc.free(etc_link_sub);
+    const hosts_link = try std.fs.path.join(alloc, &.{ dir_path, "hosts_link" });
+    defer alloc.free(hosts_link);
+    const dangling_link = try std.fs.path.join(alloc, &.{ dir_path, "dangling_link" });
+    defer alloc.free(dangling_link);
+
+    // Safe symlink target inside allowed directory must succeed.
+    const safe_mount = try makeMount(ok_link, "/data", false);
+    try std.testing.expectEqualStrings("bind", safe_mount.Type);
+
+    // Symlinks resolving into denied directories or rw /etc files must fail closed.
+    try std.testing.expectError(ApiError.InvalidHostPath, validateHostPath(etc_link, true));
+    try std.testing.expectError(ApiError.InvalidHostPath, makeMount(etc_link, "/data", true));
+    try std.testing.expectError(ApiError.InvalidHostPath, makeMount(etc_link_sub, "/data", true));
+    try std.testing.expectError(ApiError.InvalidHostPath, makeMount(hosts_link, "/data", false));
+    try std.testing.expectError(ApiError.InvalidHostPath, makeMount(dangling_link, "/data", true));
 }
 

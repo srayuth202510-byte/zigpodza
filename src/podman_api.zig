@@ -143,6 +143,9 @@ pub fn createContainer(
     if (cfg.WorkingDir) |w| try validateWorkdir(w);
     if (cfg.User) |u| try validateUser(u);
     if (cfg.HostConfig) |hc| {
+        if (hc.PortBindings) |pb| {
+            for (pb.ports) |p| try validatePortMapping(p);
+        }
         if (hc.ShmSize) |shm| try validateShmSize(shm);
         if (hc.Ulimits) |ulimits| for (ulimits) |u| try validateUlimit(u);
         if (hc.NanoCpus) |nc| try validateNanoCpus(nc);
@@ -165,7 +168,13 @@ pub fn createContainer(
     });
     defer client.allocator.free(req_body);
 
-    logger.debug("POST {s} body={s}", .{ path_buf.items, req_body });
+    logger.debug("POST {s} (image={s}, env_count={d}, cmd_len={d}, body_len={d})", .{
+        path_buf.items,
+        cfg.Image,
+        if (cfg.Env) |e| e.len else 0,
+        if (cfg.Cmd) |c| c.len else 0,
+        req_body.len,
+    });
     const resp = try client.request("POST", path_buf.items, req_body);
     defer resp.deinit();
 
@@ -512,7 +521,7 @@ pub fn createExec(client: *const http.Client, logger: *log.Logger, container: []
     const body = try std.json.stringifyAlloc(client.allocator, req, .{ .emit_null_optional_fields = false });
     defer client.allocator.free(body);
 
-    logger.debug("POST {s} body={s}", .{ path, body });
+    logger.debug("POST {s} (cmd_len={d}, body_len={d})", .{ path, req.Cmd.len, body.len });
     const resp = try client.request("POST", path, body);
     defer resp.deinit();
     if (!resp.ok()) return logApiFailure(logger, "POST", path, resp);
@@ -542,7 +551,7 @@ pub fn startExec(client: *const http.Client, logger: *log.Logger, exec_id: []con
     const body = try std.json.stringifyAlloc(client.allocator, ExecStartRequest{}, .{});
     defer client.allocator.free(body);
 
-    logger.debug("POST {s} body={s}", .{ path, body });
+    logger.debug("POST {s} (body_len={d})", .{ path, body.len });
     // A command may legitimately stay silent until it exits; use the blocking
     // timeout so long-running commands are not cut off (BUG-007).
     const resp = try client.requestWithTimeout("POST", path, body, http.blocking_timeout_ms);
@@ -627,7 +636,7 @@ pub fn startExecInteractive(
     }, .{});
     defer client.allocator.free(body);
 
-    logger.debug("UPGRADE POST {s} body={s}", .{ path, body });
+    logger.debug("UPGRADE POST {s} (tty={}, body_len={d})", .{ path, tty, body.len });
     const up = try client.upgrade("POST", path, body, http.blocking_timeout_ms);
     defer up.deinit();
 
@@ -1571,4 +1580,92 @@ test "listContainersJson, listImagesJson, inspectJson, and statsContainersJson e
     thread.join();
     joined = true;
     try std.testing.expectEqual(replies.len, ctx.matched);
+}
+
+test "BUG-024: createContainer and createExec never write raw Env or Cmd secrets to logs" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(alloc, "/tmp/zp-api-redact-{d}.sock", .{std.time.nanoTimestamp()});
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir_path);
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const create_body = "{\"Id\":\"abcdef1234567890ff\",\"Warnings\":[]}";
+    const exec_body = "{\"Id\":\"execid123456\"}";
+    const replies = [_]ScriptedReply{
+        .{
+            .expected_prefix = "POST /v1.40/containers/create HTTP/1.1\r\n",
+            .raw_response = try std.fmt.allocPrint(alloc, "HTTP/1.1 201 Created\r\nContent-Length: {d}\r\n\r\n{s}", .{ create_body.len, create_body }),
+        },
+        .{
+            .expected_prefix = "POST /v1.40/containers/box1/exec HTTP/1.1\r\n",
+            .raw_response = try std.fmt.allocPrint(alloc, "HTTP/1.1 201 Created\r\nContent-Length: {d}\r\n\r\n{s}", .{ exec_body.len, exec_body }),
+        },
+    };
+    defer for (replies) |r| alloc.free(r.raw_response);
+
+    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path };
+    var logger = log.Logger.init(dir_path, true);
+    logger.echo_stderr = false;
+    defer logger.deinit();
+
+    const cid = try createContainer(&client, &logger, .{
+        .Image = "alpine:3.20",
+        .Env = &.{"DB_PASSWORD=supersecret999"},
+        .Cmd = &.{ "sh", "-c", "echo cmdsecret888" },
+    }, null);
+    defer alloc.free(cid);
+
+    const eid = try createExec(&client, &logger, "box1", .{
+        .Cmd = &.{ "mysql", "-pexecsecret777" },
+    });
+    defer alloc.free(eid);
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
+
+    const sys_log = try tmp.dir.readFileAlloc(alloc, "system.log", 16384);
+    defer alloc.free(sys_log);
+    const audit_log = try tmp.dir.readFileAlloc(alloc, "audit.log", 16384);
+    defer alloc.free(audit_log);
+
+    for ([_][]const u8{ "supersecret999", "cmdsecret888", "execsecret777" }) |secret| {
+        try std.testing.expect(std.mem.indexOf(u8, sys_log, secret) == null);
+        try std.testing.expect(std.mem.indexOf(u8, audit_log, secret) == null);
+    }
+}
+
+test "BUG-034: createContainer validates HostConfig.PortBindings fail-closed without panicking" {
+    const client = http.Client{
+        .allocator = std.testing.allocator,
+        .socket_path = "/tmp/nonexistent-zigpod-portbindings.sock",
+    };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    const bad_bindings = [_]PortMapping{.{
+        .host_port = 8080,
+        .container_port = 80,
+        .proto = "unexpected-long-proto",
+    }};
+    try std.testing.expectError(
+        ApiError.InvalidPort,
+        createContainer(&client, &logger, .{
+            .Image = "alpine:3.20",
+            .HostConfig = .{ .PortBindings = .{ .ports = &bad_bindings } },
+        }, null),
+    );
 }

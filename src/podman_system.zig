@@ -82,7 +82,7 @@ pub fn createVolume(client: *const http.Client, logger: *log.Logger, name: []con
     const req_body = try std.json.stringifyAlloc(client.allocator, VolumeCreateRequest{ .Name = name }, .{});
     defer client.allocator.free(req_body);
 
-    logger.debug("POST {s} body={s}", .{ path, req_body });
+    logger.debug("POST {s} (volume={s}, body_len={d})", .{ path, name, req_body.len });
     const resp = try client.request("POST", path, req_body);
     defer resp.deinit();
 
@@ -219,7 +219,7 @@ pub fn createNetwork(
     }, .{});
     defer client.allocator.free(req_body);
 
-    logger.debug("POST {s} body={s}", .{ path, req_body });
+    logger.debug("POST {s} (network={s}, body_len={d})", .{ path, name, req_body.len });
     const resp = try client.request("POST", path, req_body);
     defer resp.deinit();
 

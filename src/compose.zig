@@ -742,7 +742,7 @@ fn ensureNetwork(client: *const http.Client, logger: *log.Logger, net: ComposeNe
     defer client.allocator.free(body);
 
     const path = pod.api_prefix ++ "/networks/create";
-    logger.debug("POST {s} body={s}", .{ path, body });
+    logger.debug("POST {s} (network={s}, body_len={d})", .{ path, net.name, body.len });
     const resp = try client.request("POST", path, body);
     defer resp.deinit();
     if (resp.status == 409) return false;
