@@ -452,6 +452,8 @@ pub fn parseComposeYaml(
                         cur_net.driver = drv_dup;
                     } else if (std.mem.eql(u8, pair.key, "internal") and pair.val.len > 0) {
                         cur_net.internal = try parseBoolScalar(pair.val);
+                    } else {
+                        return ComposeError.InvalidComposeSyntax;
                     }
                 }
             },
@@ -478,6 +480,15 @@ pub fn parseComposeYaml(
                 if (cur_subkey != null and indent > cur_subkey_indent) {
                     const sk = cur_subkey.?;
                     if (std.mem.startsWith(u8, body, "- ")) {
+                        const raw_item = std.mem.trim(u8, body[2..], " \t");
+                        // Reject YAML list-of-maps long syntax (e.g. `- type: bind`) fail-closed
+                        // instead of coercing `key: val` into a single bogus item string (BUG-027).
+                        if (!std.mem.eql(u8, sk, "command") and !std.mem.eql(u8, sk, "entrypoint") and
+                            raw_item.len > 0 and raw_item[0] != '"' and raw_item[0] != '\'' and
+                            parseColonPair(raw_item) != null)
+                        {
+                            return ComposeError.InvalidComposeSyntax;
+                        }
                         const item = unquoteScalar(body[2..]);
                         try applyServiceListItem(alloc, svc, sk, item);
                         continue;
@@ -491,7 +502,8 @@ pub fn parseComposeYaml(
 
                 cur_subkey = null;
                 const pair = parseColonPair(body) orelse return ComposeError.InvalidComposeSyntax;
-                if (pair.val.len == 0 or std.mem.eql(u8, pair.val, "|")) {
+                if (pair.val.len == 0) {
+                    if (!isServiceListKey(pair.key)) return ComposeError.InvalidComposeSyntax;
                     cur_subkey = pair.key;
                     cur_subkey_indent = indent;
                     continue;
@@ -505,6 +517,17 @@ pub fn parseComposeYaml(
     if (services.items.len == 0) return ComposeError.InvalidComposeSyntax;
     for (services.items) |s| {
         if (s.image.len == 0) return ComposeError.MissingServiceImage;
+        if (s.network_mode != null and s.networks.len > 0) return ComposeError.InvalidComposeSyntax;
+        for (s.networks) |net_name| {
+            var declared = false;
+            for (networks.items) |n| {
+                if (std.mem.eql(u8, n.name, net_name)) {
+                    declared = true;
+                    break;
+                }
+            }
+            if (!declared) return ComposeError.InvalidComposeSyntax;
+        }
     }
 
     const svc_slice = try services.toOwnedSlice();
@@ -521,10 +544,25 @@ pub fn parseComposeYaml(
     };
 }
 
+fn isServiceListKey(key: []const u8) bool {
+    return std.mem.eql(u8, key, "ports") or
+        std.mem.eql(u8, key, "volumes") or
+        std.mem.eql(u8, key, "environment") or
+        std.mem.eql(u8, key, "env_file") or
+        std.mem.eql(u8, key, "labels") or
+        std.mem.eql(u8, key, "depends_on") or
+        std.mem.eql(u8, key, "networks") or
+        std.mem.eql(u8, key, "cap_drop") or
+        std.mem.eql(u8, key, "cap_add") or
+        std.mem.eql(u8, key, "command") or
+        std.mem.eql(u8, key, "entrypoint");
+}
+
 fn applyServiceListItem(alloc: std.mem.Allocator, svc: *ComposeService, key: []const u8, item: []const u8) !void {
     if (std.mem.eql(u8, key, "ports")) {
         try appendDupPort(alloc, &svc.ports, try cli_specs.parsePortSpec(item));
     } else if (std.mem.eql(u8, key, "volumes")) {
+        if (parseColonPair(item) != null) return ComposeError.InvalidComposeSyntax;
         try appendDupVolume(alloc, &svc.volumes, try cli_specs.parseVolumeSpec(item));
     } else if (std.mem.eql(u8, key, "environment")) {
         if (std.mem.indexOfScalar(u8, item, '=') == null) return ComposeError.InvalidComposeSyntax;
@@ -547,6 +585,8 @@ fn applyServiceListItem(alloc: std.mem.Allocator, svc: *ComposeService, key: []c
         try appendDupStr(alloc, &svc.cmd, item);
     } else if (std.mem.eql(u8, key, "entrypoint")) {
         try appendDupStr(alloc, &svc.entrypoint, try cli_specs.parseEntrypoint(item));
+    } else {
+        return ComposeError.InvalidComposeSyntax;
     }
 }
 
@@ -571,10 +611,14 @@ fn applyServiceMapItem(
     } else if (std.mem.eql(u8, key, "networks")) {
         try pod.validateIdentifier(sub_key);
         try appendDupStr(alloc, &svc.networks, sub_key);
+    } else {
+        return ComposeError.InvalidComposeSyntax;
     }
 }
 
 fn applyServiceScalarOrFlow(alloc: std.mem.Allocator, svc: *ComposeService, key: []const u8, val_raw: []const u8) !void {
+    const trimmed = std.mem.trim(u8, val_raw, " \t");
+    if (trimmed.len > 0 and trimmed[0] == '{') return ComposeError.InvalidComposeSyntax;
     const val = unquoteScalar(val_raw);
     if (std.mem.eql(u8, key, "image")) {
         const img = try alloc.dupe(u8, val);
@@ -623,8 +667,6 @@ fn applyServiceScalarOrFlow(alloc: std.mem.Allocator, svc: *ComposeService, key:
         svc.pids_limit = try cli_specs.parsePidsLimit(val);
     } else if (std.mem.eql(u8, key, "cpus")) {
         svc.nano_cpus = try cli_specs.parseCpuNanos(val);
-    } else if (std.mem.eql(u8, key, "env_file")) {
-        try appendDupStr(alloc, &svc.env_files, try cli_specs.parseEnvFilePath(val));
     } else if (std.mem.eql(u8, key, "command")) {
         const words = try splitCommandWords(alloc, val_raw);
         ComposeService.freeStrList(alloc, svc.cmd);
@@ -633,13 +675,20 @@ fn applyServiceScalarOrFlow(alloc: std.mem.Allocator, svc: *ComposeService, key:
         const words = try splitCommandWords(alloc, val_raw);
         ComposeService.freeStrList(alloc, svc.entrypoint);
         svc.entrypoint = words;
-    } else if (std.mem.trim(u8, val_raw, " \t").len >= 2 and std.mem.trim(u8, val_raw, " \t")[0] == '[') {
-        const items = try splitFlowList(alloc, val_raw);
-        defer {
-            for (items) |it| alloc.free(it);
-            alloc.free(items);
+    } else if (isServiceListKey(key)) {
+        if (trimmed.len >= 2 and trimmed[0] == '[') {
+            const items = try splitFlowList(alloc, val_raw);
+            defer {
+                for (items) |it| alloc.free(it);
+                alloc.free(items);
+            }
+            for (items) |it| try applyServiceListItem(alloc, svc, key, it);
+        } else {
+            // Support single scalar values for list keys instead of dropping them silently (BUG-027).
+            try applyServiceListItem(alloc, svc, key, val);
         }
-        for (items) |it| try applyServiceListItem(alloc, svc, key, it);
+    } else {
+        return ComposeError.InvalidComposeSyntax;
     }
 }
 
@@ -761,6 +810,30 @@ fn deleteIfExists(client: *const http.Client, logger: *log.Logger, kind: []const
     if (resp.status == 404) return false;
     if (!resp.ok()) return pod.validate.logApiFailure(logger, "DELETE", path, resp);
     return true;
+}
+
+/// Best-effort rollback of containers and newly created networks when `compose up`
+/// fails midway so daemon state never stays half-applied (BUG-029).
+fn rollbackComposeUp(
+    client: *const http.Client,
+    logger: *log.Logger,
+    created_cnames: []const []const u8,
+    created_nets: []const []const u8,
+) void {
+    var ci = created_cnames.len;
+    while (ci > 0) {
+        ci -= 1;
+        _ = deleteIfExists(client, logger, "containers", created_cnames[ci]) catch |err| {
+            logger.warn("compose rollback failed to remove container {s}: {s}", .{ created_cnames[ci], @errorName(err) });
+        };
+    }
+    var ni = created_nets.len;
+    while (ni > 0) {
+        ni -= 1;
+        _ = deleteIfExists(client, logger, "networks", created_nets[ni]) catch |err| {
+            logger.warn("compose rollback failed to remove network {s}: {s}", .{ created_nets[ni], @errorName(err) });
+        };
+    }
 }
 
 /// Lists only containers labelled with this compose project.
@@ -890,6 +963,15 @@ pub fn executeCompose(
                 };
                 if (pol_opt) |pol| {
                     if (opts.profile == .sandbox) policy.applySandboxDefaults(&run_opts);
+                    if (svc.networks.len > 0) {
+                        for (svc.networks) |net_name| {
+                            if (!policy.isNetworkAllowed(pol, net_name)) {
+                                logger.deny("policy.allowed_networks", "compose service network blocked by pre-flight policy");
+                                return pod.ApiError.PolicyViolation;
+                            }
+                        }
+                        run_opts.network = svc.networks[0];
+                    }
                     if (policy.checkRunPolicy(run_opts, pol)) |rule| {
                         logger.deny(rule, "compose service blocked by pre-flight policy");
                         return pod.ApiError.PolicyViolation;
@@ -897,8 +979,22 @@ pub fn executeCompose(
                 }
             }
 
+            var created_nets = std.ArrayList([]const u8).init(alloc);
+            defer created_nets.deinit();
+
+            var created_cnames = std.ArrayList([]const u8).init(alloc);
+            defer {
+                for (created_cnames.items) |cn| alloc.free(cn);
+                created_cnames.deinit();
+            }
+
+            // Registered after buffer defers so Zig LIFO errdefer cleans daemon state first.
+            errdefer rollbackComposeUp(client, logger, created_cnames.items, created_nets.items);
+
             for (cf.networks) |net| {
-                _ = try ensureNetwork(client, logger, net);
+                if (try ensureNetwork(client, logger, net)) {
+                    try created_nets.append(net.name);
+                }
             }
 
             for (order) |idx| {
@@ -922,6 +1018,14 @@ pub fn executeCompose(
                 defer lbl_list.deinit();
                 try lbl_list.append(.{ .key = "com.docker.compose.project", .value = cf.project });
                 try lbl_list.append(.{ .key = "com.docker.compose.service", .value = svc.name });
+                var net_label_owned: ?[]u8 = null;
+                defer if (net_label_owned) |nl| alloc.free(nl);
+                if (svc.networks.len == 1) {
+                    try lbl_list.append(.{ .key = "com.docker.compose.network", .value = svc.networks[0] });
+                } else if (svc.networks.len > 1) {
+                    net_label_owned = try std.mem.join(alloc, ",", svc.networks);
+                    try lbl_list.append(.{ .key = "com.docker.compose.network", .value = net_label_owned.? });
+                }
                 for (svc.labels) |l| try lbl_list.append(.{ .key = l.key, .value = l.value });
 
                 var run_opts = cli.RunOpts{
@@ -961,15 +1065,24 @@ pub fn executeCompose(
                         .RestartPolicy = if (svc.restart_name) |rn| .{ .Name = rn, .MaximumRetryCount = svc.restart_max_retries } else null,
                         .SecurityOpt = if (run_opts.no_new_privileges) &.{"no-new-privileges"} else null,
                         .PortBindings = if (port_list.items.len > 0) .{ .ports = port_list.items } else null,
-                        .NetworkMode = run_opts.network,
+                        .NetworkMode = if (svc.networks.len > 0) null else run_opts.network,
                         .CapDrop = if (run_opts.cap_drop.len > 0) run_opts.cap_drop else null,
                         .CapAdd = if (run_opts.cap_add.len > 0) run_opts.cap_add else null,
                         .Tmpfs = tmpfs_bounds,
                     },
+                    .NetworkingConfig = if (svc.networks.len > 0) .{
+                        .EndpointsConfig = .{ .networks = svc.networks },
+                    } else null,
                 };
 
-                const cid = try pod.createContainer(client, logger, req, cname);
+                try created_cnames.ensureUnusedCapacity(1);
+                const cname_dup = try alloc.dupe(u8, cname);
+                const cid = pod.createContainer(client, logger, req, cname) catch |err| {
+                    alloc.free(cname_dup);
+                    return err;
+                };
                 defer alloc.free(cid);
+                created_cnames.appendAssumeCapacity(cname_dup);
                 try pod.startContainer(client, logger, cid);
                 try stdout.print("{s} ({s}) started\n", .{ cname, utils.shortId(cid) });
             }
@@ -1247,4 +1360,344 @@ test "executeCompose up, ps, down, and sandbox pre-flight denial over mock socke
     try std.testing.expect(std.mem.indexOf(u8, out.items, "postgres:16-alpine") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "demo_api_1 removed") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "demo_db_1 absent") != null);
+}
+
+test "BUG-027: scalar list values parsed and long-syntax or unknown keys rejected" {
+    const alloc = std.testing.allocator;
+    const yaml =
+        \\networks:
+        \\  back:
+        \\    driver: bridge
+        \\services:
+        \\  app:
+        \\    image: alpine:3.20
+        \\    environment: FOO=bar
+        \\    depends_on: db
+        \\    volumes: ./data:/data:ro
+        \\    networks: back
+        \\    ports: 8080:80
+        \\    labels: app=web
+        \\    cap_drop: ALL
+        \\  db:
+        \\    image: postgres:16-alpine
+    ;
+    var cf = try parseComposeYaml(alloc, yaml, "demo", "/tmp");
+    defer cf.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), cf.services[0].env.len);
+    try std.testing.expectEqualStrings("FOO=bar", cf.services[0].env[0]);
+    try std.testing.expectEqual(@as(usize, 1), cf.services[0].depends_on.len);
+    try std.testing.expectEqualStrings("db", cf.services[0].depends_on[0]);
+    try std.testing.expectEqual(@as(usize, 1), cf.services[0].volumes.len);
+    try std.testing.expectEqualStrings("./data", cf.services[0].volumes[0].source);
+    try std.testing.expectEqualStrings("/data", cf.services[0].volumes[0].destination);
+    try std.testing.expect(cf.services[0].volumes[0].readonly);
+    try std.testing.expectEqual(@as(usize, 1), cf.services[0].networks.len);
+    try std.testing.expectEqualStrings("back", cf.services[0].networks[0]);
+    try std.testing.expectEqual(@as(usize, 1), cf.services[0].ports.len);
+    try std.testing.expectEqual(@as(u16, 80), cf.services[0].ports[0].container_port);
+    try std.testing.expectEqual(@as(usize, 1), cf.services[0].labels.len);
+    try std.testing.expectEqualStrings("app", cf.services[0].labels[0].key);
+    try std.testing.expectEqual(@as(usize, 1), cf.services[0].cap_drop.len);
+    try std.testing.expectEqualStrings("ALL", cf.services[0].cap_drop[0]);
+
+    const invalid_cases = [_][]const u8{
+        // Long-syntax list-of-maps under volumes
+        \\services:
+        \\  app:
+        \\    image: alpine:3.20
+        \\    volumes:
+        \\      - type: bind
+        \\        source: ./data
+        \\        target: /data
+        ,
+        // Indented map keys directly under volumes
+        \\services:
+        \\  app:
+        \\    image: alpine:3.20
+        \\    volumes:
+        \\      source: ./data
+        \\      target: /data
+        ,
+        // Inline flow map
+        \\services:
+        \\  app:
+        \\    image: alpine:3.20
+        \\    volumes: { type: bind }
+        ,
+        // Unknown scalar property
+        \\services:
+        \\  app:
+        \\    image: alpine:3.20
+        \\    privileged: true
+        ,
+        // Unknown empty block property
+        \\services:
+        \\  app:
+        \\    image: alpine:3.20
+        \\    build:
+        ,
+        // Unknown top-level network subkey
+        \\networks:
+        \\  back:
+        \\    ipam: custom
+        \\services:
+        \\  app:
+        \\    image: alpine:3.20
+        ,
+    };
+    for (invalid_cases) |bad_yaml| {
+        try std.testing.expectError(ComposeError.InvalidComposeSyntax, parseComposeYaml(alloc, bad_yaml, "demo", "/tmp"));
+    }
+}
+
+test "BUG-028: compose service networks attach container, label network, and enforce policy" {
+    const th = @import("podman_test_helpers.zig");
+    const alloc = std.testing.allocator;
+
+    // 1) Undeclared network reference & conflicting network_mode + networks must fail closed.
+    const undeclared_yaml =
+        \\networks:
+        \\  back:
+        \\    driver: bridge
+        \\services:
+        \\  api:
+        \\    image: alpine:3.20
+        \\    networks: [missing]
+    ;
+    try std.testing.expectError(ComposeError.InvalidComposeSyntax, parseComposeYaml(alloc, undeclared_yaml, "demo", "/tmp"));
+
+    const conflict_yaml =
+        \\networks:
+        \\  back:
+        \\    driver: bridge
+        \\services:
+        \\  api:
+        \\    image: alpine:3.20
+        \\    network_mode: none
+        \\    networks: [back]
+    ;
+    try std.testing.expectError(ComposeError.InvalidComposeSyntax, parseComposeYaml(alloc, conflict_yaml, "demo", "/tmp"));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir_path);
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "compose.yaml",
+        .data =
+        \\name: demo
+        \\networks:
+        \\  back:
+        \\    driver: bridge
+        \\services:
+        \\  api:
+        \\    image: alpine:3.20
+        \\    networks: [back]
+        \\  worker:
+        \\    image: alpine:3.20
+        \\    depends_on: [api]
+        \\    networks: [back]
+    });
+    const compose_path = try std.fs.path.join(alloc, &.{ dir_path, "compose.yaml" });
+    defer alloc.free(compose_path);
+
+    var logger = log.Logger.init(dir_path, false);
+    defer logger.deinit();
+    logger.echo_stderr = false;
+
+    // 2) Under sandbox profile, non-allow-listed compose networks fail pre-flight before socket I/O.
+    const unused_sock = try std.fs.path.join(alloc, &.{ dir_path, "unused.sock" });
+    defer alloc.free(unused_sock);
+    const sandbox_client = http.Client{ .allocator = alloc, .socket_path = unused_sock };
+    var deny_out = std.ArrayList(u8).init(alloc);
+    defer deny_out.deinit();
+    try std.testing.expectError(
+        pod.ApiError.PolicyViolation,
+        executeCompose(&sandbox_client, &logger, .{ .action = .up, .file = compose_path, .profile = .sandbox }, deny_out.writer()),
+    );
+
+    // 3) In standard profile, containers receive both compose network label and NetworkingConfig.EndpointsConfig.
+    const sock_path = try std.fs.path.join(alloc, &.{ dir_path, "podman.sock" });
+    defer alloc.free(sock_path);
+    const addr = try std.net.Address.initUnix(sock_path);
+    var server = try addr.listen(.{});
+    defer server.deinit();
+
+    const net_resp = "{\"Id\":\"net123456\"}";
+    const api_resp = "{\"Id\":\"api123456789000\"}";
+    const wrk_resp = "{\"Id\":\"wrk123456789000\"}";
+    const replies = [_]th.ScriptedReply{
+        .{
+            .expected_prefix = "POST /v1.40/networks/create HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint(
+                "HTTP/1.1 201 Created\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ net_resp.len, net_resp },
+            ),
+        },
+        .{
+            .expected_prefix = "POST /v1.40/containers/create?name=demo_api_1 HTTP/1.1\r\n",
+            .expected_substring = "\"com.docker.compose.network\":\"back\"",
+            .raw_response = std.fmt.comptimePrint(
+                "HTTP/1.1 201 Created\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ api_resp.len, api_resp },
+            ),
+        },
+        .{
+            .expected_prefix = "POST /v1.40/containers/api123456789000/start HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 204 No Content\r\n\r\n",
+        },
+        .{
+            .expected_prefix = "POST /v1.40/containers/create?name=demo_worker_1 HTTP/1.1\r\n",
+            .expected_substring = "\"NetworkingConfig\":{\"EndpointsConfig\":{\"back\":{}}}",
+            .raw_response = std.fmt.comptimePrint(
+                "HTTP/1.1 201 Created\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ wrk_resp.len, wrk_resp },
+            ),
+        },
+        .{
+            .expected_prefix = "POST /v1.40/containers/wrk123456789000/start HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 204 No Content\r\n\r\n",
+        },
+    };
+
+    var ctx = th.MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, th.runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path };
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    try executeCompose(&client, &logger, .{ .action = .up, .file = compose_path }, out.writer());
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
+}
+
+test "BUG-029: compose up rolls back created containers and newly created networks on partial failure" {
+    const th = @import("podman_test_helpers.zig");
+    const alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir_path);
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "compose.yaml",
+        .data =
+        \\name: demo
+        \\networks:
+        \\  back:
+        \\    driver: bridge
+        \\services:
+        \\  api:
+        \\    image: alpine:3.20
+        \\    depends_on: [db]
+        \\  db:
+        \\    image: postgres:16-alpine
+    });
+    const compose_path = try std.fs.path.join(alloc, &.{ dir_path, "compose.yaml" });
+    defer alloc.free(compose_path);
+
+    const sock_path = try std.fs.path.join(alloc, &.{ dir_path, "podman.sock" });
+    defer alloc.free(sock_path);
+    const addr = try std.net.Address.initUnix(sock_path);
+    var server = try addr.listen(.{});
+    defer server.deinit();
+
+    var logger = log.Logger.init(dir_path, false);
+    defer logger.deinit();
+    logger.echo_stderr = false;
+
+    const net_resp = "{\"Id\":\"net123456\"}";
+    const db_resp = "{\"Id\":\"db123456789000\"}";
+    const err_resp = "{\"message\":\"failed\"}";
+    const conflict_resp = "{\"message\":\"already exists\"}";
+    // Case A: service 2 fails in createContainer -> rolls back demo_db_1 and newly created `back`.
+    // Case B: pre-existing network returns 409; service 1 fails in startContainer -> rolls back demo_db_1, leaves `back`.
+    const replies = [_]th.ScriptedReply{
+        .{
+            .expected_prefix = "POST /v1.40/networks/create HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint(
+                "HTTP/1.1 201 Created\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ net_resp.len, net_resp },
+            ),
+        },
+        .{
+            .expected_prefix = "POST /v1.40/containers/create?name=demo_db_1 HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint(
+                "HTTP/1.1 201 Created\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ db_resp.len, db_resp },
+            ),
+        },
+        .{
+            .expected_prefix = "POST /v1.40/containers/db123456789000/start HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 204 No Content\r\n\r\n",
+        },
+        .{
+            .expected_prefix = "POST /v1.40/containers/create?name=demo_api_1 HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint(
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ err_resp.len, err_resp },
+            ),
+        },
+        .{
+            .expected_prefix = "DELETE /v1.40/containers/demo_db_1?force=true HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 204 No Content\r\n\r\n",
+        },
+        .{
+            .expected_prefix = "DELETE /v1.40/networks/back?force=true HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 204 No Content\r\n\r\n",
+        },
+        .{
+            .expected_prefix = "POST /v1.40/networks/create HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint(
+                "HTTP/1.1 409 Conflict\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ conflict_resp.len, conflict_resp },
+            ),
+        },
+        .{
+            .expected_prefix = "POST /v1.40/containers/create?name=demo_db_1 HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint(
+                "HTTP/1.1 201 Created\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ db_resp.len, db_resp },
+            ),
+        },
+        .{
+            .expected_prefix = "POST /v1.40/containers/db123456789000/start HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint(
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ err_resp.len, err_resp },
+            ),
+        },
+        .{
+            .expected_prefix = "DELETE /v1.40/containers/demo_db_1?force=true HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 204 No Content\r\n\r\n",
+        },
+    };
+
+    var ctx = th.MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, th.runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path };
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    try std.testing.expectError(
+        pod.ApiError.PodmanApiError,
+        executeCompose(&client, &logger, .{ .action = .up, .file = compose_path }, out.writer()),
+    );
+    try std.testing.expectError(
+        pod.ApiError.PodmanApiError,
+        executeCompose(&client, &logger, .{ .action = .up, .file = compose_path }, out.writer()),
+    );
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
 }

@@ -179,6 +179,27 @@ pub const LabelsMap = struct {
     }
 };
 
+/// Serializes Docker/Podman `NetworkingConfig.EndpointsConfig` mapping each
+/// attached network name to `{}` so containers join user-defined compose
+/// networks without weakening `HostConfig.NetworkMode`.
+pub const NetworkEndpointsMap = struct {
+    networks: []const []const u8,
+
+    pub fn jsonStringify(self: NetworkEndpointsMap, jw: anytype) !void {
+        try jw.beginObject();
+        for (self.networks) |net_name| {
+            try jw.objectField(net_name);
+            try jw.beginObject();
+            try jw.endObject();
+        }
+        try jw.endObject();
+    }
+};
+
+pub const NetworkingConfig = struct {
+    EndpointsConfig: NetworkEndpointsMap,
+};
+
 pub const ContainerCreateRequest = struct {
     Image: []const u8,
     Hostname: ?[]const u8 = null,
@@ -197,6 +218,7 @@ pub const ContainerCreateRequest = struct {
     Tty: bool = false,
     Mounts: ?[]const Mount = null,
     HostConfig: ?HostConfig = null,
+    NetworkingConfig: ?NetworkingConfig = null,
 };
 
 pub const CreateResponse = struct {

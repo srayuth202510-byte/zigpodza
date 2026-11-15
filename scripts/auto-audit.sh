@@ -203,6 +203,26 @@ else
     fail "Missing HostConfig.PortBindings validation or unsafe catch unreachable remains (see BUG-034)."
 fi
 
+# 8j. Require fail-closed compose property parsing, service network wiring, and partial-up rollback (BUG-027 / BUG-028 / BUG-029)
+if has_match 'isServiceListKey\(' "src/compose.zig" && has_match 'NetworkingConfig' "src/compose.zig" && has_match 'com\.docker\.compose\.network' "src/compose.zig" && has_match 'rollbackComposeUp' "src/compose.zig"; then
+    pass "Compose fail-closed list/scalar parsing, network attachment, and rollback enforced (BUG-027/BUG-028/BUG-029)."
+else
+    fail "Missing fail-closed compose parser guards, service network attachment, or up rollback (see BUG-027/BUG-028/BUG-029)."
+fi
+
+# 8k. Require write-path audit tail repair under lock and shared complete-entry verification (BUG-030 / BUG-036)
+REPAIR_CALLS=0
+if command -v rg >/dev/null 2>&1; then
+    REPAIR_CALLS="$(rg -c 'repairAuditTail\(f\);' "src/log.zig" 2>/dev/null || echo 0)"
+else
+    REPAIR_CALLS="$(grep -Ec 'repairAuditTail\(f\);' "src/log.zig" 2>/dev/null || echo 0)"
+fi
+if [[ "$REPAIR_CALLS" -ge 2 ]] && has_match 'evaluateAuditContent' "src/log.zig" && has_match 'parseAuditFields\(' "src/log.zig"; then
+    pass "Audit write-path tail repair (init+log) and shared complete-entry verification enforced (BUG-030/BUG-036)."
+else
+    fail "Missing write-path audit tail repair in Logger.log or shared complete-entry verification (see BUG-030/BUG-036)."
+fi
+
 # 9. Run security-check.sh (includes zig build test & ELF hardening when zig is installed)
 SEC_OUT=""
 if SEC_OUT="$("$ROOT_DIR/scripts/security-check.sh" 2>&1)"; then

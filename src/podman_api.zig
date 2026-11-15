@@ -154,6 +154,15 @@ pub fn createContainer(
         if (hc.CapDrop) |caps| for (caps) |c| try validateCapability(c);
         if (hc.CapAdd) |caps| for (caps) |c| try validateCapability(c);
     }
+    if (cfg.NetworkingConfig) |nc| {
+        if (nc.EndpointsConfig.networks.len == 0) return ApiError.InvalidNetwork;
+        for (nc.EndpointsConfig.networks) |net_name| {
+            validateIdentifier(net_name) catch return ApiError.InvalidNetwork;
+        }
+        if (cfg.HostConfig) |hc| {
+            if (hc.NetworkMode != null) return ApiError.InvalidNetwork;
+        }
+    }
 
     var path_buf = std.ArrayList(u8).init(client.allocator);
     defer path_buf.deinit();
@@ -918,6 +927,21 @@ test "end-to-end container lifecycle over mock Unix socket has zero memory leaks
     try std.testing.expectError(
         ApiError.InvalidNetwork,
         createContainer(&client, &logger, .{ .Image = "alpine:3.20", .HostConfig = .{ .NetworkMode = "bogus" } }, null),
+    );
+    try std.testing.expectError(
+        ApiError.InvalidNetwork,
+        createContainer(&client, &logger, .{
+            .Image = "alpine:3.20",
+            .NetworkingConfig = .{ .EndpointsConfig = .{ .networks = &.{"../evil"} } },
+        }, null),
+    );
+    try std.testing.expectError(
+        ApiError.InvalidNetwork,
+        createContainer(&client, &logger, .{
+            .Image = "alpine:3.20",
+            .HostConfig = .{ .NetworkMode = "none" },
+            .NetworkingConfig = .{ .EndpointsConfig = .{ .networks = &.{"back"} } },
+        }, null),
     );
     try std.testing.expectError(
         ApiError.InvalidWorkdir,

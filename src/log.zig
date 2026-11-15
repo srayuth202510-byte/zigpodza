@@ -100,11 +100,12 @@ pub const Logger = struct {
             const audit_msg = sanitizeAuditField(&audit_msg_buf, raw_msg);
             const ts_end = std.mem.indexOfScalar(u8, line.text, ' ') orelse 0;
             const ts_str = line.text[0..ts_end];
-            // BUG-009: hold an exclusive lock and re-read the current chain
-            // head from the file so interleaved zigpod processes never fork
-            // the hash chain.
+            // BUG-009/BUG-030: hold an exclusive lock, repair any partial tail
+            // caused by prior write errors, and re-read the chain head before
+            // computing and appending the next entry hash.
             lockAudit(f);
             defer unlockAudit(f);
+            repairAuditTail(f);
             const prev_hash = lastHashFromFd(f.handle);
             const entry_hash = computeEntryHash(ts_str, level.label(), &prev_hash, audit_msg);
             var audit_buf: [4400]u8 = undefined;
@@ -185,10 +186,45 @@ fn preadAll(fd: std.posix.fd_t, buf: []u8, offset: u64) usize {
     return total;
 }
 
-/// BUG-008: truncate an incomplete trailing line left behind when a previous
-/// process crashed mid-append. The partial line was never committed to the
-/// chain (no successor ever referenced its hash), so removing it restores a
-/// verifiable chain instead of poisoning every future verification.
+const AuditLineFields = struct {
+    ts: []const u8,
+    level: []const u8,
+    prev_hash: []const u8,
+    entry_hash: []const u8,
+    msg: []const u8,
+};
+
+fn parseAuditFields(line: []const u8) ?AuditLineFields {
+    var parts = std.mem.splitScalar(u8, line, '\t');
+    const ts = parts.next() orelse return null;
+    const level = parts.next() orelse return null;
+    const prev_hash = parts.next() orelse return null;
+    const entry_hash = parts.next() orelse return null;
+    const msg = parts.next() orelse return null;
+    if (parts.next() != null) return null;
+    if (!isHex64(prev_hash) or !isHex64(entry_hash)) return null;
+    return .{
+        .ts = ts,
+        .level = level,
+        .prev_hash = prev_hash,
+        .entry_hash = entry_hash,
+        .msg = msg,
+    };
+}
+
+fn verifyAuditLine(line: []const u8, expected_prev: *[64]u8) AuditError!AuditLineFields {
+    const fields = parseAuditFields(line) orelse return AuditError.InvalidAuditFormat;
+    if (!std.mem.eql(u8, fields.prev_hash, expected_prev)) return AuditError.AuditTampered;
+    const computed = computeEntryHash(fields.ts, fields.level, expected_prev, fields.msg);
+    if (!std.mem.eql(u8, fields.entry_hash, &computed)) return AuditError.AuditTampered;
+    expected_prev.* = computed;
+    return fields;
+}
+
+/// BUG-008/BUG-030: truncate an incomplete trailing line left behind when a
+/// previous write stopped mid-append, unless the tail already parses as a
+/// complete 5-field entry missing only its trailing `\n` (in which case `\n`
+/// is restored rather than discarding committed data or tamper evidence).
 fn repairAuditTail(f: std.fs.File) void {
     const stat = f.stat() catch return;
     if (stat.size == 0) return;
@@ -200,12 +236,24 @@ fn repairAuditTail(f: std.fs.File) void {
         // No newline in the window: either the whole file is one partial
         // line (start == 0) or the partial tail exceeds the writer's max
         // line size; only the former is safe to repair here.
-        if (start == 0) std.posix.ftruncate(f.handle, 0) catch {};
+        if (start == 0) {
+            const tail = std.mem.trimRight(u8, buf[0..n], "\r");
+            if (parseAuditFields(tail) != null) {
+                _ = f.writeAll("\n") catch {};
+            } else {
+                std.posix.ftruncate(f.handle, 0) catch {};
+            }
+        }
         return;
     };
     const complete_end: u64 = start + @as(u64, last_nl) + 1;
     if (complete_end < stat.size) {
-        std.posix.ftruncate(f.handle, complete_end) catch {};
+        const tail = std.mem.trimRight(u8, buf[last_nl + 1 .. n], "\r");
+        if (parseAuditFields(tail) != null) {
+            _ = f.writeAll("\n") catch {};
+        } else {
+            std.posix.ftruncate(f.handle, complete_end) catch {};
+        }
     }
 }
 
@@ -226,51 +274,67 @@ fn lastHashFromFd(fd: std.posix.fd_t) [64]u8 {
 
     const last_nl = std.mem.lastIndexOfScalar(u8, trimmed, '\n');
     const last_line = if (last_nl) |idx| trimmed[idx + 1 ..] else trimmed;
-
-    var parts = std.mem.splitScalar(u8, last_line, '\t');
-    _ = parts.next() orelse return genesis;
-    _ = parts.next() orelse return genesis;
-    _ = parts.next() orelse return genesis;
-    const hash = parts.next() orelse return genesis;
-    if (!isHex64(hash)) return genesis;
+    const fields = parseAuditFields(last_line) orelse return genesis;
     var out: [64]u8 = undefined;
-    @memcpy(&out, hash);
+    @memcpy(&out, fields.entry_hash);
+    return out;
+}
+
+const AuditEvaluation = struct {
+    entries: usize = 0,
+    error_events: usize = 0,
+    head_hash: [64]u8 = [_]u8{'0'} ** 64,
+    failure: ?AuditError = null,
+};
+
+fn evaluateAuditContent(
+    content: []const u8,
+    deny_list: ?*std.ArrayList(AuditDenyRecord),
+) !AuditEvaluation {
+    var out = AuditEvaluation{};
+    if (content.len == 0) return out;
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |raw_line| {
+        if (raw_line.len == 0) {
+            if (lines.peek() == null) break;
+            continue;
+        }
+        const line = std.mem.trimRight(u8, raw_line, "\r");
+        // An unterminated trailing slice is treated as an uncommitted crash
+        // partial line (BUG-008) ONLY if it does not parse as a complete
+        // 5-field audit record (BUG-036).
+        if (lines.peek() == null and parseAuditFields(line) == null) break;
+
+        const fields = verifyAuditLine(line, &out.head_hash) catch |err| {
+            out.failure = err;
+            return out;
+        };
+        out.entries += 1;
+        if (std.mem.eql(u8, fields.level, "ERROR")) out.error_events += 1;
+        if (deny_list) |list| {
+            if (parseDenyMessage(fields.msg)) |d| {
+                try list.append(.{
+                    .timestamp = fields.ts,
+                    .rule = d.rule,
+                    .detail = d.detail,
+                    .hash = fields.entry_hash,
+                });
+            }
+        }
+    }
     return out;
 }
 
 /// Verifies the SHA-256 hash chain in `path`. Returns the verified entry count.
-/// A trailing line without a terminating newline is an uncommitted partial
-/// write (crash mid-append, BUG-008): it is skipped, not counted, and is not
-/// treated as tampering.
+/// An unterminated trailing line is ignored as an uncommitted crash tail ONLY
+/// when it does not parse as a complete 5-field entry (BUG-008, BUG-036).
 pub fn verifyAuditFile(allocator: std.mem.Allocator, path: []const u8) !usize {
     const content = try std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024 * 1024);
     defer allocator.free(content);
-    if (content.len == 0) return 0;
-
-    var expected_prev = [_]u8{'0'} ** 64;
-    var count: usize = 0;
-    var lines = std.mem.splitScalar(u8, content, '\n');
-    while (lines.next()) |raw_line| {
-        if (lines.peek() == null) break; // trailing "" or uncommitted partial line
-        if (raw_line.len == 0) continue;
-        const line = std.mem.trimRight(u8, raw_line, "\r");
-        var parts = std.mem.splitScalar(u8, line, '\t');
-        const ts_str = parts.next() orelse return AuditError.InvalidAuditFormat;
-        const level_str = parts.next() orelse return AuditError.InvalidAuditFormat;
-        const prev_hash = parts.next() orelse return AuditError.InvalidAuditFormat;
-        const entry_hash = parts.next() orelse return AuditError.InvalidAuditFormat;
-        const msg = parts.next() orelse return AuditError.InvalidAuditFormat;
-        if (parts.next() != null) return AuditError.InvalidAuditFormat;
-        if (!isHex64(prev_hash) or !isHex64(entry_hash)) return AuditError.InvalidAuditFormat;
-
-        if (!std.mem.eql(u8, prev_hash, &expected_prev)) return AuditError.AuditTampered;
-        const computed = computeEntryHash(ts_str, level_str, &expected_prev, msg);
-        if (!std.mem.eql(u8, entry_hash, &computed)) return AuditError.AuditTampered;
-
-        expected_prev = computed;
-        count += 1;
-    }
-    return count;
+    const eval = try evaluateAuditContent(content, null);
+    if (eval.failure) |err| return err;
+    return eval.entries;
 }
 
 pub const AuditDenyRecord = struct {
@@ -316,82 +380,20 @@ pub fn writeAuditJson(allocator: std.mem.Allocator, path: []const u8, writer: an
     var deny_list = std.ArrayList(AuditDenyRecord).init(allocator);
     defer deny_list.deinit();
 
-    var expected_prev = [_]u8{'0'} ** 64;
-    var count: usize = 0;
-    var error_count: usize = 0;
-    var valid = true;
-    var failure_reason: ?[]const u8 = null;
-
-    if (content.len > 0) {
-        var lines = std.mem.splitScalar(u8, content, '\n');
-        while (lines.next()) |raw_line| {
-            if (lines.peek() == null) break;
-            if (raw_line.len == 0) continue;
-            const line = std.mem.trimRight(u8, raw_line, "\r");
-            var parts = std.mem.splitScalar(u8, line, '\t');
-            const ts_str = parts.next() orelse {
-                valid = false;
-                failure_reason = "InvalidAuditFormat";
-                break;
-            };
-            const level_str = parts.next() orelse {
-                valid = false;
-                failure_reason = "InvalidAuditFormat";
-                break;
-            };
-            const prev_hash = parts.next() orelse {
-                valid = false;
-                failure_reason = "InvalidAuditFormat";
-                break;
-            };
-            const entry_hash = parts.next() orelse {
-                valid = false;
-                failure_reason = "InvalidAuditFormat";
-                break;
-            };
-            const msg = parts.next() orelse {
-                valid = false;
-                failure_reason = "InvalidAuditFormat";
-                break;
-            };
-            if (parts.next() != null or !isHex64(prev_hash) or !isHex64(entry_hash)) {
-                valid = false;
-                failure_reason = "InvalidAuditFormat";
-                break;
-            }
-            if (!std.mem.eql(u8, prev_hash, &expected_prev)) {
-                valid = false;
-                failure_reason = "AuditTampered";
-                break;
-            }
-            const computed = computeEntryHash(ts_str, level_str, &expected_prev, msg);
-            if (!std.mem.eql(u8, entry_hash, &computed)) {
-                valid = false;
-                failure_reason = "AuditTampered";
-                break;
-            }
-
-            expected_prev = computed;
-            count += 1;
-            if (std.mem.eql(u8, level_str, "ERROR")) error_count += 1;
-            if (parseDenyMessage(msg)) |d| {
-                try deny_list.append(.{
-                    .timestamp = ts_str,
-                    .rule = d.rule,
-                    .detail = d.detail,
-                    .hash = entry_hash,
-                });
-            }
-        }
-    }
+    const eval = try evaluateAuditContent(content, &deny_list);
+    const valid = eval.failure == null;
+    const failure_reason: ?[]const u8 = if (eval.failure) |err| switch (err) {
+        AuditError.AuditTampered => "AuditTampered",
+        AuditError.InvalidAuditFormat => "InvalidAuditFormat",
+    } else null;
 
     const report = AuditReport{
         .path = path,
         .valid = valid,
-        .entries = count,
+        .entries = eval.entries,
         .deny_events = deny_list.items.len,
-        .error_events = error_count,
-        .head_hash = &expected_prev,
+        .error_events = eval.error_events,
+        .head_hash = &eval.head_hash,
         .failure_reason = failure_reason,
         .deny_records = deny_list.items,
     };
@@ -682,15 +684,15 @@ test "fuzz verifyAuditFile and writeAuditJson over corrupted and random audit lo
     defer alloc.free(baseline);
     try std.testing.expectEqual(@as(usize, 4), try verifyAuditFile(alloc, audit_path));
 
-    // Part A: Any single-byte bitflip inside the committed log (excluding the final '\n')
-    // must be caught by both verifyAuditFile and writeAuditJson without panicking or leaking.
+    // Part A: Any single-byte bitflip inside the committed log (including the
+    // final '\n', BUG-036) must be caught by both verifyAuditFile and
+    // writeAuditJson without panicking or leaking.
     var i: usize = 0;
     while (i < 48) : (i += 1) {
         const mutated = try alloc.dupe(u8, baseline);
         defer alloc.free(mutated);
 
-        const pos = rng.intRangeLessThan(usize, 0, mutated.len - 1);
-        // Avoid mutating a newline into a non-newline on the very last byte; flip a bit at `pos`.
+        const pos = if (i == 0) mutated.len - 1 else rng.intRangeLessThan(usize, 0, mutated.len);
         mutated[pos] ^= @as(u8, 1) << rng.int(u3);
         try tmp.dir.writeFile(.{ .sub_path = "audit.log", .data = mutated });
 
@@ -699,8 +701,6 @@ test "fuzz verifyAuditFile and writeAuditJson over corrupted and random audit lo
         defer json_out.deinit();
         const json_ok = try writeAuditJson(alloc, audit_path, json_out.writer());
 
-        // Unless we turned the last newline of the file into a non-newline (which only happens at mutated.len - 1,
-        // excluded above), tampering with a committed byte must fail verification.
         if (verify_res) |_| {
             return error.TestUnexpectedResult;
         } else |err| {
@@ -764,4 +764,87 @@ test "BUG-031: Logger.init blocks symlinks and enforces mode 0640 on existing lo
     const err_stat = try tmp.dir.statFile("error.log");
     try std.testing.expectEqual(@as(std.fs.File.Mode, 0o640), sys_stat.mode & 0o777);
     try std.testing.expectEqual(@as(std.fs.File.Mode, 0o640), err_stat.mode & 0o777);
+}
+
+test "BUG-030: Logger.log repairs partial tail under lock without re-init" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir_path);
+
+    var logger = Logger.init(dir_path, false);
+    defer logger.deinit();
+    logger.echo_stderr = false;
+    logger.info("entry one", .{});
+
+    // Simulate a partial crash write while the logger remains open.
+    {
+        const f = try tmp.dir.openFile("audit.log", .{ .mode = .read_write });
+        defer f.close();
+        try f.seekTo(try f.getEndPos());
+        try f.writeAll("partial-tail-no-newline");
+    }
+
+    logger.info("entry two", .{});
+
+    // Also verify a complete entry whose trailing '\n' was missing gets newline-restored
+    // rather than fused with the next write or truncated away.
+    {
+        const raw = try tmp.dir.readFileAlloc(alloc, "audit.log", 8192);
+        defer alloc.free(raw);
+        try tmp.dir.writeFile(.{ .sub_path = "audit.log", .data = raw[0 .. raw.len - 1] });
+    }
+    logger.info("entry three", .{});
+
+    const audit_path = try std.fs.path.join(alloc, &.{ dir_path, "audit.log" });
+    defer alloc.free(audit_path);
+    try std.testing.expectEqual(@as(usize, 3), try verifyAuditFile(alloc, audit_path));
+}
+
+test "BUG-036: verifyAuditFile and writeAuditJson check complete final entries missing newline" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir_path);
+
+    {
+        var logger = Logger.init(dir_path, false);
+        defer logger.deinit();
+        logger.echo_stderr = false;
+        logger.info("entry one", .{});
+        logger.info("entry two", .{});
+    }
+
+    const audit_path = try std.fs.path.join(alloc, &.{ dir_path, "audit.log" });
+    defer alloc.free(audit_path);
+
+    const original = try tmp.dir.readFileAlloc(alloc, "audit.log", 8192);
+    defer alloc.free(original);
+    try std.testing.expect(original.len > 2 and original[original.len - 1] == '\n');
+
+    // 1) Removing the trailing newline from an otherwise valid entry must still count and verify it.
+    const no_nl = original[0 .. original.len - 1];
+    try tmp.dir.writeFile(.{ .sub_path = "audit.log", .data = no_nl });
+    try std.testing.expectEqual(@as(usize, 2), try verifyAuditFile(alloc, audit_path));
+
+    var valid_json = std.ArrayList(u8).init(alloc);
+    defer valid_json.deinit();
+    try std.testing.expect(try writeAuditJson(alloc, audit_path, valid_json.writer()));
+    try std.testing.expect(std.mem.indexOf(u8, valid_json.items, "\"entries\":2") != null);
+
+    // 2) Tampering with the final entry while removing its trailing newline must fail verification.
+    const tampered = try alloc.dupe(u8, no_nl);
+    defer alloc.free(tampered);
+    const idx = std.mem.lastIndexOf(u8, tampered, "entry two") orelse return error.TestUnexpectedResult;
+    tampered[idx] = 'X';
+    try tmp.dir.writeFile(.{ .sub_path = "audit.log", .data = tampered });
+    try std.testing.expectError(AuditError.AuditTampered, verifyAuditFile(alloc, audit_path));
+
+    var json_out = std.ArrayList(u8).init(alloc);
+    defer json_out.deinit();
+    const json_ok = try writeAuditJson(alloc, audit_path, json_out.writer());
+    try std.testing.expect(!json_ok);
+    try std.testing.expect(std.mem.indexOf(u8, json_out.items, "\"valid\":false") != null);
 }

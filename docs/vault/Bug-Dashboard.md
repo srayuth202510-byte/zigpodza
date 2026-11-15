@@ -21,7 +21,7 @@ status: active
 | :--- | :--- |
 | Tracked Bug Patterns | **41** (41 Guarded) |
 | Zig Source Modules | **24** |
-| Unit & Integration Tests | **231** |
+| Unit & Integration Tests | **236** |
 | Static Security & Memory Gates | **9/9 PASS** |
 
 ## Guard Coverage Map
@@ -185,15 +185,15 @@ flowchart LR
 | [cli_specs.zig](../../src/cli_specs.zig) | 724 | 28 | 17 | `std.testing.allocator` |
 | [cli_types.zig](../../src/cli_types.zig) | 714 | 57 | 12 | `std.testing.allocator` |
 | [completion.zig](../../src/completion.zig) | 270 | 2 | 5 | `std.testing.allocator` |
-| [compose.zig](../../src/compose.zig) | 1250 | 14 | 3 | `std.testing.allocator` |
+| [compose.zig](../../src/compose.zig) | 1703 | 14 | 6 | `std.testing.allocator` |
 | [config.zig](../../src/config.zig) | 348 | 9 | 6 | `std.testing.allocator` |
 | [demo.zig](../../src/demo.zig) | 487 | 6 | 2 | `std.testing.allocator` |
 | [http.zig](../../src/http.zig) | 668 | 21 | 5 | `std.testing.allocator` |
 | [http_parser.zig](../../src/http_parser.zig) | 278 | 2 | 9 | `std.testing.allocator` |
 | [http_types.zig](../../src/http_types.zig) | 263 | 18 | 11 | `std.testing.allocator` |
-| [log.zig](../../src/log.zig) | 767 | 20 | 10 | `std.testing.allocator` |
+| [log.zig](../../src/log.zig) | 850 | 20 | 12 | `std.testing.allocator` |
 | [main.zig](../../src/main.zig) | 1108 | 2 | 4 | `gpa.deinit() != .leak` |
-| [podman_api.zig](../../src/podman_api.zig) | 1671 | 118 | 13 | `std.testing.allocator` |
+| [podman_api.zig](../../src/podman_api.zig) | 1695 | 118 | 13 | `std.testing.allocator` |
 | [podman_build.zig](../../src/podman_build.zig) | 545 | 8 | 5 | `std.testing.allocator` |
 | [podman_images.zig](../../src/podman_images.zig) | 665 | 7 | 7 | `std.testing.allocator` |
 | [podman_logs.zig](../../src/podman_logs.zig) | 838 | 10 | 8 | `std.testing.allocator` |
@@ -201,9 +201,9 @@ flowchart LR
 | [podman_system.zig](../../src/podman_system.zig) | 1161 | 17 | 6 | `std.testing.allocator` |
 | [podman_test_helpers.zig](../../src/podman_test_helpers.zig) | 308 | 4 | 7 | `std.testing.allocator` |
 | [podman_transfer.zig](../../src/podman_transfer.zig) | 1566 | 9 | 10 | `std.testing.allocator` |
-| [podman_types.zig](../../src/podman_types.zig) | 1039 | 67 | 35 | `std.testing.allocator` |
+| [podman_types.zig](../../src/podman_types.zig) | 1061 | 70 | 35 | `std.testing.allocator` |
 | [podman_validate.zig](../../src/podman_validate.zig) | 1008 | 49 | 17 | `std.testing.allocator` |
-| [policy.zig](../../src/policy.zig) | 388 | 17 | 5 | `std.testing.allocator` |
+| [policy.zig](../../src/policy.zig) | 389 | 18 | 5 | `std.testing.allocator` |
 | [utils.zig](../../src/utils.zig) | 42 | 3 | 2 | `stack-only (no heap)` |
 
 ## Static Security & Memory Gates

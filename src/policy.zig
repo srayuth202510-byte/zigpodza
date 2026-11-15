@@ -169,16 +169,17 @@ pub fn checkRunPolicy(r: cli.RunOpts, pol: Policy) ?[]const u8 {
     if (pol.forbid_secret_env and hasSecretEnv(r.env)) return "policy.forbid_secret_env";
 
     const net = r.network orelse return "policy.allowed_networks";
-    var net_allowed = false;
-    for (pol.allowed_networks) |allowed| {
-        if (std.mem.eql(u8, net, allowed)) {
-            net_allowed = true;
-            break;
-        }
-    }
-    if (!net_allowed) return "policy.allowed_networks";
+    if (!isNetworkAllowed(pol, net)) return "policy.allowed_networks";
 
     return null;
+}
+
+/// Reports whether `net` is present in `pol.allowed_networks`.
+pub fn isNetworkAllowed(pol: Policy, net: []const u8) bool {
+    for (pol.allowed_networks) |allowed| {
+        if (std.mem.eql(u8, net, allowed)) return true;
+    }
+    return false;
 }
 
 pub fn enforceRunPolicy(r: cli.RunOpts, pol: Policy) ApiError!void {
