@@ -166,7 +166,20 @@ fn run(gpa_allocator: std.mem.Allocator) u8 {
     };
 
     return dispatch(&client, &logger, parsed.command, stdout) catch |e| {
+        var trace_addrs: [32]usize = undefined;
+        var saved_trace: ?std.builtin.StackTrace = null;
+        if (shouldDumpErrorTrace(logger.verbose)) {
+            if (@errorReturnTrace()) |t| {
+                const count = @min(t.index, @min(t.instruction_addresses.len, trace_addrs.len));
+                @memcpy(trace_addrs[0..count], t.instruction_addresses[0..count]);
+                saved_trace = .{
+                    .index = count,
+                    .instruction_addresses = trace_addrs[0..count],
+                };
+            }
+        }
         reportFailure(&logger, parsed.command, cfg.socket_path, e);
+        if (saved_trace) |t| std.debug.dumpStackTrace(t);
         return 1;
     };
 }
@@ -637,6 +650,14 @@ fn reportFailure(logger: *log.Logger, cmd: cli.Command, socket_path: []const u8,
     }
 }
 
+fn shouldDumpErrorTrace(verbose: bool) bool {
+    if (verbose) return true;
+    if (std.posix.getenv("ZIGPOD_TRACE")) |val| {
+        return val.len > 0 and !std.mem.eql(u8, val, "0");
+    }
+    return false;
+}
+
 test {
     _ = cli;
     _ = completion;
@@ -1077,4 +1098,11 @@ test "dispatch handles extended run flags (--cpus, --env-file, --label, --entryp
     try std.testing.expect(std.mem.indexOf(u8, req_slice, "\"Labels\":{\"svc\":\"worker\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, req_slice, "\"Env\":[\"MODE=sandbox\",\"EXTRA=1\"]") != null);
     try std.testing.expect(std.mem.indexOf(u8, req_slice, "\"RestartPolicy\":{\"Name\":\"on-failure\",\"MaximumRetryCount\":2}") != null);
+}
+
+test "shouldDumpErrorTrace honors verbose flag and explicit trace requests" {
+    try std.testing.expect(shouldDumpErrorTrace(true));
+    if (std.posix.getenv("ZIGPOD_TRACE") == null) {
+        try std.testing.expect(!shouldDumpErrorTrace(false));
+    }
 }

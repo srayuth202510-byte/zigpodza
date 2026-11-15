@@ -389,13 +389,17 @@ Use the top-level [Makefile](Makefile) and verification scripts to keep builds, 
 
 ```bash
 make verify          # run tests, security gate, ReleaseSafe build, demo, E2E smoke, parity, graph update
+make test-one T=compose   # run only tests matching a substring (-Dtest-filter)
 make check-ci        # verify CI workflow, Makefile, CLI, vault docs, and README parity
 make e2e             # run scripts/smoke.sh (mock Unix socket + hardened run + audit tamper test)
 make real-e2e        # run scripts/podman-e2e.sh against a live Podman daemon (skips if unavailable)
+ZIGPOD_TRACE=1 zigpod --verbose ps   # print @errorReturnTrace() stack on unexpected failures
 python3 scripts/graph-query.py update
 python3 scripts/graph-query.py query "memory"
 python3 scripts/graph-query.py explain verifyAuditFile
 python3 scripts/graph-query.py path BUG-002 cli.zig
+make triage ERR=InvalidShmSize   # map error/rule to throw sites, BUG-NNN, and matching tests
+make debug-logs N=15             # summarize top errors in error.log and recent audit DENY events
 
 # Bug Tracking Dashboard (CLI / Obsidian Note / Web UI)
 make bugs            # terminal summary of tracked bugs, module tests, and security gates

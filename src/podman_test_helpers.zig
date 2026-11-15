@@ -38,17 +38,51 @@ pub const MockApiCtx = struct {
     server: *std.net.Server,
     replies: []const ScriptedReply,
     matched: usize = 0,
+    timeout_ms: i32 = 5_000,
+    timed_out: bool = false,
+    mismatch_count: usize = 0,
+    silent_mismatch: bool = false,
 };
+
+fn pollReadable(fd: std.posix.fd_t, timeout_ms: i32) bool {
+    if (timeout_ms < 0) return true;
+    var fds = [_]std.posix.pollfd{.{
+        .fd = fd,
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    const ready = std.posix.poll(&fds, timeout_ms) catch return false;
+    return ready > 0;
+}
 
 pub fn runMockPodmanServer(ctx: *MockApiCtx) void {
     var buf: [4096]u8 = undefined;
-    for (ctx.replies) |reply| {
+    for (ctx.replies, 0..) |reply, idx| {
+        if (!pollReadable(ctx.server.stream.handle, ctx.timeout_ms)) {
+            ctx.timed_out = true;
+            return;
+        }
         const conn = ctx.server.accept() catch return;
         defer conn.stream.close();
+        if (!pollReadable(conn.stream.handle, ctx.timeout_ms)) {
+            ctx.timed_out = true;
+            return;
+        }
         const req = readHttpRequest(conn.stream, &buf) catch return;
+        const prefix_ok = std.mem.startsWith(u8, req, reply.expected_prefix);
         const sub_ok = if (reply.expected_substring) |sub| std.mem.indexOf(u8, req, sub) != null else true;
-        if (std.mem.startsWith(u8, req, reply.expected_prefix) and sub_ok) {
+        if (prefix_ok and sub_ok) {
             ctx.matched += 1;
+        } else {
+            ctx.mismatch_count += 1;
+            if (!ctx.silent_mismatch) {
+                const req_end = std.mem.indexOf(u8, req, "\r\n") orelse @min(req.len, 120);
+                const exp_end = std.mem.indexOf(u8, reply.expected_prefix, "\r\n") orelse reply.expected_prefix.len;
+                std.debug.print(
+                    "[mock-podman mismatch step={d}] expected_prefix=\"{s}\" expected_sub=\"{s}\" got_line=\"{s}\" (bytes={d})\n",
+                    .{ idx, reply.expected_prefix[0..exp_end], reply.expected_substring orelse "", req[0..req_end], req.len },
+                );
+            }
         }
         conn.stream.writeAll(reply.raw_response) catch return;
     }
@@ -217,4 +251,58 @@ test "ScriptedReply defaults tolerate absent substring matcher" {
     const reply = ScriptedReply{ .expected_prefix = prefix, .raw_response = prefix };
     try std.testing.expect(reply.expected_substring == null);
     try std.testing.expectEqualStrings(reply.expected_prefix, reply.raw_response);
+}
+
+test "runMockPodmanServer enforces poll timeout and tracks request mismatches" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-th-timeout-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const replies = [_]ScriptedReply{.{
+        .expected_prefix = "GET /v1.40/expected HTTP/1.1\r\n",
+        .raw_response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK",
+    }};
+
+    // 1) Timed out cleanly when no client connects within timeout_ms.
+    var timeout_ctx = MockApiCtx{
+        .server = &server,
+        .replies = &replies,
+        .timeout_ms = 20,
+    };
+    const t1 = try std.Thread.spawn(.{}, runMockPodmanServer, .{&timeout_ctx});
+    t1.join();
+    try std.testing.expect(timeout_ctx.timed_out);
+    try std.testing.expectEqual(@as(usize, 0), timeout_ctx.matched);
+
+    // 2) Records mismatch_count without blocking when client sends an unexpected request.
+    var mismatch_ctx = MockApiCtx{
+        .server = &server,
+        .replies = &replies,
+        .timeout_ms = 500,
+        .silent_mismatch = true,
+    };
+    const t2 = try std.Thread.spawn(.{}, runMockPodmanServer, .{&mismatch_ctx});
+    var joined = false;
+    defer if (!joined) t2.join();
+
+    const stream = try std.net.connectUnixSocket(sock_path);
+    defer stream.close();
+    try stream.writeAll("GET /v1.40/wrong HTTP/1.1\r\nHost: podman\r\n\r\n");
+    var rbuf: [64]u8 = undefined;
+    _ = try stream.read(&rbuf);
+
+    t2.join();
+    joined = true;
+    try std.testing.expect(!mismatch_ctx.timed_out);
+    try std.testing.expectEqual(@as(usize, 0), mismatch_ctx.matched);
+    try std.testing.expectEqual(@as(usize, 1), mismatch_ctx.mismatch_count);
 }

@@ -1,4 +1,4 @@
-.PHONY: help build test test-adv demo e2e real-e2e check-ci verify ci query path explain graph-update bugs dashboard dashboard-serve debug-test clean
+.PHONY: help build test test-one test-adv demo e2e real-e2e check-ci verify ci query path explain triage debug-logs graph-update bugs dashboard dashboard-serve debug-test clean
 .DEFAULT_GOAL := help
 
 ZIG ?= $(shell command -v zig 2>/dev/null || { for p in "$$HOME/.config/Code - OSS/User/globalStorage/ziglang.vscode-zig/zig/x86_64-linux-0.13.0/zig" "$$HOME/.config/Code/User/globalStorage/ziglang.vscode-zig/zig/x86_64-linux-0.13.0/zig" "$$HOME/.local/opt/zig-0.13.0/zig" "$$HOME/.local/bin/zig"; do if [ -x "$$p" ]; then echo "$$p"; exit 0; fi; done; echo zig; })
@@ -12,6 +12,10 @@ build: ## Build ReleaseSafe binary to zig-out/bin/zigpod
 
 test: ## Run all unit and integration tests
 	"$(ZIG)" build test
+
+test-one: ## Run filtered unit/integration tests (usage: make test-one T=compose)
+	@test -n "$(T)" || { echo "Usage: make test-one T=<filter>" >&2; exit 2; }
+	"$(ZIG)" build test -Dtest-filter="$(T)"
 
 test-adv: ## Run security & hardening gates (requires zig)
 	./scripts/security-check.sh --require-zig
@@ -52,8 +56,15 @@ dashboard: ## Generate Obsidian Bug-Dashboard.md and HTML dashboard
 dashboard-serve: ## Serve interactive web bug dashboard on http://127.0.0.1:8765
 	$(PYTHON) ./scripts/bug-dashboard.py serve
 
-debug-test: ## Run Zig test binary directly for detailed diagnostics
-	"$(ZIG)" test src/main.zig
+triage: ## Trace an error, rule, or bug across source, vault, and tests (usage: make triage ERR=InvalidShmSize)
+	@test -n "$(ERR)" || { echo "Usage: make triage ERR=<error-or-rule>" >&2; exit 2; }
+	$(PYTHON) ./scripts/graph-query.py triage "$(ERR)"
+
+debug-logs: ## Summarize recent error.log entries and audit DENY events (usage: make debug-logs [N=15])
+	$(PYTHON) ./scripts/graph-query.py logs --limit "$(if $(N),$(N),15)"
+
+debug-test: ## Run Zig test binary directly (optional filter: make debug-test T=compose)
+	if [ -n "$(T)" ]; then "$(ZIG)" test src/main.zig --test-filter "$(T)"; else "$(ZIG)" test src/main.zig; fi
 
 verify: test test-adv build demo e2e check-ci graph-update ## Run full local verification suite
 

@@ -13,7 +13,7 @@ import json
 import os
 import re
 import sys
-from collections import deque
+from collections import Counter, deque
 from pathlib import Path
 from typing import Any
 
@@ -476,6 +476,171 @@ def cmd_path(args: argparse.Namespace) -> int:
     return 0
 
 
+def _normalize_log_signature(msg: str) -> str:
+    msg = re.sub(r"^\S+\s+\[ERROR\]\s*", "", msg.strip())
+    msg = re.sub(r"/tmp/[^\s'\"]+", "<tmp>", msg)
+    msg = re.sub(r"\b[0-9a-f]{12,64}\b", "<hex>", msg)
+    return re.sub(r"\b\d+\b", "<n>", msg)
+
+
+def cmd_triage(args: argparse.Namespace) -> int:
+    graph = load_or_update()
+    raw = args.term.strip()
+    q = raw.lower()
+    src_hits: list[dict[str, str]] = []
+    throw_sites: list[dict[str, str]] = []
+    rule_hits: list[dict[str, str]] = []
+
+    for zig_file in sorted(SRC_DIR.glob("*.zig")):
+        rel = rel_posix(zig_file)
+        for lno, line in enumerate(zig_file.read_text(encoding="utf-8").splitlines(), start=1):
+            if q not in line.lower():
+                continue
+            stripped = line.strip()
+            entry = {"cite": f"{rel}:{lno}", "text": stripped}
+            if re.search(r"\breturn\b", stripped) or "return " in stripped:
+                throw_sites.append(entry)
+            elif "logger.deny(" in stripped or "api." in stripped or "policy." in stripped:
+                rule_hits.append(entry)
+            else:
+                src_hits.append(entry)
+
+    bug_hits: list[dict[str, str]] = []
+    test_hits: list[dict[str, str]] = []
+    for nid, data in sorted(graph["nodes"].items()):
+        if data["kind"] == "bug":
+            fpath = ROOT / data["file"]
+            lines = fpath.read_text(encoding="utf-8").splitlines() if fpath.is_file() else []
+            start_l = data.get("line", 1)
+            end_l = len(lines)
+            for off in range(start_l, len(lines)):
+                if lines[off].startswith("## "):
+                    end_l = off
+                    break
+            block = "\n".join(lines[start_l - 1 : end_l]).lower()
+            if q in nid.lower() or q in data["title"].lower() or q in block:
+                bug_hits.append({"id": nid, "title": data["title"], "cite": data["cite"]})
+        elif data["kind"] == "module":
+            for t in data.get("tests", []):
+                if q in t["name"].lower():
+                    test_hits.append({"name": t["name"], "cite": t["cite"]})
+
+    # Match exact enclosing `test "..."` blocks where `term` appears in the test body.
+    if not test_hits:
+        module_tests: dict[str, list[dict[str, Any]]] = {}
+        for data in graph["nodes"].values():
+            if data["kind"] == "module":
+                module_tests[data["file"]] = sorted(
+                    data.get("tests", []),
+                    key=lambda item: int(item["cite"].rsplit(":", 1)[1]),
+                )
+        for h in src_hits + throw_sites:
+            fpath_rel, lno_str = h["cite"].rsplit(":", 1)
+            lno = int(lno_str)
+            enclosing: dict[str, Any] | None = None
+            for t in module_tests.get(fpath_rel, []):
+                if int(t["cite"].rsplit(":", 1)[1]) <= lno:
+                    enclosing = t
+                else:
+                    break
+            if enclosing and all(x["cite"] != enclosing["cite"] for x in test_hits):
+                test_hits.append({"name": enclosing["name"], "cite": enclosing["cite"]})
+
+    payload = {
+        "term": raw,
+        "throw_sites": throw_sites[:12],
+        "rule_hits": rule_hits[:10],
+        "source_refs": src_hits[:12],
+        "bugs": bug_hits[:8],
+        "tests": test_hits[:10],
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0 if any((throw_sites, rule_hits, src_hits, bug_hits, test_hits)) else 1
+
+    print(f"=== Triage for '{raw}' ===")
+    if throw_sites:
+        print("Throw / return sites:")
+        for h in throw_sites[:10]:
+            print(f"  - {h['cite']}  {h['text']}")
+    if rule_hits:
+        print("Audit / deny mappings:")
+        for h in rule_hits[:8]:
+            print(f"  - {h['cite']}  {h['text']}")
+    if src_hits:
+        print("Other source references:")
+        for h in src_hits[:10]:
+            print(f"  - {h['cite']}  {h['text']}")
+    if bug_hits:
+        print("Related Bug-Playbook entries:")
+        for b in bug_hits[:6]:
+            print(f"  - {b['id']} ({b['title']}) @ {b['cite']}")
+    if test_hits:
+        print("Related tests:")
+        for t in test_hits[:8]:
+            print(f"  - {t['cite']} :: {t['name']}")
+        print(f"Quick re-run: make test-one T=\"{test_hits[0]['name'][:40]}\"")
+    if not any((throw_sites, rule_hits, src_hits, bug_hits, test_hits)):
+        print("No matches found across src/*.zig, docs/vault, or unit tests.")
+        return 1
+    return 0
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    log_dir = Path(args.dir) if args.dir else Path(os.environ.get("ZIGPOD_LOG_DIR") or ROOT)
+    limit = max(1, args.limit)
+    err_path = log_dir / "error.log"
+    audit_path = log_dir / "audit.log"
+
+    err_lines = err_path.read_text(encoding="utf-8", errors="replace").splitlines() if err_path.is_file() else []
+    signal_err_lines = [
+        line for line in err_lines
+        if line.strip() and not line.lstrip().startswith("OK: ")
+    ]
+    sig_counts = Counter(_normalize_log_signature(line) for line in signal_err_lines)
+    recent_errors = signal_err_lines[-limit:]
+
+    audit_lines = audit_path.read_text(encoding="utf-8", errors="replace").splitlines() if audit_path.is_file() else []
+    deny_lines = [line for line in audit_lines if "\tDENY\t" in line]
+    recent_denies = deny_lines[-limit:]
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "log_dir": str(log_dir),
+                    "error_log_lines": len(err_lines),
+                    "top_error_signatures": [{"signature": k, "count": v} for k, v in sig_counts.most_common(10)],
+                    "recent_errors": recent_errors,
+                    "audit_entries": len(audit_lines),
+                    "audit_deny_count": len(deny_lines),
+                    "recent_denies": recent_denies,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
+    print(f"=== Diagnostic Log Summary ({log_dir}) ===")
+    print(f"error.log: {len(err_lines)} line(s) | audit.log: {len(audit_lines)} entry(ies), {len(deny_lines)} DENY event(s)")
+    if sig_counts:
+        print("Top error signatures:")
+        for sig, cnt in sig_counts.most_common(8):
+            print(f"  - [{cnt}x] {sig[:140]}")
+    if recent_denies:
+        print(f"Latest audit DENY entries (up to {limit}):")
+        for line in recent_denies:
+            parts = line.split("\t")
+            msg = parts[4] if len(parts) >= 5 else line
+            print(f"  - {parts[0]} {msg[:140]}")
+    if recent_errors:
+        print(f"Latest error.log lines (last {len(recent_errors)}):")
+        for line in recent_errors:
+            print(f"  - {line[:160]}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="ZigPod Offline Knowledge Graph CLI")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -496,6 +661,15 @@ def main() -> int:
     p_path.add_argument("dst")
     p_path.add_argument("--json", action="store_true")
 
+    p_tr = sub.add_parser("triage", help="Trace an error or rule across src/, Bug-Playbook, and tests")
+    p_tr.add_argument("term")
+    p_tr.add_argument("--json", action="store_true")
+
+    p_logs = sub.add_parser("logs", help="Summarize error.log signatures and audit.log DENY events")
+    p_logs.add_argument("--limit", type=int, default=15)
+    p_logs.add_argument("--dir", default=None)
+    p_logs.add_argument("--json", action="store_true")
+
     args = parser.parse_args()
     if args.cmd == "update":
         return cmd_update(args)
@@ -505,6 +679,10 @@ def main() -> int:
         return cmd_explain(args)
     if args.cmd == "path":
         return cmd_path(args)
+    if args.cmd == "triage":
+        return cmd_triage(args)
+    if args.cmd == "logs":
+        return cmd_logs(args)
     return 1
 
 

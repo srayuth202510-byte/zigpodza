@@ -31,6 +31,8 @@ if [ ! -x "$BIN" ]; then
 fi
 
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/zigpod-real-e2e.XXXXXX")
+export ZIGPOD_LOG_DIR="$TMP_DIR/logs"
+mkdir -p "$ZIGPOD_LOG_DIR"
 SVC_PID=""
 SOCK=""
 NET_NAME="zigpod-e2e-net-$$"
@@ -110,10 +112,8 @@ fi
 echo "[INFO] using Podman socket: $SOCK"
 TEST_IMG="${ZIGPOD_TEST_IMAGE:-alpine:3.20}"
 
-export ZIGPOD_LOG_DIR="$TMP_DIR/logs"
-mkdir -p "$ZIGPOD_LOG_DIR"
-
-"$BIN" --socket "$SOCK" system ping | grep -q "OK"
+PING_OUT=$("$BIN" --socket "$SOCK" system ping)
+printf '%s\n' "$PING_OUT" | grep -q "OK"
 "$BIN" --socket "$SOCK" version >/dev/null
 
 if ! "$BIN" --socket "$SOCK" images --json | grep -q "$TEST_IMG"; then
