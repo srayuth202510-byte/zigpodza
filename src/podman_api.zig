@@ -14,11 +14,14 @@ pub const api_prefix = validate.api_prefix;
 
 pub const ApiError = types.ApiError;
 pub const TmpfsBounds = types.TmpfsBounds;
+pub const RestartPolicy = types.RestartPolicy;
 pub const HostConfig = types.HostConfig;
 pub const Mount = types.Mount;
 pub const PortMapping = types.PortMapping;
 pub const ExposedPorts = types.ExposedPorts;
 pub const PortBindings = types.PortBindings;
+pub const LabelEntry = types.LabelEntry;
+pub const LabelsMap = types.LabelsMap;
 pub const ContainerCreateRequest = types.ContainerCreateRequest;
 pub const CreateResponse = types.CreateResponse;
 pub const ContainerSummary = types.ContainerSummary;
@@ -37,6 +40,8 @@ pub const VolumeCreateRequest = types.VolumeCreateRequest;
 pub const VolumeInfo = types.VolumeInfo;
 pub const VolumeListResponse = types.VolumeListResponse;
 pub const NetworkInfo = types.NetworkInfo;
+pub const NetworkCreateRequest = types.NetworkCreateRequest;
+pub const NetworkCreateResponse = types.NetworkCreateResponse;
 pub const SystemDfResponse = types.SystemDfResponse;
 pub const ContainerPruneResponse = types.ContainerPruneResponse;
 pub const ImagePruneItem = types.ImagePruneItem;
@@ -57,6 +62,13 @@ pub const validateWorkdir = validate.validateWorkdir;
 pub const validateUser = validate.validateUser;
 pub const validateCapability = validate.validateCapability;
 pub const validateSignal = validate.validateSignal;
+pub const validateNanoCpus = validate.validateNanoCpus;
+pub const validateHostname = validate.validateHostname;
+pub const validateRestartPolicy = validate.validateRestartPolicy;
+pub const validateLabel = validate.validateLabel;
+pub const validateNetworkDriver = validate.validateNetworkDriver;
+pub const validateCpContainerPath = validate.validateCpContainerPath;
+pub const loadAndMergeEnv = validate.loadAndMergeEnv;
 const validateMount = validate.validateMount;
 const appendQueryEncoded = validate.appendQueryEncoded;
 const logApiFailure = validate.logApiFailure;
@@ -86,6 +98,8 @@ pub const removeVolume = system.removeVolume;
 pub const inspectVolume = system.inspectVolume;
 pub const listNetworks = system.listNetworks;
 pub const inspectNetwork = system.inspectNetwork;
+pub const createNetwork = system.createNetwork;
+pub const removeNetwork = system.removeNetwork;
 pub const systemPing = system.systemPing;
 pub const systemDf = system.systemDf;
 pub const systemPrune = system.systemPrune;
@@ -117,10 +131,14 @@ pub fn createContainer(
     if (cfg.ExposedPorts) |exposed| {
         for (exposed.ports) |p| try validatePortMapping(p);
     }
-    // Defense in depth: validate identity/network/capability fields too (BUG-016).
+    // Defense in depth: validate identity/network/capability/resource fields (BUG-016).
+    if (cfg.Hostname) |h| try validateHostname(h);
+    if (cfg.Labels) |labels| for (labels.entries) |entry| try validateLabel(entry);
     if (cfg.WorkingDir) |w| try validateWorkdir(w);
     if (cfg.User) |u| try validateUser(u);
     if (cfg.HostConfig) |hc| {
+        if (hc.NanoCpus) |nc| try validateNanoCpus(nc);
+        if (hc.RestartPolicy) |rp| try validateRestartPolicy(rp);
         if (hc.NetworkMode) |m| try validateNetworkMode(m);
         if (hc.CapDrop) |caps| for (caps) |c| try validateCapability(c);
         if (hc.CapAdd) |caps| for (caps) |c| try validateCapability(c);
@@ -734,6 +752,7 @@ test {
     _ = logs;
     _ = images;
     _ = system;
+    _ = th;
 }
 
 test "JSON deserialize CreateResponse" {

@@ -58,8 +58,10 @@ export ZP_SMOKE_SOCK="$SOCK"
 export ZP_SMOKE_REQ="$REQ_LOG"
 
 python3 - <<'PY' &
+import io
 import os
 import socket
+import tarfile
 
 sock_path = os.environ["ZP_SMOKE_SOCK"]
 req_path = os.environ["ZP_SMOKE_REQ"]
@@ -93,9 +95,9 @@ def reply(conn, status, body=b""):
     hdr = f"HTTP/1.1 {status}\r\nContent-Length: {len(body)}\r\n\r\n".encode("ascii")
     conn.sendall(hdr + body)
 
-# Expect 21 requests: create, start, wait, logs, delete (--rm), ps -a, inspect, exec-create, exec-start, exec-inspect, stats-list, stats-one, kill, top, volume-ls, network-ls, search, save, load, export, import
+# Expect 26 requests: create, start, wait, logs, delete (--rm), ps -a, inspect, exec-create, exec-start, exec-inspect, stats-list, stats-one, kill, top, volume-ls, network-ls, search, save, load, export, import, network-create, network-rm, attach, cp-put, cp-get
 with open(req_path, "wb") as out:
-    for step in range(21):
+    for step in range(26):
         conn, _ = srv.accept()
         try:
             req = read_req(conn)
@@ -141,6 +143,23 @@ with open(req_path, "wb") as out:
                 reply(conn, "200 OK", b"TAR-PAYLOAD-EXPORT")
             elif req.startswith(b"POST ") and b"/images/load?fromSrc=-&repo=" in req:
                 reply(conn, "200 OK", b'{"status":"Imported"}')
+            elif req.startswith(b"POST ") and b"/v1.40/networks/create" in req:
+                reply(conn, "201 Created", b'{"Id":"net_smoke","Warning":""}')
+            elif req.startswith(b"DELETE ") and b"/v1.40/networks/smoke-net?force=true" in req:
+                reply(conn, "204 No Content", b"")
+            elif req.startswith(b"POST ") and b"/v1.40/containers/c1/attach" in req:
+                conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\nattach-smoke-ok\n")
+            elif req.startswith(b"PUT ") and b"/v1.40/containers/c1/archive" in req:
+                reply(conn, "200 OK", b"")
+            elif req.startswith(b"GET ") and b"/v1.40/containers/c1/archive" in req:
+                bio = io.BytesIO()
+                with tarfile.open(fileobj=bio, mode="w", format=tarfile.USTAR_FORMAT) as tf:
+                    data = b"cp-smoke-from-ctr\n"
+                    ti = tarfile.TarInfo("cp.txt")
+                    ti.size = len(data)
+                    ti.mode = 0o644
+                    tf.addfile(ti, io.BytesIO(data))
+                reply(conn, "200 OK", bio.getvalue())
             else:
                 reply(conn, "404 Not Found", b'{"message":"unexpected"}')
         finally:
@@ -157,9 +176,22 @@ while [ ! -S "$SOCK" ] && [ "$i" -lt 40 ]; do
 done
 [ -S "$SOCK" ]
 
-RUN_OUT=$("$BIN" --socket "$SOCK" run --rm -m 64m --pids-limit 32 --read-only --no-new-privileges -v /srv/data:/data -p 8080:80 -p 127.0.0.1:9000:9000/udp --network none -w /work -u 1000:1000 --cap-drop ALL --cap-add NET_BIND_SERVICE alpine:3.20 echo ok)
+SMOKE_WORK=$(dirname "$SOCK")
+ENV_FILE="$SMOKE_WORK/smoke.env"
+cat > "$ENV_FILE" <<'EOF'
+# Smoke env file
+FROM_ENV_FILE=yes
+EOF
+
+RUN_OUT=$("$BIN" --socket "$SOCK" run --rm -m 64m --pids-limit 32 --cpus 0.5 --env-file "$ENV_FILE" -l app=smoke --entrypoint /bin/echo --hostname smoke-host --restart on-failure:2 --read-only --no-new-privileges -v /srv/data:/data -p 8080:80 -p 127.0.0.1:9000:9000/udp --network none -w /work -u 1000:1000 --cap-drop ALL --cap-add NET_BIND_SERVICE alpine:3.20 echo ok)
 echo "$RUN_OUT" | grep -q "ok"
 grep -q '"ReadonlyRootfs":true' "$REQ_LOG"
+grep -q '"NanoCpus":500000000' "$REQ_LOG"
+grep -q '"FROM_ENV_FILE=yes"' "$REQ_LOG"
+grep -q '"Labels":{"app":"smoke"}' "$REQ_LOG"
+grep -q '"Entrypoint":\["/bin/echo"\]' "$REQ_LOG"
+grep -q '"Hostname":"smoke-host"' "$REQ_LOG"
+grep -q '"RestartPolicy":{"Name":"on-failure","MaximumRetryCount":2}' "$REQ_LOG"
 grep -q '"Memory":67108864' "$REQ_LOG"
 grep -q '"PidsLimit":32' "$REQ_LOG"
 grep -q '"SecurityOpt":\["no-new-privileges"\]' "$REQ_LOG"
@@ -219,6 +251,21 @@ IMPORT_OUT=$("$BIN" --socket "$SOCK" import "$IMPORT_TAR" "myrepo/app:v2")
 echo "$IMPORT_OUT" | grep -q "Imported"
 grep -q "IMPORT-TAR-PAYLOAD" "$REQ_LOG"
 
+NET_CREATE_OUT=$("$BIN" --socket "$SOCK" network create --internal smoke-net)
+echo "$NET_CREATE_OUT" | grep -q "net_smoke"
+"$BIN" --socket "$SOCK" network rm -f smoke-net >/dev/null
+
+ATTACH_OUT=$("$BIN" --socket "$SOCK" attach c1)
+echo "$ATTACH_OUT" | grep -q "attach-smoke-ok"
+
+CP_SRC="$SMOKE_WORK/cp-upload.txt"
+CP_DST="$SMOKE_WORK/cp-download.txt"
+printf 'CP-SMOKE-UPLOAD\n' > "$CP_SRC"
+"$BIN" --socket "$SOCK" cp "$CP_SRC" c1:/tmp >/dev/null
+grep -q "CP-SMOKE-UPLOAD" "$REQ_LOG"
+"$BIN" --socket "$SOCK" cp c1:/tmp/cp.txt "$CP_DST" >/dev/null
+grep -q "cp-smoke-from-ctr" "$CP_DST"
+
 # Adversarial input must fail closed before reaching daemon.
 if "$BIN" --socket "$SOCK" kill -s SIGBAD smoke1234567890ab >/dev/null 2>&1; then
     echo "[FAIL] expected invalid kill signal (SIGBAD) to fail closed" >&2
@@ -265,6 +312,25 @@ fi
 
 if "$BIN" --socket "$SOCK" run --profile=sandbox -m 512m alpine:3.20 >/dev/null 2>&1; then
     echo "[FAIL] expected sandbox profile memory limit excess (512m > 256m) to fail closed pre-flight" >&2
+    exit 1
+fi
+
+if "$BIN" --socket "$SOCK" run --profile=sandbox --cpus 2 alpine:3.20 >/dev/null 2>&1; then
+    echo "[FAIL] expected sandbox profile CPU limit excess (2 > 1) to fail closed pre-flight" >&2
+    exit 1
+fi
+
+SECRET_ENV="$SMOKE_WORK/secret.env"
+cat > "$SECRET_ENV" <<'EOF'
+API_KEY=sk-1234567890abcdef123456
+EOF
+if "$BIN" --socket "$SOCK" run --profile=sandbox --env-file "$SECRET_ENV" alpine:3.20 >/dev/null 2>&1; then
+    echo "[FAIL] expected --env-file secret in sandbox profile to fail closed pre-flight" >&2
+    exit 1
+fi
+
+if "$BIN" --socket "$SOCK" run --cpus 0 alpine:3.20 >/dev/null 2>&1; then
+    echo "[FAIL] expected --cpus 0 to fail pre-flight validation" >&2
     exit 1
 fi
 

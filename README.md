@@ -150,13 +150,15 @@ zigpod stats --json demo-alpine
 zigpod top demo-alpine
 zigpod kill -s SIGTERM demo-alpine
 
-# Manage named volumes, inspect container networks, and check daemon/disk status
+# Manage named volumes, container networks, and check daemon/disk status
 zigpod volume ls
 zigpod volume create app-data
 zigpod volume inspect app-data
 zigpod volume rm app-data
 zigpod network ls
-zigpod network inspect podman
+zigpod network create --driver bridge --internal iso-net
+zigpod network inspect iso-net
+zigpod network rm -f iso-net
 zigpod system ping
 zigpod system df
 zigpod system prune -f
@@ -165,9 +167,14 @@ zigpod system prune -f
 zigpod inspect demo-alpine
 zigpod inspect alpine:3.20
 
-# Run a command in a live container (supports -i/-t/-it; exit code is propagated)
+# Run a command in a live container or attach to a running container's stdio (-i/-t/-it)
 zigpod exec demo-alpine ls -la
 zigpod exec -it demo-alpine sh
+zigpod attach -it demo-alpine
+
+# Copy files/directories between host and container (two-pass Tar-Slip & symlink-safe)
+zigpod cp ./config.json demo-alpine:/etc/app/
+zigpod cp demo-alpine:/var/log/app.log ./app.log
 
 # Verify the SHA-256 hash-chained audit log (plain or structured JSON with DENY telemetry)
 zigpod audit
@@ -300,12 +307,18 @@ Apply defense-in-depth limits in `HostConfig` when launching containers:
 - `-w, --workdir <PATH>`: Container working directory (`WorkingDir`)
 - `-u, --user <USER[:GROUP]>`: Run as user (and optional group) (`User`)
 - `--cap-drop <CAP>` / `--cap-add <CAP>`: Drop/add a Linux capability, repeatable (`HostConfig.CapDrop` / `CapAdd`)
-- `--profile=sandbox`: Apply fail-closed sandbox defaults (`--read-only`, `--no-new-privileges`, `--cap-drop=ALL`, `--network=none`, `--pids-limit=64`, `--memory=256m`, bounded `/tmp` tmpfs) and enforce `zigpod-policy.json`
+- `--profile=sandbox`: Apply fail-closed sandbox defaults (`--read-only`, `--no-new-privileges`, `--cap-drop=ALL`, `--network=none`, `--pids-limit=64`, `--memory=256m`, `--cpus=1`, bounded `/tmp` tmpfs) and enforce `zigpod-policy.json` (`max_nano_cpus`, `max_memory_bytes`, `max_pids_limit`)
 - `--policy <FILE>`: Enforce a custom `zigpod-policy.json` guardrail file pre-flight
+- `--cpus <N>`: CPU quota (`HostConfig.NanoCpus`, up to `64.0` or `policy.max_nano_cpus` in sandbox)
+- `--env-file <FILE>`: Load `KEY=VALUE` environment entries from a verified non-symlink regular host file before pre-flight secret checks (repeatable)
+- `-l, --label <KEY=VALUE>`: Attach container labels (`Labels`, repeatable)
+- `--entrypoint <CMD>`: Override container image entrypoint (`Entrypoint`)
+- `--hostname <NAME>`: Set RFC-1123 container hostname (`Hostname`, max 64 chars)
+- `--restart <POLICY>`: Restart policy (`no`, `always`, `unless-stopped`, `on-failure[:N]`)
 - `-i, --interactive` / `-t, --tty` (`-it`): Attach interactive stdin and allocate a pseudo-TTY over HTTP `101 Switching Protocols`
 
 ```bash
-zigpod run --rm -m 64m --pids-limit 32 --read-only --no-new-privileges alpine:3.20 echo ok
+zigpod run --rm -m 64m --pids-limit 32 --cpus 0.5 --read-only --no-new-privileges -l env=prod --hostname api-1 --restart on-failure:2 alpine:3.20 echo ok
 zigpod run --rm --profile=sandbox alpine:3.20 echo sandbox-ok
 ```
 
@@ -373,6 +386,7 @@ Use the top-level [Makefile](Makefile) and verification scripts to keep builds, 
 make verify          # run tests, security gate, ReleaseSafe build, demo, E2E smoke, parity, graph update
 make check-ci        # verify CI workflow, Makefile, CLI, vault docs, and README parity
 make e2e             # run scripts/smoke.sh (mock Unix socket + hardened run + audit tamper test)
+make real-e2e        # run scripts/podman-e2e.sh against a live Podman daemon (skips if unavailable)
 python3 scripts/graph-query.py update
 python3 scripts/graph-query.py query "memory"
 python3 scripts/graph-query.py explain verifyAuditFile

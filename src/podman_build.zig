@@ -41,7 +41,7 @@ fn appendOctal(out: *[11]u8, value: u64) void {
     }
 }
 
-fn writeTarHeader(out: *std.ArrayList(u8), name: []const u8, size: u64, typeflag: u8, linkname: []const u8) !void {
+pub fn writeTarHeader(out: *std.ArrayList(u8), name: []const u8, size: u64, typeflag: u8, linkname: []const u8) !void {
     if (name.len > 100 or linkname.len > 100) return error.NameTooLong;
 
     var hdr = [_]u8{0} ** tar_block;
@@ -71,13 +71,19 @@ fn writeTarHeader(out: *std.ArrayList(u8), name: []const u8, size: u64, typeflag
     try out.appendSlice(&hdr);
 }
 
-fn writePad(out: *std.ArrayList(u8), size: usize) !void {
+pub fn writePad(out: *std.ArrayList(u8), size: usize) !void {
     const rem = size % tar_block;
     if (rem != 0) {
         const pad = tar_block - rem;
         const zeros = [_]u8{0} ** tar_block;
         try out.appendSlice(zeros[0..pad]);
     }
+}
+
+pub fn writeTarTrailer(out: *std.ArrayList(u8)) !void {
+    const zeros = [_]u8{0} ** tar_block;
+    try out.appendSlice(&zeros);
+    try out.appendSlice(&zeros);
 }
 
 const Entry = struct {
@@ -145,6 +151,17 @@ fn collectEntries(alloc: std.mem.Allocator, dir: std.fs.Dir) ![]Entry {
 /// Serializes a directory into a ustar archive (deterministic: sorted names,
 /// mtime 0). `out` must be owned by the caller and starts empty.
 pub fn tarBuildContext(alloc: std.mem.Allocator, ctx_dir: []const u8, out: *std.ArrayList(u8)) !void {
+    return tarDirectoryWithPrefix(alloc, ctx_dir, null, out);
+}
+
+/// Serializes `ctx_dir` into a ustar archive, optionally nesting all entries
+/// under `prefix/` (used by `zigpod cp` for directory uploads).
+pub fn tarDirectoryWithPrefix(
+    alloc: std.mem.Allocator,
+    ctx_dir: []const u8,
+    prefix: ?[]const u8,
+    out: *std.ArrayList(u8),
+) !void {
     if (ctx_dir.len == 0) return ApiError.InvalidHostPath;
     if (std.mem.startsWith(u8, ctx_dir, "/")) {
         try validateHostPath(ctx_dir, false);
@@ -166,15 +183,27 @@ pub fn tarBuildContext(alloc: std.mem.Allocator, ctx_dir: []const u8, out: *std.
         alloc.free(entries);
     }
 
-    const size_check = std.math.mul(usize, entries.len + 1, tar_block) catch return ApiError.BuildContextTooLarge;
+    const size_check = std.math.mul(usize, entries.len + 2, tar_block) catch return ApiError.BuildContextTooLarge;
     const total_cap = std.math.add(usize, out.items.len, size_check) catch return ApiError.BuildContextTooLarge;
     try out.ensureTotalCapacity(total_cap);
 
+    if (prefix) |pfx| {
+        const root_dir = try std.fmt.allocPrint(alloc, "{s}/", .{pfx});
+        defer alloc.free(root_dir);
+        try writeTarHeader(out, root_dir, 0, '5', "");
+    }
+
     for (entries) |e| {
-        const tname = if (e.kind == .directory)
-            try std.fmt.allocPrint(alloc, "{s}/", .{e.name})
+        const rel = if (prefix) |pfx|
+            try std.fmt.allocPrint(alloc, "{s}/{s}", .{ pfx, e.name })
         else
             e.name;
+        defer if (prefix != null) alloc.free(rel);
+
+        const tname = if (e.kind == .directory)
+            try std.fmt.allocPrint(alloc, "{s}/", .{rel})
+        else
+            rel;
         defer if (e.kind == .directory) alloc.free(tname);
 
         switch (e.kind) {
@@ -200,10 +229,7 @@ pub fn tarBuildContext(alloc: std.mem.Allocator, ctx_dir: []const u8, out: *std.
         }
     }
 
-    // Two zero blocks terminate the archive.
-    const zeros = [_]u8{0} ** tar_block;
-    try out.appendSlice(&zeros);
-    try out.appendSlice(&zeros);
+    try writeTarTrailer(out);
 
     if (out.items.len > max_build_context_bytes) return ApiError.BuildContextTooLarge;
 }

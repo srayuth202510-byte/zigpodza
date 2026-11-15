@@ -8,6 +8,10 @@ const Profile = t.Profile;
 const ParseError = t.ParseError;
 const eql = t.eql;
 
+pub const Label = t.Label;
+pub const RestartPolicySpec = t.RestartPolicySpec;
+pub const CpOpts = t.CpOpts;
+
 pub fn parseProfile(s: []const u8) ParseError!Profile {
     if (eql(s, "default")) return .default;
     if (eql(s, "sandbox")) return .sandbox;
@@ -15,7 +19,19 @@ pub fn parseProfile(s: []const u8) ParseError!Profile {
 }
 
 pub fn parsePolicyPath(s: []const u8) ParseError![]const u8 {
-    if (s.len == 0 or s.len > 4096) return error.InvalidValue;
+    return parseBoundedControlFree(s, 4096);
+}
+
+pub fn parseEnvFilePath(s: []const u8) ParseError![]const u8 {
+    return parseBoundedControlFree(s, 4096);
+}
+
+pub fn parseEntrypoint(s: []const u8) ParseError![]const u8 {
+    return parseBoundedControlFree(s, 4096);
+}
+
+fn parseBoundedControlFree(s: []const u8, max_len: usize) ParseError![]const u8 {
+    if (s.len == 0 or s.len > max_len) return error.InvalidValue;
     for (s) |c| {
         if (c < 0x20 or c == 0x7f) return error.InvalidValue;
     }
@@ -206,6 +222,145 @@ pub fn parseSignal(s: []const u8) ParseError![]const u8 {
     return error.InvalidValue;
 }
 
+/// Parses fractional CPU limits such as `"0.5"` or `"2"` into nanocpus (`1e9` per core),
+/// enforcing positive finite values up to 1024 CPUs.
+pub fn parseCpuNanos(s: []const u8) ParseError!i64 {
+    if (s.len == 0 or s.len > 24) return error.InvalidValue;
+    const dot_opt = std.mem.indexOfScalar(u8, s, '.');
+    const whole_str = if (dot_opt) |d| s[0..d] else s;
+    if (whole_str.len == 0) return error.InvalidValue;
+    for (whole_str) |c| {
+        if (!std.ascii.isDigit(c)) return error.InvalidValue;
+    }
+    const whole = std.fmt.parseInt(u64, whole_str, 10) catch return error.InvalidValue;
+    if (whole > 1024) return error.InvalidValue;
+
+    var frac_nanos: u64 = 0;
+    if (dot_opt) |d| {
+        const frac_str = s[d + 1 ..];
+        if (frac_str.len == 0 or frac_str.len > 9) return error.InvalidValue;
+        for (frac_str) |c| {
+            if (!std.ascii.isDigit(c)) return error.InvalidValue;
+        }
+        var mult: u64 = 100_000_000;
+        for (frac_str) |c| {
+            frac_nanos += @as(u64, c - '0') * mult;
+            mult /= 10;
+        }
+    }
+
+    const total = whole * 1_000_000_000 + frac_nanos;
+    if (total == 0 or total > 1024 * 1_000_000_000) return error.InvalidValue;
+    return @intCast(total);
+}
+
+/// Parses `KEY=VALUE` container metadata labels.
+pub fn parseLabelSpec(s: []const u8) ParseError!Label {
+    const eq = std.mem.indexOfScalar(u8, s, '=') orelse return error.InvalidValue;
+    const key = s[0..eq];
+    const value = s[eq + 1 ..];
+    if (key.len == 0 or key.len > 256) return error.InvalidValue;
+    for (key) |c| {
+        if (c <= 0x20 or c == 0x7f) return error.InvalidValue;
+    }
+    if (value.len > 4096) return error.InvalidValue;
+    for (value) |c| {
+        if (c < 0x20 or c == 0x7f) return error.InvalidValue;
+    }
+    return .{ .key = key, .value = value };
+}
+
+/// Validates RFC-1123 style container hostnames (`[a-zA-Z0-9.-]`, len 1..64).
+pub fn parseHostname(s: []const u8) ParseError![]const u8 {
+    if (s.len == 0 or s.len > 64) return error.InvalidValue;
+    if (s[0] == '.' or s[0] == '-' or s[s.len - 1] == '.' or s[s.len - 1] == '-') return error.InvalidValue;
+    var prev_dot = false;
+    for (s) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-') {
+            prev_dot = false;
+        } else if (c == '.') {
+            if (prev_dot) return error.InvalidValue;
+            prev_dot = true;
+        } else {
+            return error.InvalidValue;
+        }
+    }
+    return s;
+}
+
+/// Parses `--restart` policies: `no`, `always`, `unless-stopped`, `on-failure[:N]`.
+pub fn parseRestartPolicy(s: []const u8) ParseError!RestartPolicySpec {
+    if (eql(s, "no") or eql(s, "always") or eql(s, "unless-stopped") or eql(s, "on-failure")) {
+        return .{ .name = s, .max_retry_count = 0 };
+    }
+    if (std.mem.startsWith(u8, s, "on-failure:")) {
+        const tail = s["on-failure:".len..];
+        if (tail.len == 0 or tail.len > 5) return error.InvalidValue;
+        for (tail) |c| {
+            if (!std.ascii.isDigit(c)) return error.InvalidValue;
+        }
+        const retries = std.fmt.parseInt(u32, tail, 10) catch return error.InvalidValue;
+        if (retries > 10_000) return error.InvalidValue;
+        return .{ .name = "on-failure", .max_retry_count = retries };
+    }
+    return error.InvalidValue;
+}
+
+const network_drivers = [_][]const u8{ "bridge", "macvlan", "ipvlan" };
+
+pub fn parseNetworkDriver(s: []const u8) ParseError![]const u8 {
+    for (network_drivers) |d| {
+        if (eql(s, d)) return s;
+    }
+    return error.InvalidValue;
+}
+
+const ContainerPathRef = struct {
+    container: []const u8,
+    path: []const u8,
+};
+
+fn splitContainerPathRef(spec: []const u8) ParseError!?ContainerPathRef {
+    _ = try parseBoundedControlFree(spec, 4096);
+    if (std.mem.startsWith(u8, spec, "/") or
+        std.mem.startsWith(u8, spec, "./") or
+        std.mem.startsWith(u8, spec, "../"))
+    {
+        return null;
+    }
+    if (std.mem.indexOfScalar(u8, spec, ':')) |colon| {
+        const container = spec[0..colon];
+        const path = spec[colon + 1 ..];
+        if (container.len == 0 or path.len == 0) return error.InvalidValue;
+        return .{ .container = container, .path = path };
+    }
+    return null;
+}
+
+/// Parses `SRC DST` where exactly one endpoint is `CONTAINER:PATH` and the
+/// other is a local host path.
+pub fn parseCpEndpoints(src: []const u8, dst: []const u8) ParseError!CpOpts {
+    const src_ref = try splitContainerPathRef(src);
+    const dst_ref = try splitContainerPathRef(dst);
+    if (src_ref != null and dst_ref == null) {
+        return .{
+            .direction = .from_container,
+            .container = src_ref.?.container,
+            .container_path = src_ref.?.path,
+            .host_path = dst,
+        };
+    }
+    if (src_ref == null and dst_ref != null) {
+        return .{
+            .direction = .to_container,
+            .container = dst_ref.?.container,
+            .container_path = dst_ref.?.path,
+            .host_path = src,
+        };
+    }
+    return error.InvalidValue;
+}
+
 // ---------------------------------------------------------------- tests
 
 test "parseMemoryBytes and spec parsers handle valid and invalid inputs" {
@@ -377,4 +532,83 @@ test "parseSignal accepts full names and short aliases only" {
     try std.testing.expectError(error.InvalidValue, parseSignal("SIGFAKE"));
     try std.testing.expectError(error.InvalidValue, parseSignal("sigterm"));
     try std.testing.expectError(error.InvalidValue, parseSignal("9"));
+}
+
+test "parseCpuNanos handles integers, fractions, overflow, and zero" {
+    try std.testing.expectEqual(@as(i64, 500_000_000), try parseCpuNanos("0.5"));
+    try std.testing.expectEqual(@as(i64, 250_000_000), try parseCpuNanos("0.25"));
+    try std.testing.expectEqual(@as(i64, 2_000_000_000), try parseCpuNanos("2"));
+    try std.testing.expectEqual(@as(i64, 1_500_000_000), try parseCpuNanos("1.500"));
+    try std.testing.expectEqual(@as(i64, 1), try parseCpuNanos("0.000000001"));
+    try std.testing.expectEqual(@as(i64, 1024 * 1_000_000_000), try parseCpuNanos("1024"));
+
+    try std.testing.expectError(error.InvalidValue, parseCpuNanos(""));
+    try std.testing.expectError(error.InvalidValue, parseCpuNanos("0"));
+    try std.testing.expectError(error.InvalidValue, parseCpuNanos("0.0"));
+    try std.testing.expectError(error.InvalidValue, parseCpuNanos("-1"));
+    try std.testing.expectError(error.InvalidValue, parseCpuNanos(".5"));
+    try std.testing.expectError(error.InvalidValue, parseCpuNanos("1."));
+    try std.testing.expectError(error.InvalidValue, parseCpuNanos("1.2.3"));
+    try std.testing.expectError(error.InvalidValue, parseCpuNanos("0.0000000001"));
+    try std.testing.expectError(error.InvalidValue, parseCpuNanos("1025"));
+    try std.testing.expectError(error.InvalidValue, parseCpuNanos("1024.5"));
+}
+
+test "parseLabelSpec, parseHostname, parseEntrypoint, and parseRestartPolicy validate inputs" {
+    const l1 = try parseLabelSpec("app.env=prod");
+    try std.testing.expectEqualStrings("app.env", l1.key);
+    try std.testing.expectEqualStrings("prod", l1.value);
+    const l2 = try parseLabelSpec("note=hello world");
+    try std.testing.expectEqualStrings("hello world", l2.value);
+    const l3 = try parseLabelSpec("empty=");
+    try std.testing.expectEqualStrings("", l3.value);
+    try std.testing.expectError(error.InvalidValue, parseLabelSpec("novalue"));
+    try std.testing.expectError(error.InvalidValue, parseLabelSpec("=val"));
+    try std.testing.expectError(error.InvalidValue, parseLabelSpec("bad key=val"));
+    try std.testing.expectError(error.InvalidValue, parseLabelSpec("k=bad\nval"));
+
+    try std.testing.expectEqualStrings("web-1.local", try parseHostname("web-1.local"));
+    try std.testing.expectEqualStrings("h" ** 64, try parseHostname("h" ** 64));
+    try std.testing.expectError(error.InvalidValue, parseHostname(""));
+    try std.testing.expectError(error.InvalidValue, parseHostname("-bad"));
+    try std.testing.expectError(error.InvalidValue, parseHostname("bad."));
+    try std.testing.expectError(error.InvalidValue, parseHostname("a..b"));
+    try std.testing.expectError(error.InvalidValue, parseHostname("bad host"));
+    try std.testing.expectError(error.InvalidValue, parseHostname("h" ** 65));
+
+    try std.testing.expectEqualStrings("/bin/sh", try parseEntrypoint("/bin/sh"));
+    try std.testing.expectError(error.InvalidValue, parseEntrypoint(""));
+    try std.testing.expectError(error.InvalidValue, parseEntrypoint("/bin/\nsh"));
+
+    try std.testing.expectEqualStrings("always", (try parseRestartPolicy("always")).name);
+    const onf = try parseRestartPolicy("on-failure:5");
+    try std.testing.expectEqualStrings("on-failure", onf.name);
+    try std.testing.expectEqual(@as(u32, 5), onf.max_retry_count);
+    try std.testing.expectError(error.InvalidValue, parseRestartPolicy("on-failure:"));
+    try std.testing.expectError(error.InvalidValue, parseRestartPolicy("on-failure:+2"));
+    try std.testing.expectError(error.InvalidValue, parseRestartPolicy("always:2"));
+    try std.testing.expectError(error.InvalidValue, parseRestartPolicy("bogus"));
+
+    try std.testing.expectEqualStrings("bridge", try parseNetworkDriver("bridge"));
+    try std.testing.expectError(error.InvalidValue, parseNetworkDriver("custom"));
+}
+
+test "parseCpEndpoints splits CONTAINER:PATH and host endpoints" {
+    const to = try parseCpEndpoints("/tmp/app.txt", "web:/tmp");
+    try std.testing.expectEqual(t.CpDirection.to_container, to.direction);
+    try std.testing.expectEqualStrings("web", to.container);
+    try std.testing.expectEqualStrings("/tmp", to.container_path);
+    try std.testing.expectEqualStrings("/tmp/app.txt", to.host_path);
+
+    const from = try parseCpEndpoints("web:/etc/hosts", "/tmp/hosts");
+    try std.testing.expectEqual(t.CpDirection.from_container, from.direction);
+    try std.testing.expectEqualStrings("web", from.container);
+    try std.testing.expectEqualStrings("/etc/hosts", from.container_path);
+    try std.testing.expectEqualStrings("/tmp/hosts", from.host_path);
+
+    try std.testing.expectError(error.InvalidValue, parseCpEndpoints("a:/x", "b:/y"));
+    try std.testing.expectError(error.InvalidValue, parseCpEndpoints("/tmp/a", "/tmp/b"));
+    try std.testing.expectError(error.InvalidValue, parseCpEndpoints("web:", "/tmp/b"));
+    try std.testing.expectError(error.InvalidValue, parseCpEndpoints(":/x", "/tmp/b"));
+    try std.testing.expectError(error.InvalidValue, parseCpEndpoints("", "/tmp/b"));
 }

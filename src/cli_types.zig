@@ -28,6 +28,12 @@ pub const usage =
     \\      --no-new-privileges        Prevent privilege escalation inside container
     \\      --profile PROFILE          Security profile: default|sandbox (fail-closed AI sandbox)
     \\      --policy FILE              Pre-flight policy guardrails JSON (e.g. zigpod-policy.json)
+    \\      --cpus N                   Limit CPU cores (e.g., 0.5, 2)
+    \\      --env-file FILE            Read environment variables from file (repeatable)
+    \\      -l, --label KEY=VALUE      Set metadata label on container (repeatable)
+    \\      --entrypoint CMD           Overwrite default image entrypoint
+    \\      --hostname NAME            Container host name
+    \\      --restart POLICY           Restart policy: no|always|unless-stopped|on-failure[:N]
     \\  ps [-a] [--json]               List containers (-a: include stopped, --json: JSON output)
     \\  images [--json]                List local images (--json: JSON output)
     \\  pull IMAGE                     Pull an image from a registry
@@ -51,7 +57,9 @@ pub const usage =
     \\  inspect [--json] TARGET        Show container or image details (state, IP, mounts, limits)
     \\  stats [--no-stream] [-a] [--json] [CONTAINER...]  Display CPU, memory, and PIDs metrics
     \\  volume ls|create|rm|inspect [NAME]       Manage named volumes
-    \\  network ls|inspect [NAME]      List or inspect container networks
+    \\  network ls|inspect|create|rm ...         Manage container networks
+    \\  attach [-i] [-t] CONTAINER               Attach to a running container
+    \\  cp SRC DST                               Copy files between container (CTR:PATH) and host path
     \\  system ping|df|prune [-f]      Check daemon health, disk usage, or prune unused resources
     \\  port CONTAINER [PORT[/PROTO]]  List port mappings for a container
     \\  wait CONTAINER                 Block until a container stops and print its exit code
@@ -112,18 +120,33 @@ pub const Profile = enum {
     sandbox,
 };
 
+pub const Label = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
+pub const RestartPolicySpec = struct {
+    name: []const u8,
+    max_retry_count: u32 = 0,
+};
+
 pub const RunOpts = struct {
     image: []const u8,
     cmd: []const []const u8 = &.{},
     env: []const []const u8 = &.{},
+    env_files: []const []const u8 = &.{},
     volumes: []const Volume = &.{},
     ports: []const PortMapping = &.{},
+    labels: []const Label = &.{},
     cap_drop: []const []const u8 = &.{},
     cap_add: []const []const u8 = &.{},
     name: ?[]const u8 = null,
     network: ?[]const u8 = null,
     workdir: ?[]const u8 = null,
     user: ?[]const u8 = null,
+    entrypoint: ?[]const u8 = null,
+    hostname: ?[]const u8 = null,
+    restart_policy: ?RestartPolicySpec = null,
     profile: Profile = .default,
     policy_path: ?[]const u8 = null,
     detach: bool = false,
@@ -134,6 +157,7 @@ pub const RunOpts = struct {
     no_new_privileges: bool = false,
     memory: ?i64 = null,
     pids_limit: ?i64 = null,
+    nano_cpus: ?i64 = null,
 };
 
 pub const RmOpts = struct {
@@ -232,14 +256,37 @@ pub const VolumeOpts = struct {
     force: bool = false,
 };
 
+pub const AttachOpts = struct {
+    container: []const u8,
+    interactive: bool = false,
+    tty: bool = false,
+};
+
+pub const CpDirection = enum {
+    to_container,
+    from_container,
+};
+
+pub const CpOpts = struct {
+    direction: CpDirection,
+    container: []const u8,
+    container_path: []const u8,
+    host_path: []const u8,
+};
+
 pub const NetworkAction = enum {
     ls,
     inspect,
+    create,
+    rm,
 };
 
 pub const NetworkOpts = struct {
     action: NetworkAction,
     name: ?[]const u8 = null,
+    driver: []const u8 = "bridge",
+    internal: bool = false,
+    force: bool = false,
 };
 
 pub const SystemAction = enum {
@@ -344,9 +391,11 @@ pub const Command = union(enum) {
     top: []const u8,
     inspect: InspectOpts,
     exec: ExecOpts,
+    attach: AttachOpts,
     stats: StatsOpts,
     volume: VolumeOpts,
     network: NetworkOpts,
+    cp: CpOpts,
     system: SystemOpts,
     port: PortOpts,
     wait: []const u8,
@@ -374,8 +423,10 @@ pub const Parsed = struct {
         switch (self.command) {
             .run => |r| {
                 if (r.env.len > 0) allocator.free(r.env);
+                if (r.env_files.len > 0) allocator.free(r.env_files);
                 if (r.volumes.len > 0) allocator.free(r.volumes);
                 if (r.ports.len > 0) allocator.free(r.ports);
+                if (r.labels.len > 0) allocator.free(r.labels);
                 if (r.cap_drop.len > 0) allocator.free(r.cap_drop);
                 if (r.cap_add.len > 0) allocator.free(r.cap_add);
             },
@@ -469,14 +520,19 @@ test "RunOpts default values" {
     try std.testing.expectEqualStrings("alpine:3.20", r.image);
     try std.testing.expectEqual(@as(usize, 0), r.cmd.len);
     try std.testing.expectEqual(@as(usize, 0), r.env.len);
+    try std.testing.expectEqual(@as(usize, 0), r.env_files.len);
     try std.testing.expectEqual(@as(usize, 0), r.volumes.len);
     try std.testing.expectEqual(@as(usize, 0), r.ports.len);
+    try std.testing.expectEqual(@as(usize, 0), r.labels.len);
     try std.testing.expectEqual(@as(usize, 0), r.cap_drop.len);
     try std.testing.expectEqual(@as(usize, 0), r.cap_add.len);
     try std.testing.expect(r.name == null);
     try std.testing.expect(r.network == null);
     try std.testing.expect(r.workdir == null);
     try std.testing.expect(r.user == null);
+    try std.testing.expect(r.entrypoint == null);
+    try std.testing.expect(r.hostname == null);
+    try std.testing.expect(r.restart_policy == null);
     try std.testing.expect(r.profile == .default);
     try std.testing.expect(r.policy_path == null);
     try std.testing.expect(r.detach == false);
@@ -487,16 +543,21 @@ test "RunOpts default values" {
     try std.testing.expect(r.no_new_privileges == false);
     try std.testing.expect(r.memory == null);
     try std.testing.expect(r.pids_limit == null);
+    try std.testing.expect(r.nano_cpus == null);
 }
 
 test "Parsed.deinit frees owned slices for run command" {
     const alloc = std.testing.allocator;
     const env_arr = try alloc.alloc([]const u8, 1);
     env_arr[0] = "A=1";
+    const env_files_arr = try alloc.alloc([]const u8, 1);
+    env_files_arr[0] = "/srv/app.env";
     const volumes_arr = try alloc.alloc(Volume, 1);
     volumes_arr[0] = Volume{ .source = "/srv/data", .destination = "/data", .readonly = true };
     const ports_arr = try alloc.alloc(PortMapping, 1);
     ports_arr[0] = PortMapping{ .container_port = 80 };
+    const labels_arr = try alloc.alloc(Label, 1);
+    labels_arr[0] = Label{ .key = "env", .value = "prod" };
     const cap_drop_arr = try alloc.alloc([]const u8, 1);
     cap_drop_arr[0] = "ALL";
     const cap_add_arr = try alloc.alloc([]const u8, 1);
@@ -508,8 +569,10 @@ test "Parsed.deinit frees owned slices for run command" {
             .run = .{
                 .image = "alpine:3.20",
                 .env = env_arr,
+                .env_files = env_files_arr,
                 .volumes = volumes_arr,
                 .ports = ports_arr,
+                .labels = labels_arr,
                 .cap_drop = cap_drop_arr,
                 .cap_add = cap_add_arr,
             },

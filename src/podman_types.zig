@@ -13,6 +13,12 @@ pub const ApiError = error{
     InvalidUser,
     InvalidCapability,
     InvalidSignal,
+    InvalidCpuLimit,
+    InvalidHostname,
+    InvalidRestartPolicy,
+    InvalidLabel,
+    InvalidNetworkDriver,
+    InvalidEnvFile,
     PolicyViolation,
     InvalidPolicyFile,
     BuildFailed,
@@ -33,11 +39,18 @@ pub const TmpfsBounds = struct {
     }
 };
 
+pub const RestartPolicy = struct {
+    Name: []const u8,
+    MaximumRetryCount: u32 = 0,
+};
+
 pub const HostConfig = struct {
     AutoRemove: bool = false,
     ReadonlyRootfs: bool = false,
     Memory: ?i64 = null,
+    NanoCpus: ?i64 = null,
     PidsLimit: ?i64 = null,
+    RestartPolicy: ?RestartPolicy = null,
     SecurityOpt: ?[]const []const u8 = null,
     PortBindings: ?PortBindings = null,
     NetworkMode: ?[]const u8 = null,
@@ -109,10 +122,32 @@ pub const PortBindings = struct {
     }
 };
 
+pub const LabelEntry = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
+/// Serializes Docker `ContainerCreateRequest.Labels` object: `{"k":"v",...}`.
+pub const LabelsMap = struct {
+    entries: []const LabelEntry,
+
+    pub fn jsonStringify(self: LabelsMap, jw: anytype) !void {
+        try jw.beginObject();
+        for (self.entries) |entry| {
+            try jw.objectField(entry.key);
+            try jw.write(entry.value);
+        }
+        try jw.endObject();
+    }
+};
+
 pub const ContainerCreateRequest = struct {
     Image: []const u8,
+    Hostname: ?[]const u8 = null,
+    Entrypoint: ?[]const []const u8 = null,
     Cmd: ?[]const []const u8 = null,
     Env: ?[]const []const u8 = null,
+    Labels: ?LabelsMap = null,
     ExposedPorts: ?ExposedPorts = null,
     WorkingDir: ?[]const u8 = null,
     User: ?[]const u8 = null,
@@ -327,6 +362,20 @@ pub const NetworkInfo = struct {
     Driver: []const u8 = "",
     Scope: []const u8 = "local",
     Internal: bool = false,
+};
+
+/// Request body for `POST /networks/create`.
+pub const NetworkCreateRequest = struct {
+    Name: []const u8,
+    Driver: []const u8 = "bridge",
+    Internal: bool = false,
+    CheckDuplicate: bool = true,
+};
+
+/// Response body from `POST /networks/create`.
+pub const NetworkCreateResponse = struct {
+    Id: []const u8 = "",
+    Warning: []const u8 = "",
 };
 
 /// Response from `GET /system/df`.
@@ -875,4 +924,36 @@ test "Build stream event parses stream, error, and aux lines" {
     const a = try std.json.parseFromSlice(BuildStreamEvent, alloc, aux_line, .{});
     defer a.deinit();
     try std.testing.expectEqualStrings("sha256:deadbeef", a.value.aux.?.ID);
+}
+
+test "LabelsMap, Hostname, Entrypoint, NanoCpus, RestartPolicy, and NetworkCreateRequest serialize cleanly" {
+    const alloc = std.testing.allocator;
+    const labels = [_]LabelEntry{
+        .{ .key = "app", .value = "api" },
+        .{ .key = "tier", .value = "backend" },
+    };
+    const ep = [_][]const u8{"/bin/sh"};
+    const req = ContainerCreateRequest{
+        .Image = "alpine:3.20",
+        .Hostname = "api-1.local",
+        .Entrypoint = &ep,
+        .Labels = .{ .entries = &labels },
+        .HostConfig = .{
+            .NanoCpus = 500_000_000,
+            .RestartPolicy = .{ .Name = "on-failure", .MaximumRetryCount = 3 },
+        },
+    };
+    const json = try std.json.stringifyAlloc(alloc, req, .{ .emit_null_optional_fields = false });
+    defer alloc.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Hostname\":\"api-1.local\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Entrypoint\":[\"/bin/sh\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Labels\":{\"app\":\"api\",\"tier\":\"backend\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"NanoCpus\":500000000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"RestartPolicy\":{\"Name\":\"on-failure\",\"MaximumRetryCount\":3}") != null);
+
+    const nreq = NetworkCreateRequest{ .Name = "iso-net", .Driver = "bridge", .Internal = true };
+    const njson = try std.json.stringifyAlloc(alloc, nreq, .{ .emit_null_optional_fields = false });
+    defer alloc.free(njson);
+    try std.testing.expect(std.mem.indexOf(u8, njson, "\"Name\":\"iso-net\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, njson, "\"Internal\":true") != null);
 }

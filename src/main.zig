@@ -218,6 +218,16 @@ fn dispatch(
         .network => |n| switch (n.action) {
             .ls => try pod.listNetworks(client, logger, stdout),
             .inspect => try pod.inspectNetwork(client, logger, n.name.?, stdout),
+            .create => try pod.createNetwork(client, logger, n.name.?, n.driver, n.internal, stdout),
+            .rm => try pod.removeNetwork(client, logger, n.name.?, n.force),
+        },
+        .attach => |opts| {
+            const stdin_fd: ?std.posix.fd_t = if (opts.interactive or opts.tty) std.io.getStdIn().handle else null;
+            try pod.attachContainer(client, logger, opts.container, opts.interactive, opts.tty, stdin_fd, stdout);
+        },
+        .cp => |opts| switch (opts.direction) {
+            .to_container => try transfer.cpToContainer(client, logger, opts.container, opts.host_path, opts.container_path, stdout),
+            .from_container => try transfer.cpFromContainer(client, logger, opts.container, opts.container_path, opts.host_path, stdout),
         },
         .system => |s| switch (s.action) {
             .ping => try pod.systemPing(client, logger, stdout),
@@ -272,6 +282,13 @@ fn dispatch(
         .version => try pod.showVersion(client, logger, version, stdout),
         .run => |r_orig| {
             var r = r_orig;
+            var merged_env: ?pod.validate.MergedEnv = null;
+            defer if (merged_env) |*me| me.deinit();
+            if (r.env_files.len > 0) {
+                merged_env = try pod.loadAndMergeEnv(client.allocator, r.env_files, r.env);
+                r.env = merged_env.?.items;
+            }
+
             var tmpfs_bounds: ?pod.TmpfsBounds = null;
             var loaded_pol: ?std.json.Parsed(policy.Policy) = null;
             defer if (loaded_pol) |lp| lp.deinit();
@@ -322,12 +339,37 @@ fn dispatch(
                 }
             }
 
-            // Validate identity/network/capability flags before touching the socket.
+            var label_buf = std.ArrayList(pod.LabelEntry).init(client.allocator);
+            defer label_buf.deinit();
+            for (r.labels) |lbl| {
+                const entry = pod.LabelEntry{ .key = lbl.key, .value = lbl.value };
+                try pod.validateLabel(entry);
+                try label_buf.append(entry);
+            }
+
+            // Validate identity/network/capability/resource flags before touching the socket.
             if (r.network) |m| try pod.validateNetworkMode(m);
             if (r.workdir) |w| try pod.validateWorkdir(w);
             if (r.user) |u| try pod.validateUser(u);
+            if (r.nano_cpus) |nc| try pod.validateNanoCpus(nc);
+            if (r.hostname) |h| try pod.validateHostname(h);
+            var api_restart_policy: ?pod.RestartPolicy = null;
+            if (r.restart_policy) |rp| {
+                const mapped = pod.RestartPolicy{
+                    .Name = rp.name,
+                    .MaximumRetryCount = rp.max_retry_count,
+                };
+                try pod.validateRestartPolicy(mapped);
+                api_restart_policy = mapped;
+            }
             for (r.cap_drop) |c| try pod.validateCapability(c);
             for (r.cap_add) |c| try pod.validateCapability(c);
+
+            var ep_slice: [1][]const u8 = undefined;
+            const api_entrypoint: ?[]const []const u8 = if (r.entrypoint) |ep| blk: {
+                ep_slice[0] = ep;
+                break :blk &ep_slice;
+            } else null;
 
             // Defer removal until after fetchLogs when attached so output is not lost.
             const auto_remove = r.detach and r.remove;
@@ -335,7 +377,9 @@ fn dispatch(
                 r.read_only or
                 r.no_new_privileges or
                 r.memory != null or
+                r.nano_cpus != null or
                 r.pids_limit != null or
+                api_restart_policy != null or
                 has_binding or
                 r.network != null or
                 r.cap_drop.len > 0 or
@@ -346,7 +390,9 @@ fn dispatch(
                 .AutoRemove = auto_remove,
                 .ReadonlyRootfs = r.read_only,
                 .Memory = r.memory,
+                .NanoCpus = r.nano_cpus,
                 .PidsLimit = r.pids_limit,
+                .RestartPolicy = api_restart_policy,
                 .SecurityOpt = if (r.no_new_privileges) sec_opts else null,
                 .PortBindings = if (has_binding) .{ .ports = port_buf.items } else null,
                 .NetworkMode = r.network,
@@ -357,8 +403,11 @@ fn dispatch(
 
             const req = pod.ContainerCreateRequest{
                 .Image = r.image,
+                .Hostname = r.hostname,
+                .Entrypoint = api_entrypoint,
                 .Cmd = if (r.cmd.len > 0) r.cmd else null,
                 .Env = if (r.env.len > 0) r.env else null,
+                .Labels = if (label_buf.items.len > 0) .{ .entries = label_buf.items } else null,
                 .ExposedPorts = if (port_buf.items.len > 0) .{ .ports = port_buf.items } else null,
                 .WorkingDir = r.workdir,
                 .User = r.user,
@@ -478,6 +527,30 @@ fn reportFailure(logger: *log.Logger, cmd: cli.Command, socket_path: []const u8,
             "api.validateSignal",
             "Rejected invalid kill signal. Allowed: SIGTERM, SIGKILL, SIGINT, SIGHUP, SIGQUIT, SIGUSR1, SIGUSR2.",
         ),
+        pod.ApiError.InvalidCpuLimit => logger.deny(
+            "api.validateNanoCpus",
+            "Rejected invalid --cpus limit (must be > 0 and <= 1024 CPUs).",
+        ),
+        pod.ApiError.InvalidHostname => logger.deny(
+            "api.validateHostname",
+            "Rejected invalid --hostname (use 1..64 RFC-1123 characters [a-zA-Z0-9.-]).",
+        ),
+        pod.ApiError.InvalidRestartPolicy => logger.deny(
+            "api.validateRestartPolicy",
+            "Rejected invalid --restart policy. Allowed: no, always, unless-stopped, on-failure[:N].",
+        ),
+        pod.ApiError.InvalidLabel => logger.deny(
+            "api.validateLabel",
+            "Rejected invalid container label (KEY=VALUE with non-empty control-free key).",
+        ),
+        pod.ApiError.InvalidNetworkDriver => logger.deny(
+            "api.validateNetworkDriver",
+            "Rejected invalid network driver. Allowed: bridge, macvlan, ipvlan.",
+        ),
+        pod.ApiError.InvalidEnvFile => logger.deny(
+            "api.loadAndMergeEnv",
+            "Rejected malformed or oversized --env-file (must contain KEY=VALUE lines <= 1 MiB).",
+        ),
         pod.ApiError.InvalidPolicyFile => logger.deny(
             "policy.loadPolicyFile",
             "Rejected missing or malformed policy file (zigpod-policy.json).",
@@ -516,6 +589,7 @@ test {
     _ = pod;
     _ = pods;
     _ = build_mod;
+    _ = transfer;
     _ = policy;
     _ = @import("utils.zig");
     std.testing.refAllDecls(@This());
@@ -736,4 +810,212 @@ test "dispatch run --profile=sandbox serializes HostConfig.Tmpfs and logs DENY o
     try std.testing.expect(try log.writeAuditJson(alloc, audit_path, audit_json.writer()));
     try std.testing.expect(std.mem.indexOf(u8, audit_json.items, "\"deny_events\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, audit_json.items, "\"rule\":\"policy.max_memory_bytes\"") != null);
+}
+
+const ExtendedDispatchMockCtx = struct {
+    server: *std.net.Server,
+    stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    create_body: [4096]u8 = undefined,
+    create_body_len: usize = 0,
+    matched: usize = 0,
+};
+
+fn runExtendedDispatchMockServer(ctx: *ExtendedDispatchMockCtx) void {
+    // Step 1: run --cpus --env-file -l --entrypoint --hostname --restart -> POST create (201) + POST start (204)
+    // Step 2: network create -> POST /networks/create (201)
+    // Step 3: network rm -> DELETE /networks/iso?force=true (204)
+    // Step 4: attach -> POST /containers/web/attach?stream=1&stdout=1&stderr=1 (101 + "attached\n")
+    // Step 5: cp to container -> PUT /containers/web/archive?path=%2Ftmp (200)
+    const steps = [_]struct {
+        match: []const u8,
+        reply: []const u8,
+        capture_body: bool = false,
+    }{
+        .{
+            .match = "POST /v1.40/containers/create",
+            .reply = "HTTP/1.1 201 Created\r\nContent-Length: 17\r\n\r\n{\"Id\":\"runnew12\"}",
+            .capture_body = true,
+        },
+        .{
+            .match = "POST /v1.40/containers/runnew12/start",
+            .reply = "HTTP/1.1 204 No Content\r\n\r\n",
+        },
+        .{
+            .match = "POST /v1.40/networks/create",
+            .reply = "HTTP/1.1 201 Created\r\nContent-Length: 28\r\n\r\n{\"Id\":\"netabc\",\"Warning\":\"\"}",
+        },
+        .{
+            .match = "DELETE /v1.40/networks/iso?force=true",
+            .reply = "HTTP/1.1 204 No Content\r\n\r\n",
+        },
+        .{
+            .match = "POST /v1.40/containers/web/attach",
+            .reply = "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\nattached\n",
+        },
+        .{
+            .match = "PUT /v1.40/containers/web/archive?path=%2Ftmp",
+            .reply = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+        },
+    };
+
+    for (steps) |step| {
+        var polls: usize = 0;
+        while (!ctx.stop.load(.acquire) and polls < 100) : (polls += 1) {
+            var pfd = [1]std.posix.pollfd{.{
+                .fd = ctx.server.stream.handle,
+                .events = std.posix.POLL.IN,
+                .revents = 0,
+            }};
+            const ready = std.posix.poll(&pfd, 50) catch return;
+            if (ready > 0 and (pfd[0].revents & std.posix.POLL.IN) != 0) break;
+        }
+        if (ctx.stop.load(.acquire) or polls >= 100) return;
+
+        const conn = ctx.server.accept() catch return;
+        defer conn.stream.close();
+        var req_buf: [4096]u8 = undefined;
+        var total: usize = 0;
+        // Read headers + initial payload; short poll drains split writes (headers then body).
+        while (total < req_buf.len) {
+            const n = conn.stream.read(req_buf[total..]) catch break;
+            if (n == 0) break;
+            total += n;
+            if (std.mem.indexOf(u8, req_buf[0..total], "\r\n\r\n") != null) {
+                var dpfd = [1]std.posix.pollfd{.{
+                    .fd = conn.stream.handle,
+                    .events = std.posix.POLL.IN,
+                    .revents = 0,
+                }};
+                const more = std.posix.poll(&dpfd, 15) catch 0;
+                if (more == 0) break;
+            }
+        }
+        const req_data = req_buf[0..total];
+        if (std.mem.startsWith(u8, req_data, step.match)) {
+            ctx.matched += 1;
+            if (step.capture_body) {
+                const copy_len = @min(req_data.len, ctx.create_body.len);
+                @memcpy(ctx.create_body[0..copy_len], req_data[0..copy_len]);
+                ctx.create_body_len = copy_len;
+            }
+            conn.stream.writeAll(step.reply) catch return;
+        } else {
+            conn.stream.writeAll("HTTP/1.1 500 Unexpected\r\nContent-Length: 0\r\n\r\n") catch return;
+        }
+    }
+}
+
+test "dispatch handles extended run flags (--cpus, --env-file, --label, --entrypoint, --hostname, --restart), network CRUD, attach, and cp" {
+    const alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir_path);
+
+    try tmp.dir.writeFile(.{ .sub_path = "app.env", .data = "# env\nMODE=sandbox\n" });
+    const env_path = try std.fs.path.join(alloc, &.{ dir_path, "app.env" });
+    defer alloc.free(env_path);
+
+    try tmp.dir.writeFile(.{ .sub_path = "secret.env", .data = "API_KEY=sk-1234567890abcdef123456\n" });
+    const secret_env_path = try std.fs.path.join(alloc, &.{ dir_path, "secret.env" });
+    defer alloc.free(secret_env_path);
+
+    try tmp.dir.writeFile(.{ .sub_path = "note.txt", .data = "hello" });
+    const note_path = try std.fs.path.join(alloc, &.{ dir_path, "note.txt" });
+    defer alloc.free(note_path);
+
+    const sock_path = try std.fmt.allocPrint(alloc, "/tmp/zp-disp-ext-{d}.sock", .{std.time.nanoTimestamp()});
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    var ctx = ExtendedDispatchMockCtx{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, runExtendedDispatchMockServer, .{&ctx});
+    var joined = false;
+    defer {
+        ctx.stop.store(true, .release);
+        if (!joined) thread.join();
+    }
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path };
+    var logger = log.Logger.init(dir_path, false);
+    defer logger.deinit();
+    logger.echo_stderr = false;
+
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    // Pre-flight secret check must block secrets coming from --env-file in sandbox mode.
+    try std.testing.expectError(
+        pod.ApiError.PolicyViolation,
+        dispatch(&client, &logger, .{
+            .run = .{
+                .image = "alpine:3.20",
+                .profile = .sandbox,
+                .env_files = &.{secret_env_path},
+                .detach = true,
+            },
+        }, out.writer()),
+    );
+
+    // Run with all new flags serialized cleanly.
+    const labels = [_]cli.Label{.{ .key = "svc", .value = "worker" }};
+    const rc = try dispatch(&client, &logger, .{
+        .run = .{
+            .image = "alpine:3.20",
+            .detach = true,
+            .nano_cpus = 500_000_000,
+            .env_files = &.{env_path},
+            .env = &.{"EXTRA=1"},
+            .labels = &labels,
+            .entrypoint = "/bin/sh",
+            .hostname = "worker-1.local",
+            .restart_policy = .{ .name = "on-failure", .max_retry_count = 2 },
+        },
+    }, out.writer());
+    try std.testing.expectEqual(@as(u8, 0), rc);
+    try std.testing.expectEqualStrings("runnew12\n", out.items);
+
+    out.clearRetainingCapacity();
+    _ = try dispatch(&client, &logger, .{
+        .network = .{ .action = .create, .name = "iso", .driver = "bridge", .internal = true },
+    }, out.writer());
+    try std.testing.expectEqualStrings("netabc\n", out.items);
+
+    _ = try dispatch(&client, &logger, .{
+        .network = .{ .action = .rm, .name = "iso", .force = true },
+    }, out.writer());
+
+    out.clearRetainingCapacity();
+    _ = try dispatch(&client, &logger, .{
+        .attach = .{ .container = "web", .tty = true },
+    }, out.writer());
+    try std.testing.expectEqualStrings("attached\n", out.items);
+
+    out.clearRetainingCapacity();
+    _ = try dispatch(&client, &logger, .{
+        .cp = .{
+            .direction = .to_container,
+            .container = "web",
+            .container_path = "/tmp",
+            .host_path = note_path,
+        },
+    }, out.writer());
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "web:/tmp") != null);
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(@as(usize, 6), ctx.matched);
+
+    const req_slice = ctx.create_body[0..ctx.create_body_len];
+    try std.testing.expect(std.mem.indexOf(u8, req_slice, "\"NanoCpus\":500000000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, req_slice, "\"Hostname\":\"worker-1.local\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, req_slice, "\"Entrypoint\":[\"/bin/sh\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, req_slice, "\"Labels\":{\"svc\":\"worker\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, req_slice, "\"Env\":[\"MODE=sandbox\",\"EXTRA=1\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, req_slice, "\"RestartPolicy\":{\"Name\":\"on-failure\",\"MaximumRetryCount\":2}") != null);
 }

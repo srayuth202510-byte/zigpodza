@@ -251,3 +251,14 @@ status: active
   - ใน [src/podman_build.zig](../../src/podman_build.zig): `dupe` ค่า `aux.ID` ด้วย `client.allocator`, บังคับ `validateHostPath` บน `ctx_dir` (ทั้งค่าที่ส่งมาและ `realpathAlloc`), และบล็อก symlink ที่เป็น absolute หรือมี `..`
   - ใน [scripts/balor-security-audit.sh](../../scripts/balor-security-audit.sh): นับ `DENY` จาก `msg.startswith("DENY rule=")` และ validate `HostIp` (IPv4) / `HostPort` (`1..65535`) ก่อนเพิ่มเข้า `endpoints`
 - **Prevention Rule**: ทุกโมดูลที่เพิ่มใหม่ต้องถูกอ้างอิงใน `test { ... }` ของ root test tree และตรวจด้วย `scripts/auto-audit.sh` เสมอ
+
+---
+
+## BUG-023: Tar Transfer Symlink Escape, Premature Output Truncation & Wrong Upload Content-Type `#bug-pattern` `#security-gate` `#reliability`
+
+- **Symptom**: (1) `saveImage`/`exportContainer` ใน [src/podman_transfer.zig](../../src/podman_transfer.zig) เปิดไฟล์ปลายทางด้วย `createFileAbsolute(..., .truncate = true)` ก่อนส่งคำขอไปยัง daemon ทำให้เมื่อ daemon ตอบ 404/error หรือ timeout ไฟล์เดิมถูก truncate ทิ้งเป็น 0 ไบต์ และหากปลายทางหรือ `in_path` ของ `loadImage`/`importImage` เป็น symlink ที่ชี้ไปยัง `/etc` สามารถหลุดผ่าน `validateHostPath` แบบ lexical ได้ (2) `loadImage`/`importImage` ส่ง `Content-Type: application/json` แทน `application/x-tar` (3) `test {}` ใน [src/main.zig](../../src/main.zig) และ [src/podman_api.zig](../../src/podman_api.zig) ขาดการอ้างอิง `transfer` และ `th` รวมถึง [scripts/auto-audit.sh](../../scripts/auto-audit.sh) ยังไม่ตรวจ `podman_transfer.zig`
+- **Root Cause**: `validateHostPath` ตรวจเฉพาะรูปแบบสตริงของ path โดยไม่ได้ตรวจ `realpathAlloc`/symlink หรือชนิดไฟล์ (regular file) ก่อนเปิดไฟล์; การเปิด output file ก่อน `streamRequest` ทำให้ล้มเหลวแล้วทิ้งไฟล์เสียไว้; และ `requestWithTimeout` fix `Content-Type` เป็น `application/json`
+- **Fix**:
+  - ใน [src/podman_transfer.zig](../../src/podman_transfer.zig): เพิ่ม `validateOutputPath()` ตรวจ `realpathAlloc` ของ parent dir + บล็อก leaf symlink และ non-regular target; ใช้ `StreamOutput` + atomic temp-file/rename เฉพาะเมื่อ `streamRequest` คืน 2xx ครบ; เพิ่มการตรวจ `realpathAlloc` + `stat.kind == .file` ใน `openInput()`; และใช้ `requestWithContentType(..., "application/x-tar", ...)` ใน `postTarUpload()`
+  - เพิ่ม `_ = transfer;` ใน [src/main.zig](../../src/main.zig) และ `_ = th;` ใน [src/podman_api.zig](../../src/podman_api.zig) พร้อมตรวจใน [scripts/auto-audit.sh](../../scripts/auto-audit.sh)
+- **Prevention Rule**: ทุกคำสั่งที่อ่าน/เขียนไฟล์บน host จาก CLI (`save`/`load`/`export`/`import`/`build`) ต้องตรวจทั้ง lexical path, `realpathAlloc`, ชนิด regular file, และเขียนไฟล์ปลายทางแบบ atomic หลังยืนยัน response สำเร็จเท่านั้น

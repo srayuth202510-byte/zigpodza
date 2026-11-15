@@ -164,6 +164,7 @@ fn testSandboxPolicyDeniesHostNetwork() bool {
         .no_new_privileges = true,
         .memory = 67_108_864,
         .pids_limit = 32,
+        .nano_cpus = 500_000_000,
         .cap_drop = &.{"ALL"},
         .network = "host",
     };

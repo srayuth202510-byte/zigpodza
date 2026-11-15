@@ -19,9 +19,9 @@ status: active
 
 | Metric | Value |
 | :--- | :--- |
-| Tracked Bug Patterns | **22** (22 Guarded) |
+| Tracked Bug Patterns | **23** (23 Guarded) |
 | Zig Source Modules | **23** |
-| Unit & Integration Tests | **199** |
+| Unit & Integration Tests | **214** |
 | Static Security & Memory Gates | **9/9 PASS** |
 
 ## Guard Coverage Map
@@ -83,6 +83,9 @@ flowchart LR
     BUG022["BUG-022"] --> SEC["[[Security-And-Memory-Checklist]]"]
     BUG022 --> src_podman_build_zig["src/podman_build.zig"]
     BUG022 --> scripts_balor_security_audit_sh["scripts/balor-security-audit.sh"]
+    BUG023["BUG-023"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG023 --> src_podman_transfer_zig["src/podman_transfer.zig"]
+    BUG023 --> src_main_zig["src/main.zig"]
 ```
 
 ## Bug Pattern Registry
@@ -111,33 +114,34 @@ flowchart LR
 | [BUG-020](../../docs/vault/Bug-Playbook.md#L227) | Premature `deinit()` of Parsed Policy Before `TmpfsBounds` Serialization (Use-After-Free) | `#bug-pattern` `#memory-leak` | [main.zig](../../src/main.zig) | **Guarded** |
 | [BUG-021](../../docs/vault/Bug-Playbook.md#L236) | Traversal Path Segments Allowed in `validateResourceRef` | `#bug-pattern` `#security-gate` | [podman_validate.zig](../../src/podman_validate.zig), [demo.zig](../../src/demo.zig) | **Guarded** |
 | [BUG-022](../../docs/vault/Bug-Playbook.md#L245) | Unreferenced Submodule Tests, `buildImage` Use-After-Free / Context Escape & Audit DENY Parser Mismatch | `#bug-pattern` `#memory-safety` `#security-gate` | [podman_build.zig](../../src/podman_build.zig), [balor-security-audit.sh](../../scripts/balor-security-audit.sh), [main.zig](../../src/main.zig), [podman_api.zig](../../src/podman_api.zig), [auto-audit.sh](../../scripts/auto-audit.sh) | **Guarded** |
+| [BUG-023](../../docs/vault/Bug-Playbook.md#L257) | Tar Transfer Symlink Escape, Premature Output Truncation & Wrong Upload Content-Type | `#bug-pattern` `#security-gate` `#reliability` | [podman_transfer.zig](../../src/podman_transfer.zig), [main.zig](../../src/main.zig), [podman_api.zig](../../src/podman_api.zig), [auto-audit.sh](../../scripts/auto-audit.sh) | **Guarded** |
 
 ## Module Test & Allocator Coverage
 
 | Module | Lines | Public Decls | Unit Tests | Memory Gate |
 | :--- | ---: | ---: | ---: | :--- |
-| [cli.zig](../../src/cli.zig) | 1754 | 40 | 26 | `std.testing.allocator` |
-| [cli_specs.zig](../../src/cli_specs.zig) | 380 | 12 | 13 | `std.testing.allocator` |
-| [cli_types.zig](../../src/cli_types.zig) | 617 | 49 | 12 | `std.testing.allocator` |
-| [completion.zig](../../src/completion.zig) | 253 | 2 | 5 | `std.testing.allocator` |
+| [cli.zig](../../src/cli.zig) | 1975 | 45 | 28 | `std.testing.allocator` |
+| [cli_specs.zig](../../src/cli_specs.zig) | 614 | 23 | 16 | `std.testing.allocator` |
+| [cli_types.zig](../../src/cli_types.zig) | 680 | 54 | 12 | `std.testing.allocator` |
+| [completion.zig](../../src/completion.zig) | 262 | 2 | 5 | `std.testing.allocator` |
 | [config.zig](../../src/config.zig) | 243 | 7 | 5 | `std.testing.allocator` |
-| [demo.zig](../../src/demo.zig) | 486 | 6 | 2 | `std.testing.allocator` |
+| [demo.zig](../../src/demo.zig) | 487 | 6 | 2 | `std.testing.allocator` |
 | [http.zig](../../src/http.zig) | 668 | 21 | 5 | `std.testing.allocator` |
 | [http_parser.zig](../../src/http_parser.zig) | 258 | 2 | 8 | `std.testing.allocator` |
 | [http_types.zig](../../src/http_types.zig) | 263 | 18 | 11 | `std.testing.allocator` |
 | [log.zig](../../src/log.zig) | 711 | 20 | 9 | `std.testing.allocator` |
-| [main.zig](../../src/main.zig) | 739 | 2 | 2 | `gpa.deinit() != .leak` |
-| [podman_api.zig](../../src/podman_api.zig) | 1547 | 99 | 11 | `std.testing.allocator` |
-| [podman_build.zig](../../src/podman_build.zig) | 519 | 4 | 5 | `std.testing.allocator` |
+| [main.zig](../../src/main.zig) | 1021 | 2 | 3 | `gpa.deinit() != .leak` |
+| [podman_api.zig](../../src/podman_api.zig) | 1566 | 113 | 11 | `std.testing.allocator` |
+| [podman_build.zig](../../src/podman_build.zig) | 545 | 8 | 5 | `std.testing.allocator` |
 | [podman_images.zig](../../src/podman_images.zig) | 665 | 7 | 7 | `std.testing.allocator` |
 | [podman_logs.zig](../../src/podman_logs.zig) | 838 | 10 | 8 | `std.testing.allocator` |
 | [podman_pods.zig](../../src/podman_pods.zig) | 331 | 4 | 4 | `std.testing.allocator` |
-| [podman_system.zig](../../src/podman_system.zig) | 1035 | 15 | 5 | `std.testing.allocator` |
+| [podman_system.zig](../../src/podman_system.zig) | 1161 | 17 | 6 | `std.testing.allocator` |
 | [podman_test_helpers.zig](../../src/podman_test_helpers.zig) | 220 | 4 | 6 | `std.testing.allocator` |
-| [podman_transfer.zig](../../src/podman_transfer.zig) | 447 | 6 | 3 | `std.testing.allocator` |
-| [podman_types.zig](../../src/podman_types.zig) | 878 | 58 | 32 | `std.testing.allocator` |
-| [podman_validate.zig](../../src/podman_validate.zig) | 533 | 27 | 13 | `std.testing.allocator` |
-| [policy.zig](../../src/policy.zig) | 360 | 16 | 5 | `std.testing.allocator` |
+| [podman_transfer.zig](../../src/podman_transfer.zig) | 1409 | 9 | 8 | `std.testing.allocator` |
+| [podman_types.zig](../../src/podman_types.zig) | 959 | 64 | 33 | `std.testing.allocator` |
+| [podman_validate.zig](../../src/podman_validate.zig) | 844 | 45 | 15 | `std.testing.allocator` |
+| [policy.zig](../../src/policy.zig) | 374 | 17 | 5 | `std.testing.allocator` |
 | [utils.zig](../../src/utils.zig) | 42 | 3 | 2 | `stack-only (no heap)` |
 
 ## Static Security & Memory Gates
@@ -309,3 +313,10 @@ flowchart LR
 - **Root Cause**: (1) `test { ... }` ใน `src/main.zig` และ `src/podman_api.zig` ไม่ได้อ้างอิง `_ = pods; _ = build_mod; _ = types;` (2) `aux.ID` ชี้ไปยัง arena ของ `std.json.Parsed` ที่ถูก free ท้ายรอบลูป (3) `Logger.deny()` บันทึกด้วย level `ERROR` พร้อม prefix `DENY rule=` ใน message
 - **Fix**: เพิ่ม `_ = pods; _ = build_mod;` ใน `src/main.zig` และ `_ = types;` ใน `src/podman_api.zig` พร้อมเกตตรวจใน `scripts/auto-audit.sh`; ใน `src/podman_build.zig`: `dupe` ค่า `aux.ID` ด้วย `client.allocator`, บังคับ `validateHostPath` บน `ctx_dir` (ทั้งค่าที่ส่งมาและ `realpathAlloc`), และบล็อก symlink ที่เป็น absolute หรือมี `..`; ใน `scripts/balor-security-audit.sh`: นับ `DENY` จาก `msg.startswith("DENY rule=")` และ validate `HostIp` (IPv4) / `HostPort` (`1..65535`) ก่อนเพิ่มเข้า `endpoints`
 - **Prevention**: ทุกโมดูลที่เพิ่มใหม่ต้องถูกอ้างอิงใน `test { ... }` ของ root test tree และตรวจด้วย `scripts/auto-audit.sh` เสมอ
+
+### BUG-023 — Tar Transfer Symlink Escape, Premature Output Truncation & Wrong Upload Content-Type
+- **Source**: [docs/vault/Bug-Playbook.md:257](../../docs/vault/Bug-Playbook.md#L257) · **Status**: `Guarded`
+- **Symptom**: (1) `saveImage`/`exportContainer` ใน `src/podman_transfer.zig` เปิดไฟล์ปลายทางด้วย `createFileAbsolute(..., .truncate = true)` ก่อนส่งคำขอไปยัง daemon ทำให้เมื่อ daemon ตอบ 404/error หรือ timeout ไฟล์เดิมถูก truncate ทิ้งเป็น 0 ไบต์ และหากปลายทางหรือ `in_path` ของ `loadImage`/`importImage` เป็น symlink ที่ชี้ไปยัง `/etc` สามารถหลุดผ่าน `validateHostPath` แบบ lexical ได้ (2) `loadImage`/`importImage` ส่ง `Content-Type: application/json` แทน `application/x-tar` (3) `test {}` ใน `src/main.zig` และ `src/podman_api.zig` ขาดการอ้างอิง `transfer` และ `th` รวมถึง `scripts/auto-audit.sh` ยังไม่ตรวจ `podman_transfer.zig`
+- **Root Cause**: `validateHostPath` ตรวจเฉพาะรูปแบบสตริงของ path โดยไม่ได้ตรวจ `realpathAlloc`/symlink หรือชนิดไฟล์ (regular file) ก่อนเปิดไฟล์; การเปิด output file ก่อน `streamRequest` ทำให้ล้มเหลวแล้วทิ้งไฟล์เสียไว้; และ `requestWithTimeout` fix `Content-Type` เป็น `application/json`
+- **Fix**: ใน `src/podman_transfer.zig`: เพิ่ม `validateOutputPath()` ตรวจ `realpathAlloc` ของ parent dir + บล็อก leaf symlink และ non-regular target; ใช้ `StreamOutput` + atomic temp-file/rename เฉพาะเมื่อ `streamRequest` คืน 2xx ครบ; เพิ่มการตรวจ `realpathAlloc` + `stat.kind == .file` ใน `openInput()`; และใช้ `requestWithContentType(..., "application/x-tar", ...)` ใน `postTarUpload()`; เพิ่ม `_ = transfer;` ใน `src/main.zig` และ `_ = th;` ใน `src/podman_api.zig` พร้อมตรวจใน `scripts/auto-audit.sh`
+- **Prevention**: ทุกคำสั่งที่อ่าน/เขียนไฟล์บน host จาก CLI (`save`/`load`/`export`/`import`/`build`) ต้องตรวจทั้ง lexical path, `realpathAlloc`, ชนิด regular file, และเขียนไฟล์ปลายทางแบบ atomic หลังยืนยัน response สำเร็จเท่านั้น

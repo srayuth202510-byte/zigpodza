@@ -10,11 +10,16 @@ pub const api_prefix = "/v1.40";
 pub const ApiError = types.ApiError;
 pub const TmpfsBounds = types.TmpfsBounds;
 pub const HostConfig = types.HostConfig;
+pub const RestartPolicy = types.RestartPolicy;
 pub const Mount = types.Mount;
 pub const PortMapping = types.PortMapping;
 pub const ExposedPorts = types.ExposedPorts;
 pub const PortBindings = types.PortBindings;
+pub const LabelEntry = types.LabelEntry;
+pub const LabelsMap = types.LabelsMap;
 pub const ContainerCreateRequest = types.ContainerCreateRequest;
+pub const NetworkCreateRequest = types.NetworkCreateRequest;
+pub const NetworkCreateResponse = types.NetworkCreateResponse;
 
 /// Validates a container ID or name to prevent path traversal, query injection,
 /// and HTTP request-line tampering.
@@ -281,6 +286,226 @@ pub fn formatSizeU64(buf: []u8, bytes: u64) []const u8 {
     return utils.formatSize(buf, clamped);
 }
 
+pub const max_nano_cpus: i64 = 1024 * 1_000_000_000;
+pub const max_env_file_bytes: usize = 1024 * 1024;
+
+pub fn validateNanoCpus(nano_cpus: i64) ApiError!void {
+    if (nano_cpus <= 0 or nano_cpus > max_nano_cpus) return ApiError.InvalidCpuLimit;
+}
+
+pub fn validateHostname(h: []const u8) ApiError!void {
+    if (h.len == 0 or h.len > 64) return ApiError.InvalidHostname;
+    if (h[0] == '.' or h[0] == '-' or h[h.len - 1] == '.' or h[h.len - 1] == '-') {
+        return ApiError.InvalidHostname;
+    }
+    var prev_dot = false;
+    for (h) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-') {
+            prev_dot = false;
+        } else if (c == '.') {
+            if (prev_dot) return ApiError.InvalidHostname;
+            prev_dot = true;
+        } else {
+            return ApiError.InvalidHostname;
+        }
+    }
+}
+
+pub fn validateRestartPolicy(rp: RestartPolicy) ApiError!void {
+    if (std.mem.eql(u8, rp.Name, "on-failure")) {
+        if (rp.MaximumRetryCount > 10_000) return ApiError.InvalidRestartPolicy;
+        return;
+    }
+    if ((std.mem.eql(u8, rp.Name, "no") or
+        std.mem.eql(u8, rp.Name, "always") or
+        std.mem.eql(u8, rp.Name, "unless-stopped")) and rp.MaximumRetryCount == 0)
+    {
+        return;
+    }
+    return ApiError.InvalidRestartPolicy;
+}
+
+pub fn validateLabel(entry: LabelEntry) ApiError!void {
+    if (entry.key.len == 0 or entry.key.len > 256) return ApiError.InvalidLabel;
+    for (entry.key) |c| {
+        if (c <= 0x20 or c == 0x7f) return ApiError.InvalidLabel;
+    }
+    if (entry.value.len > 4096) return ApiError.InvalidLabel;
+    for (entry.value) |c| {
+        if (c < 0x20 or c == 0x7f) return ApiError.InvalidLabel;
+    }
+}
+
+const allowed_network_drivers = [_][]const u8{ "bridge", "macvlan", "ipvlan" };
+
+pub fn validateNetworkDriver(driver: []const u8) ApiError!void {
+    for (allowed_network_drivers) |d| {
+        if (std.mem.eql(u8, driver, d)) return;
+    }
+    return ApiError.InvalidNetworkDriver;
+}
+
+/// Validates a container path for `zigpod cp` (allows `"/"` as well as any
+/// safe absolute path allowed by `validateContainerPath`).
+pub fn validateCpContainerPath(path: []const u8) ApiError!void {
+    if (std.mem.eql(u8, path, "/")) return;
+    return validateContainerPath(path);
+}
+
+/// Validates and normalizes an archive entry path before extraction. Returns
+/// empty slice ONLY for a benign `"."` / `"./"` root directory marker; rejects
+/// absolute paths, `..`, backslashes, and control characters (Tar-Slip guard).
+pub fn validateTarEntryPath(raw_name: []const u8) ApiError![]const u8 {
+    if (raw_name.len == 0 or raw_name.len > 4096) return ApiError.InvalidHostPath;
+    for (raw_name) |c| {
+        if (c < 0x20 or c == 0x7f or c == '\\') return ApiError.InvalidHostPath;
+    }
+    var trimmed = raw_name;
+    while (std.mem.startsWith(u8, trimmed, "./")) {
+        trimmed = trimmed[2..];
+    }
+    if (std.mem.eql(u8, trimmed, ".") or trimmed.len == 0) return "";
+    if (trimmed[0] == '/') return ApiError.InvalidHostPath;
+    if (trimmed[trimmed.len - 1] == '/') {
+        trimmed = trimmed[0 .. trimmed.len - 1];
+        if (trimmed.len == 0) return ApiError.InvalidHostPath;
+    }
+    var it = std.mem.splitScalar(u8, trimmed, '/');
+    while (it.next()) |comp| {
+        if (comp.len == 0 or std.mem.eql(u8, comp, ".") or std.mem.eql(u8, comp, "..")) {
+            return ApiError.InvalidHostPath;
+        }
+    }
+    return trimmed;
+}
+
+/// Ensures a tar symlink target stays strictly relative and cannot traverse
+/// above the extraction root directory (`..` depth balance check).
+pub fn validateTarSymlinkTarget(entry_rel_path: []const u8, link_target: []const u8) ApiError!void {
+    if (link_target.len == 0 or link_target.len >= std.fs.MAX_PATH_BYTES) return ApiError.InvalidHostPath;
+    if (link_target[0] == '/') return ApiError.InvalidHostPath;
+    for (link_target) |c| {
+        if (c < 0x20 or c == 0x7f or c == '\\') return ApiError.InvalidHostPath;
+    }
+
+    var depth: usize = 0;
+    if (std.fs.path.dirname(entry_rel_path)) |dir| {
+        var dir_it = std.mem.splitScalar(u8, dir, '/');
+        while (dir_it.next()) |comp| {
+            if (comp.len > 0) depth += 1;
+        }
+    }
+
+    var it = std.mem.splitScalar(u8, link_target, '/');
+    while (it.next()) |comp| {
+        if (comp.len == 0 or std.mem.eql(u8, comp, ".")) continue;
+        if (std.mem.eql(u8, comp, "..")) {
+            if (depth == 0) return ApiError.InvalidHostPath;
+            depth -= 1;
+        } else {
+            depth += 1;
+        }
+    }
+}
+
+pub const MergedEnv = struct {
+    items: [][]const u8,
+    owned_strings: [][]u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *MergedEnv) void {
+        for (self.owned_strings) |s| self.allocator.free(s);
+        self.allocator.free(self.owned_strings);
+        self.allocator.free(self.items);
+    }
+};
+
+/// Safely loads `KEY=VALUE` entries from `--env-file` paths (checked against
+/// `validateHostPath` + `realpathAlloc` + regular-file verification) and merges
+/// explicit `-e`/`--env` items afterward.
+pub fn loadAndMergeEnv(
+    allocator: std.mem.Allocator,
+    env_files: []const []const u8,
+    cli_env: []const []const u8,
+) !MergedEnv {
+    var owned = std.ArrayList([]u8).init(allocator);
+    errdefer {
+        for (owned.items) |s| allocator.free(s);
+        owned.deinit();
+    }
+    var items = std.ArrayList([]const u8).init(allocator);
+    errdefer items.deinit();
+
+    for (env_files) |raw_path| {
+        try validateHostPath(raw_path, false);
+        const real_path = std.fs.cwd().realpathAlloc(allocator, raw_path) catch |err| switch (err) {
+            error.FileNotFound, error.AccessDenied => return err,
+            else => return ApiError.InvalidHostPath,
+        };
+        defer allocator.free(real_path);
+        try validateHostPath(real_path, false);
+
+        const st = std.fs.cwd().statFile(real_path) catch |err| switch (err) {
+            error.FileNotFound, error.AccessDenied => return err,
+            else => return ApiError.InvalidHostPath,
+        };
+        if (st.kind != .file) return ApiError.InvalidHostPath;
+
+        const file = try std.fs.openFileAbsolute(real_path, .{});
+        defer file.close();
+        const opened_st = try file.stat();
+        if (opened_st.kind != .file) return ApiError.InvalidHostPath;
+
+        const content = file.readToEndAlloc(allocator, max_env_file_bytes) catch |err| switch (err) {
+            error.FileTooBig => return ApiError.InvalidEnvFile,
+            else => return err,
+        };
+        defer allocator.free(content);
+
+        var lines = std.mem.splitScalar(u8, content, '\n');
+        while (lines.next()) |raw_line| {
+            var line = raw_line;
+            if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
+            const trimmed = std.mem.trim(u8, line, " \t");
+            if (trimmed.len == 0 or trimmed[0] == '#') continue;
+
+            const eq = std.mem.indexOfScalar(u8, trimmed, '=') orelse return ApiError.InvalidEnvFile;
+            const key = trimmed[0..eq];
+            const val = trimmed[eq + 1 ..];
+            if (key.len == 0 or key.len > 256) return ApiError.InvalidEnvFile;
+            for (key) |c| {
+                if (c <= 0x20 or c == 0x7f) return ApiError.InvalidEnvFile;
+            }
+            for (val) |c| {
+                if (c < 0x20 or c == 0x7f) return ApiError.InvalidEnvFile;
+            }
+            if (items.items.len >= 4096) return ApiError.InvalidEnvFile;
+
+            try items.ensureUnusedCapacity(1);
+            try owned.ensureUnusedCapacity(1);
+            const dup = try allocator.dupe(u8, trimmed);
+            owned.appendAssumeCapacity(dup);
+            items.appendAssumeCapacity(dup);
+        }
+    }
+
+    for (cli_env) |e| {
+        try items.append(e);
+    }
+
+    const owned_slice = try owned.toOwnedSlice();
+    errdefer {
+        for (owned_slice) |s| allocator.free(s);
+        allocator.free(owned_slice);
+    }
+    const items_slice = try items.toOwnedSlice();
+    return .{
+        .items = items_slice,
+        .owned_strings = owned_slice,
+        .allocator = allocator,
+    };
+}
+
 // ---------------------------------------------------------------- tests
 
 test "validateIdentifier rejects traversal, injection, and invalid sizes" {
@@ -529,5 +754,91 @@ test "ContainerCreateRequest serializes hardening HostConfig fields" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"Memory\":67108864") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"PidsLimit\":32") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"SecurityOpt\":[\"no-new-privileges\"]") != null);
+}
+
+test "validateNanoCpus, Hostname, RestartPolicy, Label, Driver, and Tar-Slip validators" {
+    try validateNanoCpus(500_000_000);
+    try validateNanoCpus(max_nano_cpus);
+    try std.testing.expectError(ApiError.InvalidCpuLimit, validateNanoCpus(0));
+    try std.testing.expectError(ApiError.InvalidCpuLimit, validateNanoCpus(-1));
+    try std.testing.expectError(ApiError.InvalidCpuLimit, validateNanoCpus(max_nano_cpus + 1));
+
+    try validateHostname("api-1.local");
+    try std.testing.expectError(ApiError.InvalidHostname, validateHostname("-bad"));
+    try std.testing.expectError(ApiError.InvalidHostname, validateHostname("a..b"));
+
+    try validateRestartPolicy(.{ .Name = "no" });
+    try validateRestartPolicy(.{ .Name = "always" });
+    try validateRestartPolicy(.{ .Name = "unless-stopped" });
+    try validateRestartPolicy(.{ .Name = "on-failure", .MaximumRetryCount = 5 });
+    try std.testing.expectError(ApiError.InvalidRestartPolicy, validateRestartPolicy(.{ .Name = "always", .MaximumRetryCount = 1 }));
+    try std.testing.expectError(ApiError.InvalidRestartPolicy, validateRestartPolicy(.{ .Name = "bogus" }));
+
+    try validateLabel(.{ .key = "app", .value = "web service" });
+    try std.testing.expectError(ApiError.InvalidLabel, validateLabel(.{ .key = "", .value = "v" }));
+    try std.testing.expectError(ApiError.InvalidLabel, validateLabel(.{ .key = "k\x00", .value = "v" }));
+
+    try validateNetworkDriver("bridge");
+    try validateNetworkDriver("macvlan");
+    try validateNetworkDriver("ipvlan");
+    try std.testing.expectError(ApiError.InvalidNetworkDriver, validateNetworkDriver("bogus"));
+
+    try validateCpContainerPath("/");
+    try validateCpContainerPath("/etc/hosts");
+    try std.testing.expectError(ApiError.InvalidMountTarget, validateCpContainerPath("rel"));
+
+    try std.testing.expectEqualStrings("", try validateTarEntryPath("."));
+    try std.testing.expectEqualStrings("", try validateTarEntryPath("./"));
+    try std.testing.expectEqualStrings("app/main.sh", try validateTarEntryPath("./app/main.sh"));
+    try std.testing.expectEqualStrings("app", try validateTarEntryPath("app/"));
+    try std.testing.expectError(ApiError.InvalidHostPath, validateTarEntryPath("/etc/passwd"));
+    try std.testing.expectError(ApiError.InvalidHostPath, validateTarEntryPath("../escape"));
+    try std.testing.expectError(ApiError.InvalidHostPath, validateTarEntryPath("a/../../etc/shadow"));
+    try std.testing.expectError(ApiError.InvalidHostPath, validateTarEntryPath("a\\b"));
+    try std.testing.expectError(ApiError.InvalidHostPath, validateTarEntryPath("a//b"));
+
+    try validateTarSymlinkTarget("app/sub/link", "../ok.txt");
+    try std.testing.expectError(ApiError.InvalidHostPath, validateTarSymlinkTarget("link", "../outside"));
+    try std.testing.expectError(ApiError.InvalidHostPath, validateTarSymlinkTarget("app/link", "../../outside"));
+    try std.testing.expectError(ApiError.InvalidHostPath, validateTarSymlinkTarget("app/link", "/etc/passwd"));
+}
+
+test "loadAndMergeEnv parses safe env files, rejects malformed/symlinks, and frees memory cleanly" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir_path);
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "app.env",
+        .data = "# comment line\r\n\n  FOO=bar\r\nEMPTY=\nSPACED=hello world\n",
+    });
+    const env_path = try std.fs.path.join(alloc, &.{ dir_path, "app.env" });
+    defer alloc.free(env_path);
+
+    var merged = try loadAndMergeEnv(alloc, &.{env_path}, &.{"CLI=override"});
+    defer merged.deinit();
+    try std.testing.expectEqual(@as(usize, 4), merged.items.len);
+    try std.testing.expectEqualStrings("FOO=bar", merged.items[0]);
+    try std.testing.expectEqualStrings("EMPTY=", merged.items[1]);
+    try std.testing.expectEqualStrings("SPACED=hello world", merged.items[2]);
+    try std.testing.expectEqualStrings("CLI=override", merged.items[3]);
+
+    // Symlink into /etc must fail closed.
+    try tmp.dir.symLink("/etc/hosts", "etc_link.env", .{});
+    const link_path = try std.fs.path.join(alloc, &.{ dir_path, "etc_link.env" });
+    defer alloc.free(link_path);
+    try std.testing.expectError(ApiError.InvalidHostPath, loadAndMergeEnv(alloc, &.{link_path}, &.{}));
+
+    // Malformed line without '=' must fail closed with no leaks.
+    try tmp.dir.writeFile(.{ .sub_path = "bad.env", .data = "FOO=ok\nMISSING_EQUALS\n" });
+    const bad_path = try std.fs.path.join(alloc, &.{ dir_path, "bad.env" });
+    defer alloc.free(bad_path);
+    try std.testing.expectError(ApiError.InvalidEnvFile, loadAndMergeEnv(alloc, &.{bad_path}, &.{}));
+
+    // Relative path must fail closed.
+    try std.testing.expectError(ApiError.InvalidHostPath, loadAndMergeEnv(alloc, &.{"relative.env"}, &.{}));
 }
 

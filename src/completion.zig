@@ -4,7 +4,7 @@ const cli_types = @import("cli_types.zig");
 
 pub const Shell = cli_types.Shell;
 
-const subcommands = "run ps images pull rmi tag history commit build start stop restart pause unpause rename kill rm logs top exec inspect stats volume network pod system port wait diff events policy completion audit demo search save load export import version help";
+const subcommands = "run ps images pull rmi tag history commit build start stop restart pause unpause rename kill rm logs top exec attach inspect stats volume network cp pod system port wait diff events policy completion audit demo search save load export import version help";
 
 const bash_template =
     \\# bash completion for zigpod
@@ -23,7 +23,10 @@ const bash_template =
     \\            COMPREPLY=( $(compgen -W "ls create rm inspect" -- "${{cur}}") )
     \\            ;;
     \\        network)
-    \\            COMPREPLY=( $(compgen -W "ls inspect" -- "${{cur}}") )
+    \\            COMPREPLY=( $(compgen -W "ls inspect create rm" -- "${{cur}}") )
+    \\            ;;
+    \\        attach)
+    \\            COMPREPLY=( $(compgen -W "-i --interactive -t --tty" -- "${{cur}}") )
     \\            ;;
     \\        pod)
     \\            COMPREPLY=( $(compgen -W "create ps stop rm" -- "${{cur}}") )
@@ -35,7 +38,7 @@ const bash_template =
     \\            COMPREPLY=( $(compgen -W "ping df prune" -- "${{cur}}") )
     \\            ;;
     \\        run)
-    \\            COMPREPLY=( $(compgen -W "-d --detach --rm --name -e --env -v --volume -p --publish --network -w --workdir -u --user --cap-drop --cap-add -m --memory --pids-limit --read-only --no-new-privileges --profile --policy -i --interactive -t --tty" -- "${{cur}}") )
+    \\            COMPREPLY=( $(compgen -W "-d --detach --rm --name -e --env --env-file -v --volume -p --publish -l --label --network -w --workdir -u --user --cap-drop --cap-add -m --memory --cpus --pids-limit --read-only --no-new-privileges --entrypoint --hostname --restart --profile --policy -i --interactive -t --tty" -- "${{cur}}") )
     \\            ;;
     \\        *)
     \\            COMPREPLY=()
@@ -73,10 +76,12 @@ const zsh_script =
     \\        'logs:Fetch container logs'
     \\        'top:Display running processes'
     \\        'exec:Execute a command in a container'
+    \\        'attach:Attach to a running container'
     \\        'inspect:Inspect a container or image'
     \\        'stats:Display container resource usage'
     \\        'volume:Manage named volumes'
     \\        'network:Manage networks'
+    \\        'cp:Copy files between container and host'
     \\        'pod:Manage pods'
     \\        'system:System maintenance'
     \\        'port:List container port mappings'
@@ -107,7 +112,7 @@ const zsh_script =
     \\            _values 'action' ls create rm inspect
     \\            ;;
     \\        network)
-    \\            _values 'action' ls inspect
+    \\            _values 'action' ls inspect create rm
     \\            ;;
     \\        pod)
     \\            _values 'action' create ps stop rm
@@ -132,7 +137,7 @@ const fish_template =
     \\end
     \\complete -c zigpod -n "__fish_seen_subcommand_from completion" -a "bash zsh fish"
     \\complete -c zigpod -n "__fish_seen_subcommand_from volume" -a "ls create rm inspect"
-    \\complete -c zigpod -n "__fish_seen_subcommand_from network" -a "ls inspect"
+    \\complete -c zigpod -n "__fish_seen_subcommand_from network" -a "ls inspect create rm"
     \\complete -c zigpod -n "__fish_seen_subcommand_from pod" -a "create ps stop rm"
     \\complete -c zigpod -n "__fish_seen_subcommand_from policy" -a "show check"
     \\complete -c zigpod -n "__fish_seen_subcommand_from system" -a "ping df prune"
@@ -187,9 +192,13 @@ test "bash script wires top-level commands, flags, and subcommand branches" {
     try std.testing.expect(std.mem.indexOf(u8, s, "completion)\n            COMPREPLY=( $(compgen -W \"bash zsh fish\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "volume)") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "network)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "attach)") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "policy)") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "system)") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "--pids-limit --read-only --no-new-privileges") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "--cpus") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "--env-file") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "--restart") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "complete -F _zigpod_completions zigpod") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "{s}") == null);
 }
@@ -203,7 +212,7 @@ test "zsh script registers all subcommands and per-command actions" {
     const s = out.items;
 
     try std.testing.expect(std.mem.indexOf(u8, s, "#compdef zigpod") != null);
-    for ([_][]const u8{ "run", "ps", "images", "pull", "rmi", "tag", "history", "commit", "build", "start", "stop", "restart", "pause", "unpause", "rename", "kill", "rm", "logs", "top", "exec", "inspect", "stats", "volume", "network", "pod", "system", "port", "wait", "diff", "events", "policy", "completion", "audit", "demo", "version", "help" }) |cmd| {
+    for ([_][]const u8{ "run", "ps", "images", "pull", "rmi", "tag", "history", "commit", "build", "start", "stop", "restart", "pause", "unpause", "rename", "kill", "rm", "logs", "top", "exec", "attach", "inspect", "stats", "volume", "network", "cp", "pod", "system", "port", "wait", "diff", "events", "policy", "completion", "audit", "demo", "version", "help" }) |cmd| {
         var line_buf = std.ArrayList(u8).init(alloc);
         defer line_buf.deinit();
         try line_buf.writer().print("'{s}:", .{cmd});

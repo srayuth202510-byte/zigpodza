@@ -43,6 +43,7 @@ status: active
 - [ ] `inspect TARGET` ผ่าน `validateResourceRef()` ก่อนประกอบ URL path ตัด space/control char/`?`/`#` เพื่อกัน request-line injection (BUG-017)
 - [ ] `exec` ตรวจ container ID/`--user`/`--workdir` และ exec ID จาก daemon ก่อนประกอบ `/exec/{id}/start` กับ `/exec/{id}/json`; demultiplex output และคืนค่า exit code (BUG-018)
 - [ ] `--profile=sandbox` และ `--policy` ผ่าน `policy.applySandboxDefaults()` + `policy.checkRunPolicy()` แบบ pre-flight ก่อนคุยกับ socket และบันทึก `logger.deny()` ลง `audit.log` พร้อมตรวจด้วย `zigpod audit --json` (`writeAuditJson`) (BUG-019)
+- [ ] คำสั่ง tar transfer (`save`, `load`, `export`, `import`) ใน `podman_transfer.zig` ตรวจ `realpathAlloc` + regular file (กัน symlink escape), เขียน output แบบ atomic เมื่อ 2xx สำเร็จเท่านั้น, และส่ง `application/x-tar` สำหรับ upload (BUG-023)
 - [ ] Lifecycle `run` มี best-effort cleanup: start fail → force-remove; `--rm` + fetchLogs fail → remove (BUG-012)
 
 ## 3. Logging, Tamper Evidence & Operations

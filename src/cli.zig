@@ -7,8 +7,13 @@ pub const usage = types.usage;
 pub const Global = types.Global;
 pub const Volume = types.Volume;
 pub const PortMapping = types.PortMapping;
+pub const Label = types.Label;
+pub const RestartPolicySpec = types.RestartPolicySpec;
 pub const Profile = types.Profile;
 pub const RunOpts = types.RunOpts;
+pub const AttachOpts = types.AttachOpts;
+pub const CpDirection = types.CpDirection;
+pub const CpOpts = types.CpOpts;
 pub const RmOpts = types.RmOpts;
 pub const LogsOpts = types.LogsOpts;
 pub const ExecOpts = types.ExecOpts;
@@ -56,6 +61,14 @@ const parseWorkdir = specs.parseWorkdir;
 const parseUserSpec = specs.parseUserSpec;
 const parseCapName = specs.parseCapName;
 const parseSignal = specs.parseSignal;
+const parseCpuNanos = specs.parseCpuNanos;
+const parseLabelSpec = specs.parseLabelSpec;
+const parseHostname = specs.parseHostname;
+const parseEntrypoint = specs.parseEntrypoint;
+const parseRestartPolicy = specs.parseRestartPolicy;
+const parseEnvFilePath = specs.parseEnvFilePath;
+const parseNetworkDriver = specs.parseNetworkDriver;
+const parseCpEndpoints = specs.parseCpEndpoints;
 
 /// `args` excludes the program name. Slices in the result point into `args`
 /// or into memory from `allocator` (use an arena).
@@ -118,6 +131,10 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
         try parseInspect(rest)
     else if (eql(name, "exec"))
         .{ .exec = try parseExec(allocator, rest) }
+    else if (eql(name, "attach"))
+        try parseAttach(rest)
+    else if (eql(name, "cp"))
+        try parseCp(rest)
     else if (eql(name, "stats"))
         .{ .stats = try parseStats(allocator, rest) }
     else if (eql(name, "volume"))
@@ -369,10 +386,14 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
     var opts = RunOpts{ .image = "" };
     var env = std.ArrayList([]const u8).init(allocator);
     errdefer env.deinit();
+    var env_files = std.ArrayList([]const u8).init(allocator);
+    errdefer env_files.deinit();
     var volumes = std.ArrayList(Volume).init(allocator);
     errdefer volumes.deinit();
     var ports = std.ArrayList(PortMapping).init(allocator);
     errdefer ports.deinit();
+    var labels = std.ArrayList(Label).init(allocator);
+    errdefer labels.deinit();
     var cap_drop = std.ArrayList([]const u8).init(allocator);
     errdefer cap_drop.deinit();
     var cap_add = std.ArrayList([]const u8).init(allocator);
@@ -444,6 +465,30 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
             opts.policy_path = try parsePolicyPath(try takeValue(args, &i));
         } else if (std.mem.startsWith(u8, a, "--policy=")) {
             opts.policy_path = try parsePolicyPath(a["--policy=".len..]);
+        } else if (eql(a, "--cpus")) {
+            opts.nano_cpus = try parseCpuNanos(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--cpus=")) {
+            opts.nano_cpus = try parseCpuNanos(a["--cpus=".len..]);
+        } else if (eql(a, "--env-file")) {
+            try env_files.append(try parseEnvFilePath(try takeValue(args, &i)));
+        } else if (std.mem.startsWith(u8, a, "--env-file=")) {
+            try env_files.append(try parseEnvFilePath(a["--env-file=".len..]));
+        } else if (eql(a, "-l") or eql(a, "--label")) {
+            try labels.append(try parseLabelSpec(try takeValue(args, &i)));
+        } else if (std.mem.startsWith(u8, a, "--label=")) {
+            try labels.append(try parseLabelSpec(a["--label=".len..]));
+        } else if (eql(a, "--entrypoint")) {
+            opts.entrypoint = try parseEntrypoint(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--entrypoint=")) {
+            opts.entrypoint = try parseEntrypoint(a["--entrypoint=".len..]);
+        } else if (eql(a, "--hostname")) {
+            opts.hostname = try parseHostname(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--hostname=")) {
+            opts.hostname = try parseHostname(a["--hostname=".len..]);
+        } else if (eql(a, "--restart")) {
+            opts.restart_policy = try parseRestartPolicy(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--restart=")) {
+            opts.restart_policy = try parseRestartPolicy(a["--restart=".len..]);
         } else if (isFlag(a)) {
             return error.UnknownFlag;
         } else break; // first positional = IMAGE; everything after is the command
@@ -453,10 +498,14 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
     opts.cmd = args[i + 1 ..];
     opts.env = try env.toOwnedSlice();
     errdefer allocator.free(opts.env);
+    opts.env_files = try env_files.toOwnedSlice();
+    errdefer allocator.free(opts.env_files);
     opts.volumes = try volumes.toOwnedSlice();
     errdefer allocator.free(opts.volumes);
     opts.ports = try ports.toOwnedSlice();
     errdefer allocator.free(opts.ports);
+    opts.labels = try labels.toOwnedSlice();
+    errdefer allocator.free(opts.labels);
     opts.cap_drop = try cap_drop.toOwnedSlice();
     errdefer allocator.free(opts.cap_drop);
     opts.cap_add = try cap_add.toOwnedSlice();
@@ -592,7 +641,51 @@ fn parseVolume(args: []const []const u8) ParseError!Command {
     }
 }
 
-/// Parses `network ls|inspect [NAME]`.
+/// Parses `attach [-i|--interactive] [-t|--tty] [-it|-ti] CONTAINER`.
+fn parseAttach(args: []const []const u8) ParseError!Command {
+    var opts = AttachOpts{ .container = "" };
+    var have = false;
+    for (args) |a| {
+        if (eql(a, "-i") or eql(a, "--interactive")) {
+            opts.interactive = true;
+        } else if (eql(a, "-t") or eql(a, "--tty")) {
+            opts.tty = true;
+        } else if (eql(a, "-it") or eql(a, "-ti")) {
+            opts.interactive = true;
+            opts.tty = true;
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else if (!have) {
+            opts.container = a;
+            have = true;
+        } else {
+            return error.TooManyArguments;
+        }
+    }
+    if (!have) return error.MissingArgument;
+    return .{ .attach = opts };
+}
+
+/// Parses `cp CONTAINER:PATH HOST_PATH` or `cp HOST_PATH CONTAINER:PATH`.
+fn parseCp(args: []const []const u8) ParseError!Command {
+    var src: ?[]const u8 = null;
+    var dst: ?[]const u8 = null;
+    for (args) |a| {
+        if (isFlag(a)) return error.UnknownFlag;
+        if (src == null) {
+            src = a;
+        } else if (dst == null) {
+            dst = a;
+        } else {
+            return error.TooManyArguments;
+        }
+    }
+    const s = src orelse return error.MissingArgument;
+    const d = dst orelse return error.MissingArgument;
+    return .{ .cp = try parseCpEndpoints(s, d) };
+}
+
+/// Parses `network ls|inspect|create|rm ...`.
 fn parseNetwork(args: []const []const u8) ParseError!Command {
     if (args.len == 0) return error.MissingArgument;
     const sub = args[0];
@@ -602,6 +695,46 @@ fn parseNetwork(args: []const []const u8) ParseError!Command {
         return .{ .network = .{ .action = .ls } };
     } else if (eql(sub, "inspect")) {
         return .{ .network = .{ .action = .inspect, .name = try single(rest) } };
+    } else if (eql(sub, "create")) {
+        var opts = NetworkOpts{ .action = .create };
+        var i: usize = 0;
+        while (i < rest.len) : (i += 1) {
+            const a = rest[i];
+            if (eql(a, "-d") or eql(a, "--driver")) {
+                opts.driver = try parseNetworkDriver(try takeValue(rest, &i));
+            } else if (std.mem.startsWith(u8, a, "--driver=")) {
+                opts.driver = try parseNetworkDriver(a["--driver=".len..]);
+            } else if (eql(a, "--internal")) {
+                opts.internal = true;
+            } else if (isFlag(a)) {
+                return error.UnknownFlag;
+            } else if (opts.name == null) {
+                opts.name = a;
+            } else {
+                return error.TooManyArguments;
+            }
+        }
+        if (opts.name == null) return error.MissingArgument;
+        return .{ .network = opts };
+    } else if (eql(sub, "rm") or eql(sub, "remove")) {
+        var force = false;
+        var name: ?[]const u8 = null;
+        for (rest) |a| {
+            if (eql(a, "-f") or eql(a, "--force")) {
+                force = true;
+            } else if (isFlag(a)) {
+                return error.UnknownFlag;
+            } else if (name == null) {
+                name = a;
+            } else {
+                return error.TooManyArguments;
+            }
+        }
+        return .{ .network = .{
+            .action = .rm,
+            .name = name orelse return error.MissingArgument,
+            .force = force,
+        } };
     } else if (isFlag(sub)) {
         return error.UnknownFlag;
     } else {
@@ -1751,4 +1884,92 @@ test "parse tag, history, commit, and policy subcommands + error paths" {
 
     try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "--socket=", "ps" }));
     try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "build", "--tag=", "." }));
+}
+
+test "parse attach, cp, and network create/rm commands + error paths" {
+    const alloc = std.testing.allocator;
+
+    const p_att = try parse(alloc, &.{ "attach", "-it", "web" });
+    defer p_att.deinit(alloc);
+    try std.testing.expectEqualStrings("web", p_att.command.attach.container);
+    try std.testing.expect(p_att.command.attach.interactive);
+    try std.testing.expect(p_att.command.attach.tty);
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{"attach"}));
+    try std.testing.expectError(error.UnknownFlag, parse(alloc, &.{ "attach", "--bogus", "web" }));
+    try std.testing.expectError(error.TooManyArguments, parse(alloc, &.{ "attach", "a", "b" }));
+
+    const p_cp_to = try parse(alloc, &.{ "cp", "/tmp/hello.txt", "web:/tmp" });
+    defer p_cp_to.deinit(alloc);
+    try std.testing.expectEqual(CpDirection.to_container, p_cp_to.command.cp.direction);
+    try std.testing.expectEqualStrings("web", p_cp_to.command.cp.container);
+    try std.testing.expectEqualStrings("/tmp", p_cp_to.command.cp.container_path);
+    try std.testing.expectEqualStrings("/tmp/hello.txt", p_cp_to.command.cp.host_path);
+
+    const p_cp_from = try parse(alloc, &.{ "cp", "web:/etc/hosts", "/tmp/hosts" });
+    defer p_cp_from.deinit(alloc);
+    try std.testing.expectEqual(CpDirection.from_container, p_cp_from.command.cp.direction);
+    try std.testing.expectEqualStrings("/etc/hosts", p_cp_from.command.cp.container_path);
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "cp", "web:/a" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "cp", "a:/x", "b:/y" }));
+    try std.testing.expectError(error.TooManyArguments, parse(alloc, &.{ "cp", "/tmp/a", "web:/b", "extra" }));
+
+    const p_net_create = try parse(alloc, &.{ "network", "create", "--driver=macvlan", "--internal", "isolated-net" });
+    defer p_net_create.deinit(alloc);
+    try std.testing.expectEqual(NetworkAction.create, p_net_create.command.network.action);
+    try std.testing.expectEqualStrings("macvlan", p_net_create.command.network.driver);
+    try std.testing.expect(p_net_create.command.network.internal);
+    try std.testing.expectEqualStrings("isolated-net", p_net_create.command.network.name.?);
+
+    const p_net_rm = try parse(alloc, &.{ "network", "rm", "-f", "isolated-net" });
+    defer p_net_rm.deinit(alloc);
+    try std.testing.expectEqual(NetworkAction.rm, p_net_rm.command.network.action);
+    try std.testing.expect(p_net_rm.command.network.force);
+    try std.testing.expectEqualStrings("isolated-net", p_net_rm.command.network.name.?);
+
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "network", "create" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "network", "create", "--driver", "bogus", "mynet" }));
+    try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "network", "create", "--driver" }));
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "network", "rm" }));
+}
+
+test "parse run supports --cpus, --env-file, -l/--label, --entrypoint, --hostname, --restart without leaks" {
+    const alloc = std.testing.allocator;
+    const p = try parse(alloc, &.{
+        "run",
+        "--cpus",
+        "0.5",
+        "--env-file",
+        "/srv/a.env",
+        "--env-file=/srv/b.env",
+        "-l",
+        "app=api",
+        "--label=tier=backend",
+        "--entrypoint",
+        "/bin/sh",
+        "--hostname",
+        "api-1.local",
+        "--restart=on-failure:3",
+        "alpine:3.20",
+        "-c",
+        "echo ok",
+    });
+    defer p.deinit(alloc);
+    const r = p.command.run;
+    try std.testing.expectEqual(@as(?i64, 500_000_000), r.nano_cpus);
+    try std.testing.expectEqual(@as(usize, 2), r.env_files.len);
+    try std.testing.expectEqualStrings("/srv/a.env", r.env_files[0]);
+    try std.testing.expectEqualStrings("/srv/b.env", r.env_files[1]);
+    try std.testing.expectEqual(@as(usize, 2), r.labels.len);
+    try std.testing.expectEqualStrings("app", r.labels[0].key);
+    try std.testing.expectEqualStrings("backend", r.labels[1].value);
+    try std.testing.expectEqualStrings("/bin/sh", r.entrypoint.?);
+    try std.testing.expectEqualStrings("api-1.local", r.hostname.?);
+    try std.testing.expectEqualStrings("on-failure", r.restart_policy.?.name);
+    try std.testing.expectEqual(@as(u32, 3), r.restart_policy.?.max_retry_count);
+
+    // Error paths after allocating env_files and labels must not leak.
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "run", "--env-file", "/srv/a.env", "-l", "k=v" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--env-file", "/srv/a.env", "-l", "k=v", "--cpus", "0", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--label", "a=b", "--hostname", "-bad", "alpine" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--label", "a=b", "--restart", "never", "alpine" }));
 }

@@ -19,6 +19,7 @@ REQUIRED_FILES = [
     "scripts/auto-audit.sh",
     "scripts/security-check.sh",
     "scripts/smoke.sh",
+    "scripts/podman-e2e.sh",
     "scripts/graph-query.py",
     "scripts/bug-dashboard.py",
     "scripts/check-ci-parity.py",
@@ -29,11 +30,26 @@ REQUIRED_FILES = [
     "docs/vault/Security-And-Memory-Checklist.md",
     "src/main.zig",
     "src/cli.zig",
+    "src/cli_specs.zig",
+    "src/cli_types.zig",
+    "src/completion.zig",
     "src/config.zig",
     "src/demo.zig",
     "src/http.zig",
+    "src/http_parser.zig",
+    "src/http_types.zig",
     "src/log.zig",
     "src/podman_api.zig",
+    "src/podman_build.zig",
+    "src/podman_images.zig",
+    "src/podman_logs.zig",
+    "src/podman_pods.zig",
+    "src/podman_system.zig",
+    "src/podman_test_helpers.zig",
+    "src/podman_transfer.zig",
+    "src/podman_types.zig",
+    "src/podman_validate.zig",
+    "src/policy.zig",
     "src/utils.zig",
 ]
 
@@ -41,6 +57,7 @@ EXECUTABLES = [
     "scripts/auto-audit.sh",
     "scripts/security-check.sh",
     "scripts/smoke.sh",
+    "scripts/podman-e2e.sh",
     "scripts/graph-query.py",
     "scripts/bug-dashboard.py",
     "scripts/check-ci-parity.py",
@@ -53,6 +70,7 @@ MAKEFILE_TARGETS = [
     "test-adv",
     "demo",
     "e2e",
+    "real-e2e",
     "check-ci",
     "verify",
     "ci",
@@ -83,6 +101,8 @@ CLI_SUBCOMMANDS = [
     "load",
     "export",
     "import",
+    "attach",
+    "cp",
 ]
 
 HARDENING_FLAGS = [
@@ -90,6 +110,12 @@ HARDENING_FLAGS = [
     "--pids-limit",
     "--read-only",
     "--no-new-privileges",
+    "--cpus",
+    "--env-file",
+    "--label",
+    "--entrypoint",
+    "--hostname",
+    "--restart",
 ]
 
 CI_COMMANDS = [
@@ -147,7 +173,7 @@ def main() -> int:
         if flag not in readme:
             errors.append(f"README.md missing documentation for flag '{flag}'")
 
-    for marker in ("make verify", "zigpod demo", "zigpod audit", "graph-query.py"):
+    for marker in ("make verify", "make real-e2e", "zigpod demo", "zigpod audit", "graph-query.py"):
         if marker not in readme:
             errors.append(f"README.md missing reference '{marker}'")
 

@@ -11,6 +11,7 @@ const api_prefix = validate.api_prefix;
 const validateVolumeName = validate.validateVolumeName;
 const validateIdentifier = validate.validateIdentifier;
 const validateResourceRef = validate.validateResourceRef;
+const validateNetworkDriver = validate.validateNetworkDriver;
 const appendQueryEncoded = validate.appendQueryEncoded;
 const logApiFailure = validate.logApiFailure;
 const formatSizeU64 = validate.formatSizeU64;
@@ -22,6 +23,8 @@ const VolumeCreateRequest = types.VolumeCreateRequest;
 const VolumeInfo = types.VolumeInfo;
 const VolumeListResponse = types.VolumeListResponse;
 const NetworkInfo = types.NetworkInfo;
+const NetworkCreateRequest = types.NetworkCreateRequest;
+const NetworkCreateResponse = types.NetworkCreateResponse;
 const SystemDfResponse = types.SystemDfResponse;
 const ImageSummary = types.ImageSummary;
 const ContainerPruneResponse = types.ContainerPruneResponse;
@@ -194,6 +197,68 @@ pub fn inspectNetwork(client: *const http.Client, logger: *log.Logger, name: []c
     if (net.Scope.len > 0) try writer.print("{s:<15}{s}\n", .{ "Scope:", net.Scope });
     try writer.print("{s:<15}{s}\n", .{ "Internal:", if (net.Internal) "true" else "false" });
     logger.info("inspected network {s}", .{name});
+}
+
+/// Creates a container network (`POST /networks/create`).
+pub fn createNetwork(
+    client: *const http.Client,
+    logger: *log.Logger,
+    name: []const u8,
+    driver: []const u8,
+    internal: bool,
+    writer: anytype,
+) !void {
+    try validateIdentifier(name);
+    try validateNetworkDriver(driver);
+
+    const path = api_prefix ++ "/networks/create";
+    const req_body = try std.json.stringifyAlloc(client.allocator, NetworkCreateRequest{
+        .Name = name,
+        .Driver = driver,
+        .Internal = internal,
+    }, .{});
+    defer client.allocator.free(req_body);
+
+    logger.debug("POST {s} body={s}", .{ path, req_body });
+    const resp = try client.request("POST", path, req_body);
+    defer resp.deinit();
+
+    if (!resp.ok()) return logApiFailure(logger, "POST", path, resp);
+
+    const parsed = try std.json.parseFromSlice(NetworkCreateResponse, client.allocator, resp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    if (parsed.value.Warning.len > 0) {
+        logger.warn("network create warning: {s}", .{parsed.value.Warning});
+    }
+
+    const out_id = if (parsed.value.Id.len > 0) parsed.value.Id else name;
+    try writer.print("{s}\n", .{out_id});
+    logger.info("created network {s} (id={s}, driver={s}, internal={any})", .{
+        name, out_id, driver, internal,
+    });
+}
+
+/// Removes a container network (`DELETE /networks/{name}[?force=true]`).
+pub fn removeNetwork(client: *const http.Client, logger: *log.Logger, name: []const u8, force: bool) !void {
+    try validateIdentifier(name);
+
+    const path = if (force)
+        try std.fmt.allocPrint(client.allocator, "{s}/networks/{s}?force=true", .{ api_prefix, name })
+    else
+        try std.fmt.allocPrint(client.allocator, "{s}/networks/{s}", .{ api_prefix, name });
+    defer client.allocator.free(path);
+
+    logger.debug("DELETE {s}", .{path});
+    const resp = try client.request("DELETE", path, null);
+    defer resp.deinit();
+
+    if (resp.status != 204 and !resp.ok()) {
+        return logApiFailure(logger, "DELETE", path, resp);
+    }
+    logger.info("removed network {s}", .{name});
 }
 
 /// Pings the Podman/Docker daemon (`GET /_ping`).
@@ -1027,6 +1092,67 @@ test "portContainer, diffContainer, and fetchEvents edge, json, and error paths"
     try fetchEvents(&client, &logger, null, null, true, out.writer());
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"Action\":\"die\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "not-json-line") == null);
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
+}
+
+test "createNetwork and removeNetwork validate inputs and call API endpoints" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-net-crud-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const created_json = "{\"Id\":\"net1234567890\",\"Warning\":\"\"}";
+    const replies = [_]ScriptedReply{
+        .{
+            .expected_prefix = "POST /v1.40/networks/create HTTP/1.1\r\n",
+            .expected_substring = "\"Internal\":true",
+            .raw_response = std.fmt.comptimePrint("HTTP/1.1 201 Created\r\nContent-Length: {d}\r\n\r\n{s}", .{ created_json.len, created_json }),
+        },
+        .{
+            .expected_prefix = "DELETE /v1.40/networks/iso-net?force=true HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 204 No Content\r\n\r\n",
+        },
+        .{
+            .expected_prefix = "DELETE /v1.40/networks/iso-net HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nnot found",
+        },
+    };
+
+    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{
+        .allocator = alloc,
+        .socket_path = sock_path,
+    };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    try std.testing.expectError(ApiError.InvalidIdentifier, createNetwork(&client, &logger, "../bad", "bridge", false, out.writer()));
+    try std.testing.expectError(ApiError.InvalidNetworkDriver, createNetwork(&client, &logger, "iso-net", "bogus", false, out.writer()));
+    try std.testing.expectError(ApiError.InvalidIdentifier, removeNetwork(&client, &logger, "../bad", false));
+
+    try createNetwork(&client, &logger, "iso-net", "bridge", true, out.writer());
+    try std.testing.expectEqualStrings("net1234567890\n", out.items);
+
+    try removeNetwork(&client, &logger, "iso-net", true);
+    try std.testing.expectError(ApiError.PodmanApiError, removeNetwork(&client, &logger, "iso-net", false));
 
     thread.join();
     joined = true;

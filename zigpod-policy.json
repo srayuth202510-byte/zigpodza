@@ -2,6 +2,7 @@
   "profile": "sandbox",
   "max_memory_bytes": 268435456,
   "max_pids_limit": 64,
+  "max_nano_cpus": 1000000000,
   "require_read_only": true,
   "require_no_new_privileges": true,
   "require_cap_drop_all": true,

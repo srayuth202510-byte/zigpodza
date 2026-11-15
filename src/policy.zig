@@ -7,6 +7,7 @@ pub const ApiError = types.ApiError;
 
 pub const default_sandbox_memory_bytes: i64 = 256 * 1024 * 1024;
 pub const default_sandbox_pids_limit: i64 = 64;
+pub const default_sandbox_nano_cpus: i64 = 1_000_000_000;
 pub const default_sandbox_tmpfs_opts = "rw,noexec,nosuid,nodev,size=67108864";
 
 pub const default_allowed_networks = [_][]const u8{"none"};
@@ -16,6 +17,7 @@ pub const Policy = struct {
     profile: []const u8 = "sandbox",
     max_memory_bytes: i64 = default_sandbox_memory_bytes,
     max_pids_limit: i64 = default_sandbox_pids_limit,
+    max_nano_cpus: i64 = default_sandbox_nano_cpus,
     require_read_only: bool = true,
     require_no_new_privileges: bool = true,
     require_cap_drop_all: bool = true,
@@ -87,6 +89,7 @@ pub fn applySandboxDefaults(r: *cli.RunOpts) void {
     if (r.network == null) r.network = "none";
     if (r.memory == null) r.memory = default_sandbox_memory_bytes;
     if (r.pids_limit == null) r.pids_limit = default_sandbox_pids_limit;
+    if (r.nano_cpus == null) r.nano_cpus = default_sandbox_nano_cpus;
     if (r.cap_drop.len == 0) r.cap_drop = &default_cap_drop_all;
 }
 
@@ -113,6 +116,7 @@ pub fn loadPolicyFile(allocator: std.mem.Allocator, path: []const u8) !std.json.
 pub fn validatePolicySchema(pol: Policy) ApiError!void {
     if (pol.max_memory_bytes <= 0) return ApiError.InvalidPolicyFile;
     if (pol.max_pids_limit <= 0) return ApiError.InvalidPolicyFile;
+    if (pol.max_nano_cpus <= 0) return ApiError.InvalidPolicyFile;
     if (pol.allowed_networks.len == 0) return ApiError.InvalidPolicyFile;
     if (pol.tmpfs_tmp_options.len == 0 or pol.tmpfs_tmp_options.len > 256) return ApiError.InvalidPolicyFile;
     for (pol.tmpfs_tmp_options) |c| {
@@ -131,6 +135,9 @@ pub fn checkRunPolicy(r: cli.RunOpts, pol: Policy) ?[]const u8 {
 
     const pids = r.pids_limit orelse return "policy.max_pids_limit";
     if (pids <= 0 or pids > pol.max_pids_limit) return "policy.max_pids_limit";
+
+    const cpus = r.nano_cpus orelse return "policy.max_nano_cpus";
+    if (cpus <= 0 or cpus > pol.max_nano_cpus) return "policy.max_nano_cpus";
 
     if (pol.require_cap_drop_all) {
         var drops_all = false;
@@ -217,6 +224,7 @@ fn printPolicyHuman(writer: anytype, source: []const u8, pol: Policy) !void {
     try writer.print("Profile:                 {s}\n", .{pol.profile});
     try writer.print("Max Memory (bytes):      {?d}\n", .{pol.max_memory_bytes});
     try writer.print("Max PIDs Limit:          {?d}\n", .{pol.max_pids_limit});
+    try writer.print("Max CPU (nanocpus):      {?d}\n", .{pol.max_nano_cpus});
     try writer.print("Require Read-Only:       {}\n", .{pol.require_read_only});
     try writer.print("Require No-New-Privs:    {}\n", .{pol.require_no_new_privileges});
     try writer.print("Require CapDrop=ALL:     {}\n", .{pol.require_cap_drop_all});
@@ -235,6 +243,7 @@ test "applySandboxDefaults locks down unset RunOpts and passes default policy" {
     try std.testing.expectEqualStrings("none", r.network.?);
     try std.testing.expectEqual(default_sandbox_memory_bytes, r.memory.?);
     try std.testing.expectEqual(default_sandbox_pids_limit, r.pids_limit.?);
+    try std.testing.expectEqual(default_sandbox_nano_cpus, r.nano_cpus.?);
     try std.testing.expectEqual(@as(usize, 1), r.cap_drop.len);
     try std.testing.expectEqualStrings("ALL", r.cap_drop[0]);
 
@@ -269,6 +278,11 @@ test "enforceRunPolicy rejects flags exceeding sandbox guardrails" {
     var r_vol = cli.RunOpts{ .image = "alpine:3.20", .profile = .sandbox, .volumes = &rw_vols };
     applySandboxDefaults(&r_vol);
     try std.testing.expectEqualStrings("policy.forbid_rw_mounts", checkRunPolicy(r_vol, default_sandbox_policy).?);
+
+    // 6) CPU limit exceeding 1 CPU sandbox ceiling
+    var r_cpu = cli.RunOpts{ .image = "alpine:3.20", .profile = .sandbox, .nano_cpus = 2_000_000_000 };
+    applySandboxDefaults(&r_cpu);
+    try std.testing.expectEqualStrings("policy.max_nano_cpus", checkRunPolicy(r_cpu, default_sandbox_policy).?);
 }
 
 test "forbid_secret_env fail-closed blocks credential-bearing env" {

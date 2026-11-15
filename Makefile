@@ -22,6 +22,9 @@ demo: ## Run built-in 18-case fail-closed enforcement demo
 e2e: ## Run end-to-end smoke, hardening, and audit-tamper verification
 	sh ./scripts/smoke.sh
 
+real-e2e: build ## Run live Podman daemon E2E verification (skips cleanly if socket unavailable)
+	sh ./scripts/podman-e2e.sh
+
 check-ci: ## Check CI, Makefile, CLI, vault, and README parity
 	$(PYTHON) ./scripts/check-ci-parity.py
 
