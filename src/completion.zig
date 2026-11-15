@@ -4,7 +4,7 @@ const cli_types = @import("cli_types.zig");
 
 pub const Shell = cli_types.Shell;
 
-const subcommands = "run ps images pull rmi tag history commit build start stop restart pause unpause rename kill rm logs top exec inspect stats volume network pod system port wait diff events policy completion audit demo version help";
+const subcommands = "run ps images pull rmi tag history commit build start stop restart pause unpause rename kill rm logs top exec inspect stats volume network pod system port wait diff events policy completion audit demo search save load export import version help";
 
 const bash_template =
     \\# bash completion for zigpod
@@ -84,6 +84,11 @@ const zsh_script =
     \\        'diff:Inspect filesystem changes'
     \\        'events:Stream daemon events'
     \\        'policy:Inspect or validate security policy'
+    \\        'search:Search a registry for images'
+    \\        'save:Stream an image tarball to a host file'
+    \\        'load:Upload a local image tarball to the daemon'
+    \\        'export:Stream a container rootfs tarball to a host file'
+    \\        'import:Upload a local rootfs tarball as a new image'
     \\        'completion:Generate shell completion'
     \\        'audit:Verify hash-chained audit.log'
     \\        'demo:Run self-test suite'
@@ -167,4 +172,82 @@ test "writeCompletion emits valid scripts for bash, zsh, and fish" {
     try writeCompletion(.fish, out.writer());
     try std.testing.expect(std.mem.indexOf(u8, out.items, "complete -c zigpod -f") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "__fish_seen_subcommand_from pod") != null);
+}
+
+test "bash script wires top-level commands, flags, and subcommand branches" {
+    const alloc = std.testing.allocator;
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    try writeCompletion(.bash, out.writer());
+    const s = out.items;
+
+    try std.testing.expect(std.mem.indexOf(u8, s, "# bash completion for zigpod") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "-W \"--socket -v --verbose -h --help --version run ps images") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "completion)\n            COMPREPLY=( $(compgen -W \"bash zsh fish\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "volume)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "network)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "policy)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "system)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "--pids-limit --read-only --no-new-privileges") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "complete -F _zigpod_completions zigpod") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "{s}") == null);
+}
+
+test "zsh script registers all subcommands and per-command actions" {
+    const alloc = std.testing.allocator;
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    try writeCompletion(.zsh, out.writer());
+    const s = out.items;
+
+    try std.testing.expect(std.mem.indexOf(u8, s, "#compdef zigpod") != null);
+    for ([_][]const u8{ "run", "ps", "images", "pull", "rmi", "tag", "history", "commit", "build", "start", "stop", "restart", "pause", "unpause", "rename", "kill", "rm", "logs", "top", "exec", "inspect", "stats", "volume", "network", "pod", "system", "port", "wait", "diff", "events", "policy", "completion", "audit", "demo", "version", "help" }) |cmd| {
+        var line_buf = std.ArrayList(u8).init(alloc);
+        defer line_buf.deinit();
+        try line_buf.writer().print("'{s}:", .{cmd});
+        try std.testing.expect(std.mem.indexOf(u8, s, line_buf.items) != null);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, s, "(( CURRENT == 2 ))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "_values 'shell' bash zsh fish") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "_values 'action' ping df prune") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "_zigpod \"$@\"") != null);
+}
+
+test "fish script lists every subcommand under __fish_use_subcommand" {
+    const alloc = std.testing.allocator;
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    try writeCompletion(.fish, out.writer());
+    const s = out.items;
+
+    try std.testing.expect(std.mem.indexOf(u8, s, "# fish completion for zigpod") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "__fish_use_subcommand") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "__fish_seen_subcommand_from volume") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "__fish_seen_subcommand_from network") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "__fish_seen_subcommand_from system") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "{s}") == null);
+}
+
+test "each shell emits a distinct non-empty script" {
+    const alloc = std.testing.allocator;
+    var b = std.ArrayList(u8).init(alloc);
+    defer b.deinit();
+    var z = std.ArrayList(u8).init(alloc);
+    defer z.deinit();
+    var f = std.ArrayList(u8).init(alloc);
+    defer f.deinit();
+
+    try writeCompletion(.bash, b.writer());
+    try writeCompletion(.zsh, z.writer());
+    try writeCompletion(.fish, f.writer());
+
+    try std.testing.expect(b.items.len > 0);
+    try std.testing.expect(z.items.len > 0);
+    try std.testing.expect(f.items.len > 0);
+    try std.testing.expect(!std.mem.eql(u8, b.items, z.items));
+    try std.testing.expect(!std.mem.eql(u8, z.items, f.items));
+    try std.testing.expect(!std.mem.eql(u8, b.items, f.items));
 }

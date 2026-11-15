@@ -419,3 +419,247 @@ test "tagImage, imageHistory, and commitContainer endpoints + validation" {
     joined = true;
     try std.testing.expectEqual(replies.len, ctx.matched);
 }
+
+test "listImages and listImagesJson render table and fallback tags over mock Unix socket" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-img-list-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const json_body =
+        \\[{"Id":"sha256:9988776655443322","RepoTags":["docker.io/library/alpine:3.20"],"Size":7340032,"Created":1700000000},{"Id":"sha256:1111222233334444","Size":1024}]
+    ;
+    const raw_resp = std.fmt.comptimePrint(
+        "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}",
+        .{ json_body.len, json_body },
+    );
+
+    const replies = [_]ScriptedReply{
+        .{
+            .expected_prefix = "GET /v1.40/images/json HTTP/1.1\r\n",
+            .raw_response = raw_resp,
+        },
+        .{
+            .expected_prefix = "GET /v1.40/images/json HTTP/1.1\r\n",
+            .raw_response = raw_resp,
+        },
+    };
+
+    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    try listImages(&client, &logger, out.writer());
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "998877665544") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "docker.io/library/alpine:3.20") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "7.0 MB") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "111122223333") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "<none>:<none>") != null);
+
+    out.clearRetainingCapacity();
+    try listImagesJson(&client, &logger, out.writer());
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "sha256:9988776655443322") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "sha256:1111222233334444") != null);
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(@as(usize, 2), ctx.matched);
+}
+
+test "removeImage succeeds on 204, fails closed on validation and API errors" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-img-rm-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const gone_json = "{\"message\":\"no such image\"}";
+    const replies = [_]ScriptedReply{
+        .{
+            .expected_prefix = "DELETE /v1.40/images/alpine:3.20?force=true HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n",
+        },
+        .{
+            .expected_prefix = "DELETE /v1.40/images/ghost?force=false HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint(
+                "HTTP/1.1 404 Not Found\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ gone_json.len, gone_json },
+            ),
+        },
+    };
+
+    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    var sink = std.ArrayList(u8).init(alloc);
+    defer sink.deinit();
+
+    try std.testing.expectError(ApiError.InvalidIdentifier, removeImage(&client, &logger, "bad?x=1", false, sink.writer()));
+    try removeImage(&client, &logger, "alpine:3.20", true, sink.writer());
+    try std.testing.expectError(ApiError.PodmanApiError, removeImage(&client, &logger, "ghost", false, sink.writer()));
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
+    try std.testing.expectEqualStrings("Removed alpine:3.20\n", sink.items);
+}
+
+test "pullImage streams status lines and fails closed on error line and HTTP failure" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-img-pull-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const stream_out =
+        "{\"status\":\"Pulling from library/alpine\"}\n" ++
+        "{\"id\":\"9c6f07244728\",\"status\":\"Downloading\"}\n" ++
+        "not-json-line\n";
+    const error_out = "{\"error\":\"manifest unknown\"}\n";
+    const not_found_json = "{\"message\":\"denied\"}";
+
+    const replies = [_]ScriptedReply{
+        .{
+            .expected_prefix = "POST /v1.40/images/create?fromImage=alpine%3A3.20 HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint(
+                "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ stream_out.len, stream_out },
+            ),
+        },
+        .{
+            .expected_prefix = "POST /v1.40/images/create?fromImage=alpine%3A3.20 HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint(
+                "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ error_out.len, error_out },
+            ),
+        },
+        .{
+            .expected_prefix = "POST /v1.40/images/create?fromImage=alpine%3A3.20 HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint(
+                "HTTP/1.1 404 Not Found\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ not_found_json.len, not_found_json },
+            ),
+        },
+    };
+
+    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    try pullImage(&client, &logger, "alpine:3.20", out.writer());
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "Pulling from library/alpine") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "9c6f07244728: Downloading") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "not-json-line") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "Pulled alpine:3.20") != null);
+
+    var got_stream_err = false;
+    pullImage(&client, &logger, "alpine:3.20", out.writer()) catch |e| {
+        got_stream_err = e == ApiError.PodmanApiError;
+    };
+    try std.testing.expect(got_stream_err);
+
+    var got_http_err = false;
+    pullImage(&client, &logger, "alpine:3.20", out.writer()) catch |e| {
+        got_http_err = e == ApiError.PodmanApiError;
+    };
+    try std.testing.expect(got_http_err);
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
+}
+
+test "splitRepoTag handles registries, ports, and empty tags" {
+    const cases = [_]struct { in: []const u8, repo: []const u8, tag: []const u8 }{
+        .{ .in = "alpine:3.20", .repo = "alpine", .tag = "3.20" },
+        .{ .in = "myrepo/app", .repo = "myrepo/app", .tag = "latest" },
+        .{ .in = "myrepo/app:", .repo = "myrepo/app:", .tag = "latest" },
+        .{ .in = "localhost:5000/img", .repo = "localhost:5000/img", .tag = "latest" },
+        .{ .in = "localhost:5000/img:v2", .repo = "localhost:5000/img", .tag = "v2" },
+        .{ .in = "docker.io/library/alpine", .repo = "docker.io/library/alpine", .tag = "latest" },
+        .{ .in = "docker.io/library/alpine:3.21.2", .repo = "docker.io/library/alpine", .tag = "3.21.2" },
+    };
+    for (cases) |c| {
+        const got = splitRepoTag(c.in);
+        try std.testing.expectEqualStrings(c.repo, got.repo);
+        try std.testing.expectEqualStrings(c.tag, got.tag);
+    }
+}
+
+test "PullStreamCtx buffers partial lines, passes junk through, and caps line size" {
+    const alloc = std.testing.allocator;
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    var ctx = PullStreamCtx(@TypeOf(out.writer())){
+        .allocator = alloc,
+        .logger = &logger,
+        .image = "alpine:3.20",
+        .writer = out.writer(),
+    };
+    defer ctx.deinit();
+
+    // A complete JSON object without a trailing newline stays buffered.
+    try ctx.onChunk("{\"status\":\"Pulling\"}");
+    try std.testing.expectEqual(@as(usize, 0), out.items.len);
+    // The next read completes the line and delivers a full id-status line.
+    try ctx.onChunk("\n{\"id\":\"9c6f07244728\",\"status\":\"Downloading\"}\n");
+    try std.testing.expectEqualStrings("Pulling\n9c6f07244728: Downloading\n", out.items);
+
+    // Non-JSON lines pass through verbatim.
+    out.clearRetainingCapacity();
+    try ctx.onChunk("plain text line\n");
+    try std.testing.expectEqualStrings("plain text line\n", out.items);
+
+    // A line larger than the 1 MiB cap is rejected before buffering.
+    const big = try alloc.alloc(u8, 1024 * 1024 + 1);
+    defer alloc.free(big);
+    @memset(big, 'x');
+    try std.testing.expectError(http.Error.InvalidResponse, ctx.onChunk(big));
+}

@@ -22,7 +22,6 @@ pub fn parsePolicyPath(s: []const u8) ParseError![]const u8 {
     return s;
 }
 
-
 pub fn parseMemoryBytes(s: []const u8) ParseError!i64 {
     if (s.len == 0) return error.InvalidValue;
     var num_end = s.len;
@@ -217,4 +216,165 @@ test "parseMemoryBytes and spec parsers handle valid and invalid inputs" {
     const dup = try std.testing.allocator.dupe(u8, "SIGTERM");
     defer std.testing.allocator.free(dup);
     try std.testing.expectEqualStrings("SIGTERM", try parseSignal(dup));
+}
+
+test "parseProfile accepts only default and sandbox" {
+    try std.testing.expectEqual(Profile.default, try parseProfile("default"));
+    try std.testing.expectEqual(Profile.sandbox, try parseProfile("sandbox"));
+    try std.testing.expectError(error.InvalidValue, parseProfile(""));
+    try std.testing.expectError(error.InvalidValue, parseProfile("Default"));
+    try std.testing.expectError(error.InvalidValue, parseProfile("paranoid"));
+}
+
+test "parsePolicyPath rejects empty, oversized, and control characters" {
+    try std.testing.expectEqualStrings("/etc/zigpod-policy.json", try parsePolicyPath("/etc/zigpod-policy.json"));
+    try std.testing.expectError(error.InvalidValue, parsePolicyPath(""));
+    try std.testing.expectError(error.InvalidValue, parsePolicyPath("a" ** 4097));
+    try std.testing.expectEqualStrings("p" ** 4096, try parsePolicyPath("p" ** 4096));
+    try std.testing.expectError(error.InvalidValue, parsePolicyPath("a\x00b"));
+    try std.testing.expectError(error.InvalidValue, parsePolicyPath("a\tb"));
+    try std.testing.expectError(error.InvalidValue, parsePolicyPath("a\nb"));
+}
+
+test "parseMemoryBytes parses unit suffixes case-insensitively with overflow guard" {
+    try std.testing.expectEqual(@as(i64, 1), try parseMemoryBytes("1"));
+    try std.testing.expectEqual(@as(i64, 1024), try parseMemoryBytes("1k"));
+    try std.testing.expectEqual(@as(i64, 1024), try parseMemoryBytes("1KB"));
+    try std.testing.expectEqual(@as(i64, 1024), try parseMemoryBytes("1kb"));
+    try std.testing.expectEqual(@as(i64, 512 * 1024 * 1024), try parseMemoryBytes("512MB"));
+    try std.testing.expectEqual(@as(i64, 2 * 1024 * 1024 * 1024), try parseMemoryBytes("2G"));
+    try std.testing.expectEqual(@as(i64, 4096), try parseMemoryBytes("4096b"));
+    try std.testing.expectError(error.InvalidValue, parseMemoryBytes(""));
+    try std.testing.expectError(error.InvalidValue, parseMemoryBytes("m"));
+    try std.testing.expectError(error.InvalidValue, parseMemoryBytes("0b"));
+    try std.testing.expectError(error.InvalidValue, parseMemoryBytes("-5m"));
+    try std.testing.expectError(error.InvalidValue, parseMemoryBytes("abc"));
+    try std.testing.expectError(error.InvalidValue, parseMemoryBytes("99999999999999999999g"));
+    try std.testing.expectError(error.InvalidValue, parseMemoryBytes("9999999999999999g"));
+}
+
+test "parsePidsLimit requires a positive integer" {
+    try std.testing.expectEqual(@as(i64, 64), try parsePidsLimit("64"));
+    try std.testing.expectEqual(@as(i64, 1), try parsePidsLimit("1"));
+    try std.testing.expectError(error.InvalidValue, parsePidsLimit("0"));
+    try std.testing.expectError(error.InvalidValue, parsePidsLimit("-1"));
+    try std.testing.expectError(error.InvalidValue, parsePidsLimit(""));
+    try std.testing.expectError(error.InvalidValue, parsePidsLimit("many"));
+}
+
+test "parseVolumeSpec splits source, destination, and ro/rw option" {
+    const v1 = try parseVolumeSpec("/src:/data");
+    try std.testing.expectEqualStrings("/src", v1.source);
+    try std.testing.expectEqualStrings("/data", v1.destination);
+    try std.testing.expect(v1.readonly);
+
+    const v2 = try parseVolumeSpec("/src:/data:rw");
+    try std.testing.expect(!v2.readonly);
+    try std.testing.expectEqualStrings("/data", v2.destination);
+
+    const v3 = try parseVolumeSpec("/src:/data:ro");
+    try std.testing.expect(v3.readonly);
+
+    try std.testing.expectError(error.InvalidValue, parseVolumeSpec("/src"));
+    try std.testing.expectError(error.InvalidValue, parseVolumeSpec(":data"));
+    try std.testing.expectError(error.InvalidValue, parseVolumeSpec("/src:"));
+    try std.testing.expectError(error.InvalidValue, parseVolumeSpec("/src:/data:tx"));
+    try std.testing.expectError(error.InvalidValue, parseVolumeSpec("/src:/data:ro:rw"));
+}
+
+test "parsePortNumber bounds the range to 1..65535" {
+    try std.testing.expectEqual(@as(u16, 1), try parsePortNumber("1"));
+    try std.testing.expectEqual(@as(u16, 80), try parsePortNumber("80"));
+    try std.testing.expectEqual(@as(u16, 65535), try parsePortNumber("65535"));
+    try std.testing.expectError(error.InvalidValue, parsePortNumber(""));
+    try std.testing.expectError(error.InvalidValue, parsePortNumber("0"));
+    try std.testing.expectError(error.InvalidValue, parsePortNumber("65536"));
+    try std.testing.expectError(error.InvalidValue, parsePortNumber("-1"));
+    try std.testing.expectError(error.InvalidValue, parsePortNumber("http"));
+}
+
+test "parsePortSpec accepts all documented shapes and rejects malformed ones" {
+    const p1 = try parsePortSpec("8080");
+    try std.testing.expectEqual(@as(u16, 8080), p1.container_port);
+    try std.testing.expect(p1.host_port == null);
+    try std.testing.expectEqualStrings("tcp", p1.proto);
+
+    const p2 = try parsePortSpec("8080:80");
+    try std.testing.expectEqual(@as(u16, 8080), p2.host_port.?);
+    try std.testing.expectEqual(@as(u16, 80), p2.container_port);
+
+    const p3 = try parsePortSpec("8080:80/udp");
+    try std.testing.expectEqualStrings("udp", p3.proto);
+
+    const p4 = try parsePortSpec("127.0.0.1:8080:80/sctp");
+    try std.testing.expectEqualStrings("127.0.0.1", p4.host_ip.?);
+    try std.testing.expectEqual(@as(u16, 8080), p4.host_port.?);
+    try std.testing.expectEqual(@as(u16, 80), p4.container_port);
+    try std.testing.expectEqualStrings("sctp", p4.proto);
+
+    try std.testing.expectError(error.InvalidValue, parsePortSpec(""));
+    try std.testing.expectError(error.InvalidValue, parsePortSpec("8080:80:90:100"));
+    try std.testing.expectError(error.InvalidValue, parsePortSpec("999.1.1.1:8080:80"));
+    try std.testing.expectError(error.InvalidValue, parsePortSpec("host.example:8080:80"));
+    try std.testing.expectError(error.InvalidValue, parsePortSpec("8080:80/icmp"));
+    try std.testing.expectError(error.InvalidValue, parsePortSpec("8080:0"));
+    try std.testing.expectError(error.InvalidValue, parsePortSpec("0:80"));
+    try std.testing.expectError(error.InvalidValue, parsePortSpec("a:80"));
+    try std.testing.expectError(error.InvalidValue, parsePortSpec("8080:/udp"));
+}
+
+test "parseNetworkMode allows exactly the five known modes" {
+    for ([_][]const u8{ "none", "bridge", "host", "pasta", "slirp4netns" }) |m| {
+        try std.testing.expectEqualStrings(m, try parseNetworkMode(m));
+    }
+    try std.testing.expectError(error.InvalidValue, parseNetworkMode(""));
+    try std.testing.expectError(error.InvalidValue, parseNetworkMode("Host"));
+    try std.testing.expectError(error.InvalidValue, parseNetworkMode("slirp"));
+}
+
+test "parseWorkdir requires an absolute path" {
+    try std.testing.expectEqualStrings("/work", try parseWorkdir("/work"));
+    try std.testing.expectEqualStrings("/", try parseWorkdir("/"));
+    try std.testing.expectError(error.InvalidValue, parseWorkdir(""));
+    try std.testing.expectError(error.InvalidValue, parseWorkdir("work"));
+    try std.testing.expectError(error.InvalidValue, parseWorkdir("./work"));
+}
+
+test "parseUserSpec validates USER and USER:GROUP shapes" {
+    try std.testing.expectEqualStrings("root", try parseUserSpec("root"));
+    try std.testing.expectEqualStrings("1000:1000", try parseUserSpec("1000:1000"));
+    try std.testing.expectEqualStrings("alice.doe-x_1:grp-2", try parseUserSpec("alice.doe-x_1:grp-2"));
+    try std.testing.expectError(error.InvalidValue, parseUserSpec(""));
+    try std.testing.expectError(error.InvalidValue, parseUserSpec("root:"));
+    try std.testing.expectError(error.InvalidValue, parseUserSpec(":root"));
+    try std.testing.expectError(error.InvalidValue, parseUserSpec("a:b:c"));
+    try std.testing.expectError(error.InvalidValue, parseUserSpec("-root"));
+    try std.testing.expectError(error.InvalidValue, parseUserSpec(".root"));
+    try std.testing.expectError(error.InvalidValue, parseUserSpec("ro ot"));
+    try std.testing.expectError(error.InvalidValue, parseUserSpec("user:gr oup"));
+    try std.testing.expectError(error.InvalidValue, parseUserSpec("u" ** 129));
+    try std.testing.expectEqualStrings("u" ** 64, try parseUserSpec("u" ** 64));
+    try std.testing.expectError(error.InvalidValue, parseUserSpec("u" ** 65));
+}
+
+test "parseCapName requires ALL or an uppercase token" {
+    try std.testing.expectEqualStrings("ALL", try parseCapName("ALL"));
+    try std.testing.expectEqualStrings("NET_BIND_SERVICE", try parseCapName("NET_BIND_SERVICE"));
+    try std.testing.expectEqualStrings("CAP1_X", try parseCapName("CAP1_X"));
+    try std.testing.expectError(error.InvalidValue, parseCapName(""));
+    try std.testing.expectError(error.InvalidValue, parseCapName("all"));
+    try std.testing.expectError(error.InvalidValue, parseCapName("NET_BIND_SERVICE "));
+    try std.testing.expectError(error.InvalidValue, parseCapName("1ABC"));
+    try std.testing.expectError(error.InvalidValue, parseCapName("-X"));
+    try std.testing.expectError(error.InvalidValue, parseCapName("X" ** 65));
+}
+
+test "parseSignal accepts full names and short aliases only" {
+    for ([_][]const u8{ "SIGTERM", "SIGKILL", "SIGINT", "SIGHUP", "SIGQUIT", "SIGUSR1", "SIGUSR2", "TERM", "KILL", "INT", "HUP", "QUIT", "USR1", "USR2" }) |sig| {
+        try std.testing.expectEqualStrings(sig, try parseSignal(sig));
+    }
+    try std.testing.expectError(error.InvalidValue, parseSignal(""));
+    try std.testing.expectError(error.InvalidValue, parseSignal("SIGFAKE"));
+    try std.testing.expectError(error.InvalidValue, parseSignal("sigterm"));
+    try std.testing.expectError(error.InvalidValue, parseSignal("9"));
 }
