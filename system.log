@@ -484,3 +484,27 @@
 2026-11-15T10:29:10Z [ERROR] auto-audit detected 1 failure(s) (hook=true)
 2026-11-15T10:30:19Z [INFO] auto-audit passed (hook=false)
 2026-11-15T10:30:20Z [INFO] auto-audit passed (hook=false)
+2026-11-15T10:42:38Z [ERROR] auto-audit detected 1 failure(s) (hook=true)
+2026-11-15T10:43:39Z [ERROR] auto-audit detected 1 failure(s) (hook=true)
+2026-11-15T10:43:52Z [ERROR] auto-audit detected 1 failure(s) (hook=true)
+2026-11-15T10:42:59Z [INFO] auto-audit passed (hook=false)
+2026-11-15T10:44:40Z [ERROR] auto-audit detected 1 failure(s) (hook=true)
+2026-11-15T10:44:52Z [ERROR] auto-audit detected 1 failure(s) (hook=true)
+2026-11-15T10:45:03Z [ERROR] auto-audit detected 1 failure(s) (hook=true)
+2026-11-15T10:46:37Z [INFO] auto-audit passed (hook=true)
+2026-11-15T10:46:40Z [INFO] auto-audit passed (hook=true)
+2026-11-15T10:46:42Z [INFO] auto-audit passed (hook=true)
+2026-11-15T10:46:53Z [INFO] auto-audit passed (hook=true)
+2026-11-15T10:47:03Z [INFO] auto-audit passed (hook=false)
+2026-11-15T10:47:24Z [INFO] auto-audit passed (hook=true)
+2026-11-15T10:47:27Z [INFO] auto-audit passed (hook=false)
+2026-11-15T10:47:28Z [INFO] auto-audit passed (hook=false)
+2026-11-15T10:48:30Z [INFO] zigpod 0.1.0 command=system socket=/tmp/zigpod-real-e2e.kIvjZJ/podman.sock
+2026-11-15T10:48:30Z [DEBUG] GET /v1.40/_ping
+2026-11-15T10:48:30Z [INFO] system ping succeeded
+2026-11-15T10:49:21Z [INFO] auto-audit passed (hook=true)
+2026-11-15T10:49:31Z [INFO] auto-audit passed (hook=false)
+2026-11-15T10:49:32Z [INFO] auto-audit passed (hook=false)
+2026-11-15T10:50:28Z [INFO] zigpod 0.1.0 command=system socket=/tmp/zigpod-real-e2e.PfLzSQ/podman.sock
+2026-11-15T10:50:28Z [DEBUG] GET /v1.40/_ping
+2026-11-15T10:50:28Z [INFO] system ping succeeded

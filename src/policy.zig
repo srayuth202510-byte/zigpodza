@@ -289,6 +289,14 @@ test "enforceRunPolicy rejects flags exceeding sandbox guardrails" {
     var r_cpu = cli.RunOpts{ .image = "alpine:3.20", .profile = .sandbox, .nano_cpus = 2_000_000_000 };
     applySandboxDefaults(&r_cpu);
     try std.testing.expectEqualStrings("policy.max_nano_cpus", checkRunPolicy(r_cpu, default_sandbox_policy).?);
+
+    // 7) /dev/shm exceeding 64 MiB sandbox ceiling (boundary: exactly 64 MiB is allowed)
+    var r_shm = cli.RunOpts{ .image = "alpine:3.20", .profile = .sandbox, .shm_size = 128 * 1024 * 1024 };
+    applySandboxDefaults(&r_shm);
+    try std.testing.expectEqualStrings("policy.max_shm_bytes", checkRunPolicy(r_shm, default_sandbox_policy).?);
+    var r_shm_ok = cli.RunOpts{ .image = "alpine:3.20", .profile = .sandbox, .shm_size = 64 * 1024 * 1024 };
+    applySandboxDefaults(&r_shm_ok);
+    try std.testing.expect(checkRunPolicy(r_shm_ok, default_sandbox_policy) == null);
 }
 
 test "forbid_secret_env fail-closed blocks credential-bearing env" {

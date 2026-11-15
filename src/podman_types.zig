@@ -19,6 +19,7 @@ pub const ApiError = error{
     InvalidLabel,
     InvalidNetworkDriver,
     InvalidEnvFile,
+    InvalidShmSize,
     InvalidUlimit,
     InvalidHealthcheck,
     PolicyViolation,

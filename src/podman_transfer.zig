@@ -1489,10 +1489,7 @@ test "scanCpArchive rejects hardlink escapes, oversized PAX headers, and truncat
         try tmp.dir.writeFile(.{ .sub_path = "longpax.tar", .data = pax_buf.items });
         const f = try tmp.dir.openFile("longpax.tar", .{});
         defer f.close();
-        if (scanCpArchive(alloc, f)) |s| {
-            if (s.common_root) |cr| alloc.free(cr);
-            return error.TestUnexpectedResult;
-        } else |_| {}
+        try std.testing.expectError(error.TarInsufficientBuffer, scanCpArchive(alloc, f));
     }
 
     // 3) Truncated tar stream (header declares 2048 bytes, stream ends after 64 bytes).
@@ -1505,9 +1502,6 @@ test "scanCpArchive rejects hardlink escapes, oversized PAX headers, and truncat
         try tmp.dir.writeFile(.{ .sub_path = "trunc.tar", .data = trunc_buf.items });
         const f = try tmp.dir.openFile("trunc.tar", .{});
         defer f.close();
-        if (scanCpArchive(alloc, f)) |s| {
-            if (s.common_root) |cr| alloc.free(cr);
-            return error.TestUnexpectedResult;
-        } else |_| {}
+        try std.testing.expectError(error.EndOfStream, scanCpArchive(alloc, f));
     }
 }

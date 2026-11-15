@@ -95,9 +95,9 @@ def reply(conn, status, body=b""):
     hdr = f"HTTP/1.1 {status}\r\nContent-Length: {len(body)}\r\n\r\n".encode("ascii")
     conn.sendall(hdr + body)
 
-# Expect 26 requests: create, start, wait, logs, delete (--rm), ps -a, inspect, exec-create, exec-start, exec-inspect, stats-list, stats-one, kill, top, volume-ls, network-ls, search, save, load, export, import, network-create, network-rm, attach, cp-put, cp-get
+# Expect 35 requests: create, start, wait, logs, delete (--rm), ps -a, inspect, exec-create, exec-start, exec-inspect, stats-list, stats-one, kill, top, volume-ls, network-ls, search, save, load, export, import, network-create, network-rm, attach, cp-put, cp-get, compose-up (5), compose-ps (1), compose-down (3)
 with open(req_path, "wb") as out:
-    for step in range(26):
+    for step in range(35):
         conn, _ = srv.accept()
         try:
             req = read_req(conn)
@@ -270,6 +270,35 @@ grep -q "CP-SMOKE-UPLOAD" "$REQ_LOG"
 "$BIN" --socket "$SOCK" cp c1:/tmp/cp.txt "$CP_DST" >/dev/null
 grep -q "cp-smoke-from-ctr" "$CP_DST"
 
+COMPOSE_FILE="$TMPDIR/compose.yaml"
+cat > "$COMPOSE_FILE" <<'YAML'
+name: smokecomp
+networks:
+  smokecomp_net:
+    driver: bridge
+    internal: true
+services:
+  web:
+    image: alpine:3.20
+    depends_on: [db]
+    init: true
+    shm_size: 32m
+    mem_limit: 128m
+  db:
+    image: alpine:3.20
+YAML
+COMPOSE_UP_OUT=$("$BIN" --socket "$SOCK" compose up -f "$COMPOSE_FILE")
+echo "$COMPOSE_UP_OUT" | grep -q "smokecomp_db_1"
+echo "$COMPOSE_UP_OUT" | grep -q "smokecomp_web_1"
+grep -q '"Init":true' "$REQ_LOG"
+grep -q '"ShmSize":33554432' "$REQ_LOG"
+COMPOSE_PS_OUT=$("$BIN" --socket "$SOCK" compose ps -f "$COMPOSE_FILE")
+echo "$COMPOSE_PS_OUT" | grep -q "alpine:3.20"
+grep -q "com.docker.compose.project%3Dsmokecomp" "$REQ_LOG"
+COMPOSE_DOWN_OUT=$("$BIN" --socket "$SOCK" compose down -f "$COMPOSE_FILE")
+echo "$COMPOSE_DOWN_OUT" | grep -q "smokecomp_web_1 removed"
+echo "$COMPOSE_DOWN_OUT" | grep -q "smokecomp_db_1 removed"
+
 # Adversarial input must fail closed before reaching daemon.
 if "$BIN" --socket "$SOCK" kill -s SIGBAD smoke1234567890ab >/dev/null 2>&1; then
     echo "[FAIL] expected invalid kill signal (SIGBAD) to fail closed" >&2
@@ -301,6 +330,24 @@ fi
 
 if "$BIN" --socket "$SOCK" save -o /etc/shadow alpine:3.20 >/dev/null 2>&1; then
     echo "[FAIL] expected dangerous save output path (/etc/shadow) to fail closed" >&2
+    exit 1
+fi
+
+if "$BIN" --socket "$SOCK" run --shm-size 0 alpine:3.20 >/dev/null 2>&1; then
+    echo "[FAIL] expected invalid --shm-size (0) to fail closed" >&2
+    exit 1
+fi
+
+COMPOSE_DENY_FILE="$TMPDIR/compose-deny.yaml"
+cat > "$COMPOSE_DENY_FILE" <<'YAML'
+name: smokedeny
+services:
+  app:
+    image: alpine:3.20
+    mem_limit: 512m
+YAML
+if "$BIN" --socket "$SOCK" compose up --profile=sandbox -f "$COMPOSE_DENY_FILE" >/dev/null 2>&1; then
+    echo "[FAIL] expected compose up --profile=sandbox exceeding memory limit to fail closed" >&2
     exit 1
 fi
 

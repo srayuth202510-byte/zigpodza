@@ -12626,3 +12626,612 @@ test transitive failure
 +- run test 223/224 passed, 1 failed
 error: the following build command failed with exit code 1:
 /home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0xda240143 -Zcf9649e9f8ff3282 test
+2026-11-15T10:42:38Z [ERROR] auto-audit detected 1 failure(s):
+OK: No 'page_allocator' usage in src/.
+OK: GPA leak check is enforced.
+OK: No BUG-001 AccessDenied mismatch in src/http.zig.
+OK: std.testing.allocator present in src/main.zig.
+OK: std.testing.allocator present in src/cli.zig.
+OK: std.testing.allocator present in src/cli_specs.zig.
+OK: std.testing.allocator present in src/cli_types.zig.
+OK: std.testing.allocator present in src/completion.zig.
+OK: std.testing.allocator present in src/compose.zig.
+OK: std.testing.allocator present in src/config.zig.
+OK: std.testing.allocator present in src/http.zig.
+OK: std.testing.allocator present in src/http_parser.zig.
+OK: std.testing.allocator present in src/http_types.zig.
+OK: std.testing.allocator present in src/podman_api.zig.
+OK: std.testing.allocator present in src/podman_build.zig.
+OK: std.testing.allocator present in src/podman_pods.zig.
+OK: std.testing.allocator present in src/podman_transfer.zig.
+OK: std.testing.allocator present in src/podman_test_helpers.zig.
+OK: std.testing.allocator present in src/podman_types.zig.
+OK: std.testing.allocator present in src/podman_validate.zig.
+OK: std.testing.allocator present in src/podman_logs.zig.
+OK: std.testing.allocator present in src/podman_images.zig.
+OK: std.testing.allocator present in src/podman_system.zig.
+OK: std.testing.allocator present in src/log.zig.
+OK: std.testing.allocator present in src/policy.zig.
+OK: Root test blocks reference pods, build_mod, transfer, compose, types, and th (BUG-022/BUG-023).
+OK: validateRequestTarget() enforced in src/http.zig.
+OK: validateIdentifier() enforced in src/podman_*.zig.
+OK: validateHostPath() fail-closed host mount policy enforced in src/podman_*.zig.
+OK: validatePortMapping() fail-closed port policy enforced in src/podman_*.zig.
+OK: validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_*.zig.
+OK: validateResourceRef() inspect path guard enforced in src/podman_*.zig.
+OK: createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig.
+OK: checkRunPolicy(), writeAuditJson(), and logger.deny() enforced (BUG-019).
+OK: Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser.
+OK: Timeout poll, HostConfig hardening, audit hash-chain verification, and 18-case demo present.
+OK: Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable.
+FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)...
+test
++- run test
+   +- zig test Debug native 2 errors
+src/compose.zig:916:35: error: type '?[]cli_types.Volume' is not indexable and not a range
+src/compose.zig:916:35: note: for loop operand must be a range, array, slice, tuple, or vector
+src/compose.zig:916:35: error: type '?[]cli_types.Volume' is not indexable and not a range
+src/compose.zig:916:35: note: for loop operand must be a range, array, slice, tuple, or vector
+error: the following command failed with 2 compilation errors:
+/home/mitsword/.local/opt/zig-0.13.0/zig test -ODebug -Mroot=/home/mitsword/เอกสาร/zigpodza/src/main.zig --cache-dir /home/mitsword/เอกสาร/zigpodza/.zig-cache --global-cache-dir /home/mitsword/.cache/zig --name test --listen=- 
+Build Summary: 0/3 steps succeeded; 1 failed (disable with --summary none)
+test transitive failure
++- run test transitive failure
+   +- zig test Debug native 2 errors
+error: the following build command failed with exit code 1:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0x2b630d8e -Z2743f2d6ed5fac92 test
+2026-11-15T10:43:39Z [ERROR] auto-audit detected 1 failure(s):
+OK: No 'page_allocator' usage in src/.
+OK: GPA leak check is enforced.
+OK: No BUG-001 AccessDenied mismatch in src/http.zig.
+OK: std.testing.allocator present in src/main.zig.
+OK: std.testing.allocator present in src/cli.zig.
+OK: std.testing.allocator present in src/cli_specs.zig.
+OK: std.testing.allocator present in src/cli_types.zig.
+OK: std.testing.allocator present in src/completion.zig.
+OK: std.testing.allocator present in src/compose.zig.
+OK: std.testing.allocator present in src/config.zig.
+OK: std.testing.allocator present in src/http.zig.
+OK: std.testing.allocator present in src/http_parser.zig.
+OK: std.testing.allocator present in src/http_types.zig.
+OK: std.testing.allocator present in src/podman_api.zig.
+OK: std.testing.allocator present in src/podman_build.zig.
+OK: std.testing.allocator present in src/podman_pods.zig.
+OK: std.testing.allocator present in src/podman_transfer.zig.
+OK: std.testing.allocator present in src/podman_test_helpers.zig.
+OK: std.testing.allocator present in src/podman_types.zig.
+OK: std.testing.allocator present in src/podman_validate.zig.
+OK: std.testing.allocator present in src/podman_logs.zig.
+OK: std.testing.allocator present in src/podman_images.zig.
+OK: std.testing.allocator present in src/podman_system.zig.
+OK: std.testing.allocator present in src/log.zig.
+OK: std.testing.allocator present in src/policy.zig.
+OK: Root test blocks reference pods, build_mod, transfer, compose, types, and th (BUG-022/BUG-023).
+OK: validateRequestTarget() enforced in src/http.zig.
+OK: validateIdentifier() enforced in src/podman_*.zig.
+OK: validateHostPath() fail-closed host mount policy enforced in src/podman_*.zig.
+OK: validatePortMapping() fail-closed port policy enforced in src/podman_*.zig.
+OK: validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_*.zig.
+OK: validateResourceRef() inspect path guard enforced in src/podman_*.zig.
+OK: createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig.
+OK: checkRunPolicy(), writeAuditJson(), and logger.deny() enforced (BUG-019).
+OK: Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser.
+OK: Timeout poll, HostConfig hardening, audit hash-chain verification, and 18-case demo present.
+OK: Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable.
+FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)...
+test
++- run test 226/226 passed, 1 leaked
+error: 'compose.test.executeCompose up, ps, down, and sandbox pre-flight denial over mock socket' leaked: [gpa] (err): memory address 0x7f3ea0e49000 leaked: 
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:457:67: 0x120ef7e in ensureTotalCapacityPrecise (test)
+                const new_memory = try self.allocator.alignedAlloc(T, alignment, new_capacity);
+                                                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:434:51: 0x11653e0 in ensureTotalCapacity (test)
+            return self.ensureTotalCapacityPrecise(better_capacity);
+                                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:483:41: 0x11ea970 in addOne (test)
+            try self.ensureTotalCapacity(newlen);
+                                        ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:262:49: 0x114354e in append (test)
+            const new_item_ptr = try self.addOne();
+                                                ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:132:27: 0x11832ac in sanitizeProjectName (test)
+            try out.append(std.ascii.toLower(c));
+                          ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:196:44: 0x119627e in loadComposeFile (test)
+    const project = try sanitizeProjectName(alloc, proj_raw);
+                                           ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:814:33: 0x11a3669 in executeCompose__anon_6913 (test)
+    var cf = try loadComposeFile(alloc, opts.file);
+                                ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:1149:81: 0x12c3a61 in test.executeCompose up, ps, down, and sandbox pre-flight denial over mock socket (test)
+        try std.testing.expectError(pod.ApiError.PolicyViolation, executeCompose(&unused_client, &logger, .{
+                                                                                ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:95:29: 0x13474a3 in mainServer (test)
+                test_fn.func() catch |err| switch (err) {
+                            ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:35:26: 0x1257ede in main (test)
+        return mainServer() catch @panic("internal test runner failure");
+                         ^
+
+[gpa] (err): memory address 0x7f3ea0e49080 leaked: 
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:457:67: 0x120ef7e in ensureTotalCapacityPrecise (test)
+                const new_memory = try self.allocator.alignedAlloc(T, alignment, new_capacity);
+                                                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:434:51: 0x11653e0 in ensureTotalCapacity (test)
+            return self.ensureTotalCapacityPrecise(better_capacity);
+                                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:483:41: 0x11ea970 in addOne (test)
+            try self.ensureTotalCapacity(newlen);
+                                        ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:262:49: 0x114354e in append (test)
+            const new_item_ptr = try self.addOne();
+                                                ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:132:27: 0x11832ac in sanitizeProjectName (test)
+            try out.append(std.ascii.toLower(c));
+                          ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:196:44: 0x119627e in loadComposeFile (test)
+    const project = try sanitizeProjectName(alloc, proj_raw);
+                                           ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:814:33: 0x11a3669 in executeCompose__anon_6913 (test)
+    var cf = try loadComposeFile(alloc, opts.file);
+                                ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:1238:23: 0x12c41e7 in test.executeCompose up, ps, down, and sandbox pre-flight denial over mock socket (test)
+    try executeCompose(&client, &logger, .{ .action = .up, .file = compose_path }, out.writer());
+                      ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:95:29: 0x13474a3 in mainServer (test)
+                test_fn.func() catch |err| switch (err) {
+                            ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:35:26: 0x1257ede in main (test)
+        return mainServer() catch @panic("internal test runner failure");
+                         ^
+
+[gpa] (err): memory address 0x7f3ea0e49240 leaked: 
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:457:67: 0x120ef7e in ensureTotalCapacityPrecise (test)
+                const new_memory = try self.allocator.alignedAlloc(T, alignment, new_capacity);
+                                                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:434:51: 0x11653e0 in ensureTotalCapacity (test)
+            return self.ensureTotalCapacityPrecise(better_capacity);
+                                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:483:41: 0x11ea970 in addOne (test)
+            try self.ensureTotalCapacity(newlen);
+                                        ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:262:49: 0x114354e in append (test)
+            const new_item_ptr = try self.addOne();
+                                                ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:132:27: 0x11832ac in sanitizeProjectName (test)
+            try out.append(std.ascii.toLower(c));
+                          ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:196:44: 0x119627e in loadComposeFile (test)
+    const project = try sanitizeProjectName(alloc, proj_raw);
+                                           ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:814:33: 0x11a3669 in executeCompose__anon_6913 (test)
+    var cf = try loadComposeFile(alloc, opts.file);
+                                ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:1239:23: 0x12c4369 in test.executeCompose up, ps, down, and sandbox pre-flight denial over mock socket (test)
+    try executeCompose(&client, &logger, .{ .action = .ps, .file = compose_path }, out.writer());
+                      ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:95:29: 0x13474a3 in mainServer (test)
+                test_fn.func() catch |err| switch (err) {
+                            ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:35:26: 0x1257ede in main (test)
+        return mainServer() catch @panic("internal test runner failure");
+                         ^
+
+[gpa] (err): memory address 0x7f3ea0e492c0 leaked: 
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:457:67: 0x120ef7e in ensureTotalCapacityPrecise (test)
+                const new_memory = try self.allocator.alignedAlloc(T, alignment, new_capacity);
+                                                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:434:51: 0x11653e0 in ensureTotalCapacity (test)
+            return self.ensureTotalCapacityPrecise(better_capacity);
+                                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:483:41: 0x11ea970 in addOne (test)
+            try self.ensureTotalCapacity(newlen);
+                                        ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:262:49: 0x114354e in append (test)
+            const new_item_ptr = try self.addOne();
+                                                ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:132:27: 0x11832ac in sanitizeProjectName (test)
+            try out.append(std.ascii.toLower(c));
+                          ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:196:44: 0x119627e in loadComposeFile (test)
+    const project = try sanitizeProjectName(alloc, proj_raw);
+                                           ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:814:33: 0x11a3669 in executeCompose__anon_6913 (test)
+    var cf = try loadComposeFile(alloc, opts.file);
+                                ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:1240:23: 0x12c454c in test.executeCompose up, ps, down, and sandbox pre-flight denial over mock socket (test)
+    try executeCompose(&client, &logger, .{ .action = .down, .file = compose_path }, out.writer());
+                      ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:95:29: 0x13474a3 in mainServer (test)
+                test_fn.func() catch |err| switch (err) {
+                            ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:35:26: 0x1257ede in main (test)
+        return mainServer() catch @panic("internal test runner failure");
+                         ^
+error: while executing test 'podman_test_helpers.test.ScriptedReply defaults tolerate absent substring matcher', the following test command failed:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/8600bbc5d7a1079c41afa2064879705e/test --listen=- 
+Build Summary: 1/3 steps succeeded; 1 failed; 226/226 tests passed; 1 leaked (disable with --summary none)
+test transitive failure
++- run test 226/226 passed, 1 leaked
+error: the following build command failed with exit code 1:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0xb9fa018b -Zfdf0fe2dc4022c01 test
+2026-11-15T10:43:52Z [ERROR] auto-audit detected 1 failure(s):
+OK: No 'page_allocator' usage in src/.
+OK: GPA leak check is enforced.
+OK: No BUG-001 AccessDenied mismatch in src/http.zig.
+OK: std.testing.allocator present in src/main.zig.
+OK: std.testing.allocator present in src/cli.zig.
+OK: std.testing.allocator present in src/cli_specs.zig.
+OK: std.testing.allocator present in src/cli_types.zig.
+OK: std.testing.allocator present in src/completion.zig.
+OK: std.testing.allocator present in src/compose.zig.
+OK: std.testing.allocator present in src/config.zig.
+OK: std.testing.allocator present in src/http.zig.
+OK: std.testing.allocator present in src/http_parser.zig.
+OK: std.testing.allocator present in src/http_types.zig.
+OK: std.testing.allocator present in src/podman_api.zig.
+OK: std.testing.allocator present in src/podman_build.zig.
+OK: std.testing.allocator present in src/podman_pods.zig.
+OK: std.testing.allocator present in src/podman_transfer.zig.
+OK: std.testing.allocator present in src/podman_test_helpers.zig.
+OK: std.testing.allocator present in src/podman_types.zig.
+OK: std.testing.allocator present in src/podman_validate.zig.
+OK: std.testing.allocator present in src/podman_logs.zig.
+OK: std.testing.allocator present in src/podman_images.zig.
+OK: std.testing.allocator present in src/podman_system.zig.
+OK: std.testing.allocator present in src/log.zig.
+OK: std.testing.allocator present in src/policy.zig.
+OK: Root test blocks reference pods, build_mod, transfer, compose, types, and th (BUG-022/BUG-023).
+OK: validateRequestTarget() enforced in src/http.zig.
+OK: validateIdentifier() enforced in src/podman_*.zig.
+OK: validateHostPath() fail-closed host mount policy enforced in src/podman_*.zig.
+OK: validatePortMapping() fail-closed port policy enforced in src/podman_*.zig.
+OK: validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_*.zig.
+OK: validateResourceRef() inspect path guard enforced in src/podman_*.zig.
+OK: createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig.
+OK: checkRunPolicy(), writeAuditJson(), and logger.deny() enforced (BUG-019).
+OK: Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser.
+OK: Timeout poll, HostConfig hardening, audit hash-chain verification, and 18-case demo present.
+OK: Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable.
+FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)...
+test
++- run test 225/226 passed, 1 failed, 1 leaked
+error: 'podman_transfer.test.scanCpArchive rejects hardlink escapes, oversized PAX headers, and truncated tar streams' failed: expected error.NameTooLong, found error.TarInsufficientBuffer
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/tar.zig:540:41: 0x11778f6 in value (test)
+                if (self.len > dst.len) return error.TarInsufficientBuffer;
+                                        ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/tar.zig:460:49: 0x11797f8 in next (test)
+                                    file.name = try attr.value(self.file_name_buffer);
+                                                ^
+/home/mitsword/เอกสาร/zigpodza/src/podman_transfer.zig:443:12: 0x117a995 in scanCpArchive (test)
+    while (try iter.next()) |f| {
+           ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/testing.zig:47:13: 0x12bee7a in expectError__anon_11575 (test)
+            return error.TestExpectedError;
+            ^
+/home/mitsword/เอกสาร/zigpodza/src/podman_transfer.zig:1492:9: 0x12c08ed in test.scanCpArchive rejects hardlink escapes, oversized PAX headers, and truncated tar streams (test)
+        try std.testing.expectError(error.NameTooLong, scanCpArchive(alloc, f));
+        ^
+error: 'compose.test.executeCompose up, ps, down, and sandbox pre-flight denial over mock socket' leaked: [gpa] (err): memory address 0x7fec652f3000 leaked: 
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:457:67: 0x120ef7e in ensureTotalCapacityPrecise (test)
+                const new_memory = try self.allocator.alignedAlloc(T, alignment, new_capacity);
+                                                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:434:51: 0x11653e0 in ensureTotalCapacity (test)
+            return self.ensureTotalCapacityPrecise(better_capacity);
+                                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:483:41: 0x11ea970 in addOne (test)
+            try self.ensureTotalCapacity(newlen);
+                                        ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:262:49: 0x114354e in append (test)
+            const new_item_ptr = try self.addOne();
+                                                ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:132:27: 0x11832ac in sanitizeProjectName (test)
+            try out.append(std.ascii.toLower(c));
+                          ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:196:44: 0x119627e in loadComposeFile (test)
+    const project = try sanitizeProjectName(alloc, proj_raw);
+                                           ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:814:33: 0x11a3669 in executeCompose__anon_6913 (test)
+    var cf = try loadComposeFile(alloc, opts.file);
+                                ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:1149:81: 0x12c39e1 in test.executeCompose up, ps, down, and sandbox pre-flight denial over mock socket (test)
+        try std.testing.expectError(pod.ApiError.PolicyViolation, executeCompose(&unused_client, &logger, .{
+                                                                                ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:95:29: 0x1347423 in mainServer (test)
+                test_fn.func() catch |err| switch (err) {
+                            ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:35:26: 0x1257ede in main (test)
+        return mainServer() catch @panic("internal test runner failure");
+                         ^
+
+[gpa] (err): memory address 0x7fec652f3080 leaked: 
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:457:67: 0x120ef7e in ensureTotalCapacityPrecise (test)
+                const new_memory = try self.allocator.alignedAlloc(T, alignment, new_capacity);
+                                                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:434:51: 0x11653e0 in ensureTotalCapacity (test)
+            return self.ensureTotalCapacityPrecise(better_capacity);
+                                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:483:41: 0x11ea970 in addOne (test)
+            try self.ensureTotalCapacity(newlen);
+                                        ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:262:49: 0x114354e in append (test)
+            const new_item_ptr = try self.addOne();
+                                                ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:132:27: 0x11832ac in sanitizeProjectName (test)
+            try out.append(std.ascii.toLower(c));
+                          ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:196:44: 0x119627e in loadComposeFile (test)
+    const project = try sanitizeProjectName(alloc, proj_raw);
+                                           ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:814:33: 0x11a3669 in executeCompose__anon_6913 (test)
+    var cf = try loadComposeFile(alloc, opts.file);
+                                ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:1238:23: 0x12c4167 in test.executeCompose up, ps, down, and sandbox pre-flight denial over mock socket (test)
+    try executeCompose(&client, &logger, .{ .action = .up, .file = compose_path }, out.writer());
+                      ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:95:29: 0x1347423 in mainServer (test)
+                test_fn.func() catch |err| switch (err) {
+                            ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:35:26: 0x1257ede in main (test)
+        return mainServer() catch @panic("internal test runner failure");
+                         ^
+
+[gpa] (err): memory address 0x7fec652f3240 leaked: 
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:457:67: 0x120ef7e in ensureTotalCapacityPrecise (test)
+                const new_memory = try self.allocator.alignedAlloc(T, alignment, new_capacity);
+                                                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:434:51: 0x11653e0 in ensureTotalCapacity (test)
+            return self.ensureTotalCapacityPrecise(better_capacity);
+                                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:483:41: 0x11ea970 in addOne (test)
+            try self.ensureTotalCapacity(newlen);
+                                        ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:262:49: 0x114354e in append (test)
+            const new_item_ptr = try self.addOne();
+                                                ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:132:27: 0x11832ac in sanitizeProjectName (test)
+            try out.append(std.ascii.toLower(c));
+                          ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:196:44: 0x119627e in loadComposeFile (test)
+    const project = try sanitizeProjectName(alloc, proj_raw);
+                                           ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:814:33: 0x11a3669 in executeCompose__anon_6913 (test)
+    var cf = try loadComposeFile(alloc, opts.file);
+                                ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:1239:23: 0x12c42e9 in test.executeCompose up, ps, down, and sandbox pre-flight denial over mock socket (test)
+    try executeCompose(&client, &logger, .{ .action = .ps, .file = compose_path }, out.writer());
+                      ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:95:29: 0x1347423 in mainServer (test)
+                test_fn.func() catch |err| switch (err) {
+                            ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:35:26: 0x1257ede in main (test)
+        return mainServer() catch @panic("internal test runner failure");
+                         ^
+
+[gpa] (err): memory address 0x7fec652f32c0 leaked: 
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:457:67: 0x120ef7e in ensureTotalCapacityPrecise (test)
+                const new_memory = try self.allocator.alignedAlloc(T, alignment, new_capacity);
+                                                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:434:51: 0x11653e0 in ensureTotalCapacity (test)
+            return self.ensureTotalCapacityPrecise(better_capacity);
+                                                  ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:483:41: 0x11ea970 in addOne (test)
+            try self.ensureTotalCapacity(newlen);
+                                        ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/array_list.zig:262:49: 0x114354e in append (test)
+            const new_item_ptr = try self.addOne();
+                                                ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:132:27: 0x11832ac in sanitizeProjectName (test)
+            try out.append(std.ascii.toLower(c));
+                          ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:196:44: 0x119627e in loadComposeFile (test)
+    const project = try sanitizeProjectName(alloc, proj_raw);
+                                           ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:814:33: 0x11a3669 in executeCompose__anon_6913 (test)
+    var cf = try loadComposeFile(alloc, opts.file);
+                                ^
+/home/mitsword/เอกสาร/zigpodza/src/compose.zig:1240:23: 0x12c44cc in test.executeCompose up, ps, down, and sandbox pre-flight denial over mock socket (test)
+    try executeCompose(&client, &logger, .{ .action = .down, .file = compose_path }, out.writer());
+                      ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:95:29: 0x1347423 in mainServer (test)
+                test_fn.func() catch |err| switch (err) {
+                            ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/compiler/test_runner.zig:35:26: 0x1257ede in main (test)
+        return mainServer() catch @panic("internal test runner failure");
+                         ^
+error: while executing test 'podman_test_helpers.test.ScriptedReply defaults tolerate absent substring matcher', the following test command failed:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/67940b072ceb4cb664474406854d7c84/test --listen=- 
+Build Summary: 1/3 steps succeeded; 1 failed; 225/226 tests passed; 1 failed; 1 leaked (disable with --summary none)
+test transitive failure
++- run test 225/226 passed, 1 failed, 1 leaked
+error: the following build command failed with exit code 1:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0x6bf5c172 -Zf7757d641225602f test
+2026-11-15T10:44:40Z [ERROR] auto-audit detected 1 failure(s):
+OK: No 'page_allocator' usage in src/.
+OK: GPA leak check is enforced.
+OK: No BUG-001 AccessDenied mismatch in src/http.zig.
+OK: std.testing.allocator present in src/main.zig.
+OK: std.testing.allocator present in src/cli.zig.
+OK: std.testing.allocator present in src/cli_specs.zig.
+OK: std.testing.allocator present in src/cli_types.zig.
+OK: std.testing.allocator present in src/completion.zig.
+OK: std.testing.allocator present in src/compose.zig.
+OK: std.testing.allocator present in src/config.zig.
+OK: std.testing.allocator present in src/http.zig.
+OK: std.testing.allocator present in src/http_parser.zig.
+OK: std.testing.allocator present in src/http_types.zig.
+OK: std.testing.allocator present in src/podman_api.zig.
+OK: std.testing.allocator present in src/podman_build.zig.
+OK: std.testing.allocator present in src/podman_pods.zig.
+OK: std.testing.allocator present in src/podman_transfer.zig.
+OK: std.testing.allocator present in src/podman_test_helpers.zig.
+OK: std.testing.allocator present in src/podman_types.zig.
+OK: std.testing.allocator present in src/podman_validate.zig.
+OK: std.testing.allocator present in src/podman_logs.zig.
+OK: std.testing.allocator present in src/podman_images.zig.
+OK: std.testing.allocator present in src/podman_system.zig.
+OK: std.testing.allocator present in src/log.zig.
+OK: std.testing.allocator present in src/policy.zig.
+OK: Root test blocks reference pods, build_mod, transfer, compose, types, and th (BUG-022/BUG-023).
+OK: validateRequestTarget() enforced in src/http.zig.
+OK: validateIdentifier() enforced in src/podman_*.zig.
+OK: validateHostPath() fail-closed host mount policy enforced in src/podman_*.zig.
+OK: validatePortMapping() fail-closed port policy enforced in src/podman_*.zig.
+OK: validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_*.zig.
+OK: validateResourceRef() inspect path guard enforced in src/podman_*.zig.
+OK: createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig.
+OK: checkRunPolicy(), writeAuditJson(), and logger.deny() enforced (BUG-019).
+OK: Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser.
+OK: Timeout poll, HostConfig hardening, audit hash-chain verification, and 18-case demo present.
+OK: Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable.
+FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)...
+test
++- run test 225/226 passed, 1 failed
+error: 'podman_transfer.test.scanCpArchive rejects hardlink escapes, oversized PAX headers, and truncated tar streams' failed: expected error.NameTooLong, found error.TarInsufficientBuffer
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/tar.zig:540:41: 0x11778e6 in value (test)
+                if (self.len > dst.len) return error.TarInsufficientBuffer;
+                                        ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/tar.zig:460:49: 0x11797e8 in next (test)
+                                    file.name = try attr.value(self.file_name_buffer);
+                                                ^
+/home/mitsword/เอกสาร/zigpodza/src/podman_transfer.zig:443:12: 0x117a985 in scanCpArchive (test)
+    while (try iter.next()) |f| {
+           ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/testing.zig:47:13: 0x12bed8a in expectError__anon_11575 (test)
+            return error.TestExpectedError;
+            ^
+/home/mitsword/เอกสาร/zigpodza/src/podman_transfer.zig:1492:9: 0x12c07fd in test.scanCpArchive rejects hardlink escapes, oversized PAX headers, and truncated tar streams (test)
+        try std.testing.expectError(error.NameTooLong, scanCpArchive(alloc, f));
+        ^
+error: while executing test 'podman_test_helpers.test.ScriptedReply defaults tolerate absent substring matcher', the following test command failed:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/45cfcf23657f06c363f6d6b84c8092ee/test --listen=- 
+Build Summary: 1/3 steps succeeded; 1 failed; 225/226 tests passed; 1 failed (disable with --summary none)
+test transitive failure
++- run test 225/226 passed, 1 failed
+error: the following build command failed with exit code 1:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0xcd8d6ef7 -Z8f118efc24866b43 test
+2026-11-15T10:44:52Z [ERROR] auto-audit detected 1 failure(s):
+OK: No 'page_allocator' usage in src/.
+OK: GPA leak check is enforced.
+OK: No BUG-001 AccessDenied mismatch in src/http.zig.
+OK: std.testing.allocator present in src/main.zig.
+OK: std.testing.allocator present in src/cli.zig.
+OK: std.testing.allocator present in src/cli_specs.zig.
+OK: std.testing.allocator present in src/cli_types.zig.
+OK: std.testing.allocator present in src/completion.zig.
+OK: std.testing.allocator present in src/compose.zig.
+OK: std.testing.allocator present in src/config.zig.
+OK: std.testing.allocator present in src/http.zig.
+OK: std.testing.allocator present in src/http_parser.zig.
+OK: std.testing.allocator present in src/http_types.zig.
+OK: std.testing.allocator present in src/podman_api.zig.
+OK: std.testing.allocator present in src/podman_build.zig.
+OK: std.testing.allocator present in src/podman_pods.zig.
+OK: std.testing.allocator present in src/podman_transfer.zig.
+OK: std.testing.allocator present in src/podman_test_helpers.zig.
+OK: std.testing.allocator present in src/podman_types.zig.
+OK: std.testing.allocator present in src/podman_validate.zig.
+OK: std.testing.allocator present in src/podman_logs.zig.
+OK: std.testing.allocator present in src/podman_images.zig.
+OK: std.testing.allocator present in src/podman_system.zig.
+OK: std.testing.allocator present in src/log.zig.
+OK: std.testing.allocator present in src/policy.zig.
+OK: Root test blocks reference pods, build_mod, transfer, compose, types, and th (BUG-022/BUG-023).
+OK: validateRequestTarget() enforced in src/http.zig.
+OK: validateIdentifier() enforced in src/podman_*.zig.
+OK: validateHostPath() fail-closed host mount policy enforced in src/podman_*.zig.
+OK: validatePortMapping() fail-closed port policy enforced in src/podman_*.zig.
+OK: validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_*.zig.
+OK: validateResourceRef() inspect path guard enforced in src/podman_*.zig.
+OK: createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig.
+OK: checkRunPolicy(), writeAuditJson(), and logger.deny() enforced (BUG-019).
+OK: Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser.
+OK: Timeout poll, HostConfig hardening, audit hash-chain verification, and 18-case demo present.
+OK: Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable.
+FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)...
+test
++- run test 225/226 passed, 1 failed
+error: 'podman_transfer.test.scanCpArchive rejects hardlink escapes, oversized PAX headers, and truncated tar streams' failed: expected error.NameTooLong, found error.TarInsufficientBuffer
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/tar.zig:540:41: 0x11778e6 in value (test)
+                if (self.len > dst.len) return error.TarInsufficientBuffer;
+                                        ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/tar.zig:460:49: 0x11797e8 in next (test)
+                                    file.name = try attr.value(self.file_name_buffer);
+                                                ^
+/home/mitsword/เอกสาร/zigpodza/src/podman_transfer.zig:443:12: 0x117a985 in scanCpArchive (test)
+    while (try iter.next()) |f| {
+           ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/testing.zig:47:13: 0x12bed8a in expectError__anon_11575 (test)
+            return error.TestExpectedError;
+            ^
+/home/mitsword/เอกสาร/zigpodza/src/podman_transfer.zig:1492:9: 0x12c07fd in test.scanCpArchive rejects hardlink escapes, oversized PAX headers, and truncated tar streams (test)
+        try std.testing.expectError(error.NameTooLong, scanCpArchive(alloc, f));
+        ^
+error: while executing test 'podman_test_helpers.test.ScriptedReply defaults tolerate absent substring matcher', the following test command failed:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/ffefa184647b1bc1a007fc3dbe3bbd40/test --listen=- 
+Build Summary: 1/3 steps succeeded; 1 failed; 225/226 tests passed; 1 failed (disable with --summary none)
+test transitive failure
++- run test 225/226 passed, 1 failed
+error: the following build command failed with exit code 1:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0x7e3d8513 -Z04d54c0a4e96d53b test
+2026-11-15T10:45:03Z [ERROR] auto-audit detected 1 failure(s):
+OK: No 'page_allocator' usage in src/.
+OK: GPA leak check is enforced.
+OK: No BUG-001 AccessDenied mismatch in src/http.zig.
+OK: std.testing.allocator present in src/main.zig.
+OK: std.testing.allocator present in src/cli.zig.
+OK: std.testing.allocator present in src/cli_specs.zig.
+OK: std.testing.allocator present in src/cli_types.zig.
+OK: std.testing.allocator present in src/completion.zig.
+OK: std.testing.allocator present in src/compose.zig.
+OK: std.testing.allocator present in src/config.zig.
+OK: std.testing.allocator present in src/http.zig.
+OK: std.testing.allocator present in src/http_parser.zig.
+OK: std.testing.allocator present in src/http_types.zig.
+OK: std.testing.allocator present in src/podman_api.zig.
+OK: std.testing.allocator present in src/podman_build.zig.
+OK: std.testing.allocator present in src/podman_pods.zig.
+OK: std.testing.allocator present in src/podman_transfer.zig.
+OK: std.testing.allocator present in src/podman_test_helpers.zig.
+OK: std.testing.allocator present in src/podman_types.zig.
+OK: std.testing.allocator present in src/podman_validate.zig.
+OK: std.testing.allocator present in src/podman_logs.zig.
+OK: std.testing.allocator present in src/podman_images.zig.
+OK: std.testing.allocator present in src/podman_system.zig.
+OK: std.testing.allocator present in src/log.zig.
+OK: std.testing.allocator present in src/policy.zig.
+OK: Root test blocks reference pods, build_mod, transfer, compose, types, and th (BUG-022/BUG-023).
+OK: validateRequestTarget() enforced in src/http.zig.
+OK: validateIdentifier() enforced in src/podman_*.zig.
+OK: validateHostPath() fail-closed host mount policy enforced in src/podman_*.zig.
+OK: validatePortMapping() fail-closed port policy enforced in src/podman_*.zig.
+OK: validateNetworkMode()/validateCapability() fail-closed identity policy enforced in src/podman_*.zig.
+OK: validateResourceRef() inspect path guard enforced in src/podman_*.zig.
+OK: createExec()/startExec() validate the exec ID and identity fields in src/podman_api.zig.
+OK: checkRunPolicy(), writeAuditJson(), and logger.deny() enforced (BUG-019).
+OK: Checked arithmetic (std.math.add/mul) active in chunk/frame decoders and CLI memory parser.
+OK: Timeout poll, HostConfig hardening, audit hash-chain verification, and 18-case demo present.
+OK: Verification scripts (check-ci-parity.py, graph-query.py, smoke.sh) are executable.
+FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)...
+test
++- run test 225/226 passed, 1 failed
+error: 'podman_transfer.test.scanCpArchive rejects hardlink escapes, oversized PAX headers, and truncated tar streams' failed: expected error.TarHeadersTooBig, found error.EndOfStream
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/tar.zig:409:17: 0x117920c in next (test)
+                try self.reader.skipBytes(self.unread_file_bytes, .{});
+                ^
+/home/mitsword/เอกสาร/zigpodza/src/podman_transfer.zig:443:12: 0x117a985 in scanCpArchive (test)
+    while (try iter.next()) |f| {
+           ^
+/home/mitsword/.local/opt/zig-0.13.0/lib/std/testing.zig:47:13: 0x12bed8a in expectError__anon_11575 (test)
+            return error.TestExpectedError;
+            ^
+/home/mitsword/เอกสาร/zigpodza/src/podman_transfer.zig:1505:9: 0x12c0c6a in test.scanCpArchive rejects hardlink escapes, oversized PAX headers, and truncated tar streams (test)
+        try std.testing.expectError(error.TarHeadersTooBig, scanCpArchive(alloc, f));
+        ^
+error: while executing test 'podman_test_helpers.test.ScriptedReply defaults tolerate absent substring matcher', the following test command failed:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/759e852feb788281fe426ca7ba27af01/test --listen=- 
+Build Summary: 1/3 steps succeeded; 1 failed; 225/226 tests passed; 1 failed (disable with --summary none)
+test transitive failure
++- run test 225/226 passed, 1 failed
+error: the following build command failed with exit code 1:
+/home/mitsword/เอกสาร/zigpodza/.zig-cache/o/b15d2806a249fdd9737817fa24060093/build /home/mitsword/.local/opt/zig-0.13.0/zig /home/mitsword/เอกสาร/zigpodza /home/mitsword/เอกสาร/zigpodza/.zig-cache /home/mitsword/.cache/zig --seed 0x64f9adb6 -Z37b68528f6281031 test

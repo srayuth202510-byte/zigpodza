@@ -162,14 +162,57 @@ printf 'exit\n' | "$BIN" --socket "$SOCK" attach "$CTR_NAME" >/dev/null 2>&1 || 
 "$BIN" --socket "$SOCK" stop "$CTR_NAME" >/dev/null
 "$BIN" --socket "$SOCK" rm -f "$CTR_NAME" >/dev/null
 
-# 5. Sandbox profile pass + fail-closed CPU ceiling check
-"$BIN" --socket "$SOCK" run --rm --profile=sandbox "$TEST_IMG" echo sandbox-live-ok | grep -q "sandbox-live-ok"
+# 5. Sandbox profile pass + fail-closed CPU & shm-size ceiling checks
+SANDBOX_OUT=$("$BIN" --socket "$SOCK" run --rm --profile=sandbox --shm-size 16m --ulimit nofile=64:128 --init "$TEST_IMG" echo sandbox-live-ok)
+printf '%s\n' "$SANDBOX_OUT" | grep -q "sandbox-live-ok"
 if "$BIN" --socket "$SOCK" run --profile=sandbox --cpus 2 "$TEST_IMG" echo denied >/dev/null 2>&1; then
     echo "[FAIL] expected --profile=sandbox --cpus 2 to fail pre-flight" >&2
     exit 1
 fi
 
-# 6. Hash-chained audit log verification
+# 6. Compose-lite (up -> ps -> down) against real Podman daemon
+CMP_PROJ="zpe2ecmp$$"
+CMP_NET="zpe2ecmp_net_$$"
+CMP_FILE="$TMP_DIR/compose.yaml"
+cat > "$CMP_FILE" <<YAML
+name: $CMP_PROJ
+networks:
+  $CMP_NET:
+    driver: bridge
+    internal: true
+services:
+  app:
+    image: $TEST_IMG
+    depends_on: [db]
+    init: true
+    mem_limit: 128m
+    shm_size: 32m
+    command: ["sleep", "15"]
+  db:
+    image: $TEST_IMG
+    command: ["sleep", "15"]
+YAML
+if ! CMP_UP_OUT=$("$BIN" --socket "$SOCK" compose up -f "$CMP_FILE"); then
+    "$BIN" --socket "$SOCK" compose down -f "$CMP_FILE" >/dev/null 2>&1 || true
+    echo "[FAIL] compose up failed against real Podman daemon" >&2
+    exit 1
+fi
+printf '%s\n' "$CMP_UP_OUT" | grep -q "${CMP_PROJ}_db_1"
+printf '%s\n' "$CMP_UP_OUT" | grep -q "${CMP_PROJ}_app_1"
+
+if ! CMP_PS_OUT=$("$BIN" --socket "$SOCK" compose ps -f "$CMP_FILE"); then
+    "$BIN" --socket "$SOCK" compose down -f "$CMP_FILE" >/dev/null 2>&1 || true
+    echo "[FAIL] compose ps failed against real Podman daemon" >&2
+    exit 1
+fi
+printf '%s\n' "$CMP_PS_OUT" | grep -q "${CMP_PROJ}_db_1"
+printf '%s\n' "$CMP_PS_OUT" | grep -q "${CMP_PROJ}_app_1"
+
+CMP_DOWN_OUT=$("$BIN" --socket "$SOCK" compose down -f "$CMP_FILE")
+printf '%s\n' "$CMP_DOWN_OUT" | grep -q "${CMP_PROJ}_app_1 removed"
+printf '%s\n' "$CMP_DOWN_OUT" | grep -q "${CMP_PROJ}_db_1 removed"
+
+# 7. Hash-chained audit log verification
 "$BIN" audit --json >/dev/null
 
 echo "[PASS] scripts/podman-e2e.sh passed against real Podman daemon"

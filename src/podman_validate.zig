@@ -506,8 +506,10 @@ pub fn loadAndMergeEnv(
     };
 }
 
+pub const max_shm_bytes: i64 = 64 * 1024 * 1024 * 1024;
+
 pub fn validateShmSize(shm_bytes: i64) ApiError!void {
-    if (shm_bytes <= 0 or shm_bytes > 64 * 1024 * 1024 * 1024) return ApiError.InvalidCpuLimit;
+    if (shm_bytes <= 0 or shm_bytes > max_shm_bytes) return ApiError.InvalidShmSize;
 }
 
 const allowed_ulimit_names = [_][]const u8{
@@ -795,6 +797,29 @@ test "ContainerCreateRequest serializes hardening HostConfig fields" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"Memory\":67108864") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"PidsLimit\":32") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"SecurityOpt\":[\"no-new-privileges\"]") != null);
+}
+
+test "validateShmSize, validateUlimit, and validateHealthConfig enforce bounds" {
+    try validateShmSize(1);
+    try validateShmSize(max_shm_bytes);
+    try std.testing.expectError(ApiError.InvalidShmSize, validateShmSize(0));
+    try std.testing.expectError(ApiError.InvalidShmSize, validateShmSize(-1));
+    try std.testing.expectError(ApiError.InvalidShmSize, validateShmSize(max_shm_bytes + 1));
+
+    try validateUlimit(.{ .Name = "nofile", .Soft = 1024, .Hard = 2048 });
+    try validateUlimit(.{ .Name = "core", .Soft = 0, .Hard = 0 });
+    try std.testing.expectError(ApiError.InvalidUlimit, validateUlimit(.{ .Name = "rtprio", .Soft = 1, .Hard = 1 }));
+    try std.testing.expectError(ApiError.InvalidUlimit, validateUlimit(.{ .Name = "nofile", .Soft = 10, .Hard = 5 }));
+    try std.testing.expectError(ApiError.InvalidUlimit, validateUlimit(.{ .Name = "nofile", .Soft = -1, .Hard = 5 }));
+    try std.testing.expectError(ApiError.InvalidUlimit, validateUlimit(.{ .Name = "nofile", .Soft = 1, .Hard = 1_000_000_000_001 }));
+
+    try validateHealthConfig(.{ .Test = &.{ "CMD-SHELL", "true" }, .Interval = 1_000_000 });
+    try validateHealthConfig(.{ .Test = &.{ "CMD-SHELL", "true" } });
+    try std.testing.expectError(ApiError.InvalidHealthcheck, validateHealthConfig(.{ .Test = &.{} }));
+    try std.testing.expectError(ApiError.InvalidHealthcheck, validateHealthConfig(.{ .Test = &.{ "CMD-SHELL", "" } }));
+    try std.testing.expectError(ApiError.InvalidHealthcheck, validateHealthConfig(.{ .Test = &.{ "CMD-SHELL", "a\nb" } }));
+    try std.testing.expectError(ApiError.InvalidHealthcheck, validateHealthConfig(.{ .Test = &.{ "CMD-SHELL", "true" }, .Interval = 999_999 }));
+    try std.testing.expectError(ApiError.InvalidHealthcheck, validateHealthConfig(.{ .Test = &.{ "CMD-SHELL", "true" }, .Interval = 24 * 3600 * @as(i64, 1_000_000_000) + 1 }));
 }
 
 test "validateNanoCpus, Hostname, RestartPolicy, Label, Driver, and Tar-Slip validators" {

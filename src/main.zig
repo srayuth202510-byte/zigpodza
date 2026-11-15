@@ -561,6 +561,10 @@ fn reportFailure(logger: *log.Logger, cmd: cli.Command, socket_path: []const u8,
             "api.validateNanoCpus",
             "Rejected invalid --cpus limit (must be > 0 and <= 1024 CPUs).",
         ),
+        pod.ApiError.InvalidShmSize => logger.deny(
+            "api.validateShmSize",
+            "Rejected invalid --shm-size (must be > 0 and <= 64 GiB).",
+        ),
         pod.ApiError.InvalidHostname => logger.deny(
             "api.validateHostname",
             "Rejected invalid --hostname (use 1..64 RFC-1123 characters [a-zA-Z0-9.-]).",

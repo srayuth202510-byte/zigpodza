@@ -194,7 +194,7 @@ pub fn loadComposeFile(alloc: std.mem.Allocator, explicit_path: ?[]const u8) !Co
     const base_dir = std.fs.path.dirname(real_path) orelse "/";
     const proj_raw = std.fs.path.basename(base_dir);
     const project = try sanitizeProjectName(alloc, proj_raw);
-    errdefer alloc.free(project);
+    defer alloc.free(project);
 
     var f = try std.fs.openFileAbsolute(real_path, .{});
     defer f.close();
@@ -367,8 +367,8 @@ fn parseColonPair(line: []const u8) ?struct { key: []const u8, val: []const u8 }
     };
 }
 
-/// Parses a `compose.yaml` subset into owned `ComposeFile`. Caller owns `project_in`
-/// only if error; on success `ComposeFile.deinit` frees `project`.
+/// Parses a `compose.yaml` subset into owned `ComposeFile`. Caller retains ownership
+/// of `project_in` and `base_dir_in`; `ComposeFile.deinit` frees internal copies.
 pub fn parseComposeYaml(
     alloc: std.mem.Allocator,
     content: []const u8,
@@ -698,6 +698,112 @@ fn resolveComposeHostPath(alloc: std.mem.Allocator, base_dir: []const u8, src: [
     return alloc.dupe(u8, src);
 }
 
+/// `env_file` entries are always host files: resolve any relative path against the compose dir.
+fn resolveEnvFilePath(alloc: std.mem.Allocator, base_dir: []const u8, src: []const u8) ![]u8 {
+    if (std.mem.startsWith(u8, src, "/")) return alloc.dupe(u8, src);
+    const joined = try std.fs.path.join(alloc, &.{ base_dir, src });
+    defer alloc.free(joined);
+    return std.fs.path.resolve(alloc, &.{joined});
+}
+
+fn freeResolvedVolumes(alloc: std.mem.Allocator, vols: []cli.Volume) void {
+    for (vols) |v| alloc.free(v.source);
+    alloc.free(vols);
+}
+
+/// Returns an owned copy of `specs` with bind-mount sources resolved against `base_dir`.
+fn resolveVolumes(alloc: std.mem.Allocator, base_dir: []const u8, specs: []const cli.Volume) ![]cli.Volume {
+    const out = try alloc.alloc(cli.Volume, specs.len);
+    var n: usize = 0;
+    errdefer {
+        for (out[0..n]) |v| alloc.free(v.source);
+        alloc.free(out);
+    }
+    for (specs) |v| {
+        out[n] = .{
+            .source = try resolveComposeHostPath(alloc, base_dir, v.source),
+            .destination = v.destination,
+            .readonly = v.readonly,
+        };
+        n += 1;
+    }
+    return out;
+}
+
+/// Creates a compose network; returns false if it already exists (HTTP 409).
+fn ensureNetwork(client: *const http.Client, logger: *log.Logger, net: ComposeNetwork) !bool {
+    try pod.validateIdentifier(net.name);
+    try pod.validateNetworkDriver(net.driver);
+    const body = try std.json.stringifyAlloc(client.allocator, pod.NetworkCreateRequest{
+        .Name = net.name,
+        .Driver = net.driver,
+        .Internal = net.internal,
+    }, .{});
+    defer client.allocator.free(body);
+
+    const path = pod.api_prefix ++ "/networks/create";
+    logger.debug("POST {s} body={s}", .{ path, body });
+    const resp = try client.request("POST", path, body);
+    defer resp.deinit();
+    if (resp.status == 409) return false;
+    if (!resp.ok()) return pod.validate.logApiFailure(logger, "POST", path, resp);
+    return true;
+}
+
+/// Force-deletes `/{kind}/{name}`; returns false if the daemon reports HTTP 404.
+fn deleteIfExists(client: *const http.Client, logger: *log.Logger, kind: []const u8, name: []const u8) !bool {
+    try pod.validateIdentifier(name);
+    const path = try std.fmt.allocPrint(client.allocator, "{s}/{s}/{s}?force=true", .{ pod.api_prefix, kind, name });
+    defer client.allocator.free(path);
+    logger.debug("DELETE {s}", .{path});
+    const resp = try client.request("DELETE", path, null);
+    defer resp.deinit();
+    if (resp.status == 404) return false;
+    if (!resp.ok()) return pod.validate.logApiFailure(logger, "DELETE", path, resp);
+    return true;
+}
+
+/// Lists only containers labelled with this compose project.
+fn listProjectContainers(
+    client: *const http.Client,
+    logger: *log.Logger,
+    project: []const u8,
+    json_mode: bool,
+    stdout: anytype,
+) !void {
+    const alloc = client.allocator;
+    const filter = try std.fmt.allocPrint(alloc, "{{\"label\":[\"com.docker.compose.project={s}\"]}}", .{project});
+    defer alloc.free(filter);
+
+    var path = std.ArrayList(u8).init(alloc);
+    defer path.deinit();
+    try path.appendSlice(pod.api_prefix ++ "/containers/json?all=true&filters=");
+    try pod.validate.appendQueryEncoded(&path, filter);
+
+    logger.debug("GET {s}", .{path.items});
+    const resp = try client.request("GET", path.items, null);
+    defer resp.deinit();
+    if (!resp.ok()) return pod.validate.logApiFailure(logger, "GET", path.items, resp);
+
+    if (json_mode) {
+        try stdout.print("{s}\n", .{std.mem.trim(u8, resp.body, " \r\n\t")});
+        return;
+    }
+
+    const parsed = try std.json.parseFromSlice([]pod.ContainerSummary, alloc, resp.body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    try stdout.print("{s:<32} {s:<28} {s}\n", .{ "NAME", "IMAGE", "STATUS" });
+    for (parsed.value) |c| {
+        var name: []const u8 = utils.shortId(c.Id);
+        if (c.Names) |names| {
+            if (names.len > 0) name = std.mem.trimLeft(u8, names[0], "/");
+        }
+        try stdout.print("{s:<32} {s:<28} {s}\n", .{ name, c.Image, c.Status });
+    }
+}
+
 pub fn executeCompose(
     client: *const http.Client,
     logger: *log.Logger,
@@ -724,19 +830,21 @@ pub fn executeCompose(
                 null;
 
             // Pre-flight all services before mutating daemon state.
-            var resolved_envs = try alloc.alloc(pod.validate.MergedEnv, cf.services.len);
-            var env_init_count: usize = 0;
+            // Use optional slots because topological `order` populates indices out of order.
+            var resolved_envs = try alloc.alloc(?pod.validate.MergedEnv, cf.services.len);
+            @memset(resolved_envs, null);
             defer {
-                for (resolved_envs[0..env_init_count]) |*re| re.deinit();
+                for (resolved_envs) |*slot| {
+                    if (slot.*) |*re| re.deinit();
+                }
                 alloc.free(resolved_envs);
             }
 
-            var resolved_vols = try alloc.alloc([]cli.Volume, cf.services.len);
-            var vol_init_count: usize = 0;
+            var resolved_vols = try alloc.alloc(?[]cli.Volume, cf.services.len);
+            @memset(resolved_vols, null);
             defer {
-                for (resolved_vols[0..vol_init_count]) |vols| {
-                    for (vols) |v| alloc.free(v.source);
-                    if (vols.len > 0) alloc.free(vols);
+                for (resolved_vols) |slot| {
+                    if (slot) |vols| freeResolvedVolumes(alloc, vols);
                 }
                 alloc.free(resolved_vols);
             }
@@ -750,33 +858,18 @@ pub fn executeCompose(
                     alloc.free(env_file_paths);
                 }
                 for (svc.env_files) |ef| {
-                    env_file_paths[ef_count] = try resolveComposeHostPath(alloc, cf.base_dir, ef);
+                    env_file_paths[ef_count] = try resolveEnvFilePath(alloc, cf.base_dir, ef);
                     ef_count += 1;
                 }
                 resolved_envs[idx] = try pod.loadAndMergeEnv(alloc, env_file_paths, svc.env);
-                env_init_count += 1;
 
-                var vols = try alloc.alloc(cli.Volume, svc.volumes.len);
-                var vc: usize = 0;
-                errdefer {
-                    for (vols[0..vc]) |v| alloc.free(v.source);
-                    alloc.free(vols);
-                }
-                for (svc.volumes) |v| {
-                    vols[vc] = .{
-                        .source = try resolveComposeHostPath(alloc, cf.base_dir, v.source),
-                        .destination = v.destination,
-                        .readonly = v.readonly,
-                    };
-                    vc += 1;
-                }
+                const vols = try resolveVolumes(alloc, cf.base_dir, svc.volumes);
                 resolved_vols[idx] = vols;
-                vol_init_count += 1;
 
                 var run_opts = cli.RunOpts{
                     .image = svc.image,
                     .cmd = svc.cmd,
-                    .env = resolved_envs[idx].items,
+                    .env = resolved_envs[idx].?.items,
                     .volumes = vols,
                     .ports = svc.ports,
                     .labels = svc.labels,
@@ -805,12 +898,7 @@ pub fn executeCompose(
             }
 
             for (cf.networks) |net| {
-                var sink = std.ArrayList(u8).init(alloc);
-                defer sink.deinit();
-                pod.createNetwork(client, logger, net.name, net.driver, net.internal, sink.writer()) catch |err| switch (err) {
-                    pod.ApiError.PodmanApiError => {}, // already exists
-                    else => return err,
-                };
+                _ = try ensureNetwork(client, logger, net);
             }
 
             for (order) |idx| {
@@ -820,7 +908,7 @@ pub fn executeCompose(
 
                 var mounts = std.ArrayList(pod.Mount).init(alloc);
                 defer mounts.deinit();
-                for (resolved_vols[idx]) |v| {
+                for (resolved_vols[idx].?) |v| {
                     try mounts.append(try pod.makeMount(v.source, v.destination, v.readonly));
                 }
 
@@ -851,12 +939,13 @@ pub fn executeCompose(
                 if (opts.profile == .sandbox) policy.applySandboxDefaults(&run_opts);
 
                 const tmpfs_bounds: ?pod.TmpfsBounds = if (pol_opt) |pol| .{ .tmp_options = pol.tmpfs_tmp_options } else null;
+                const env_items = resolved_envs[idx].?.items;
                 const req = pod.ContainerCreateRequest{
                     .Image = svc.image,
                     .Hostname = svc.hostname,
                     .Entrypoint = if (svc.entrypoint.len > 0) svc.entrypoint else null,
                     .Cmd = if (svc.cmd.len > 0) svc.cmd else null,
-                    .Env = if (resolved_envs[idx].items.len > 0) resolved_envs[idx].items else null,
+                    .Env = if (env_items.len > 0) env_items else null,
                     .Labels = .{ .entries = lbl_list.items },
                     .ExposedPorts = if (port_list.items.len > 0) .{ .ports = port_list.items } else null,
                     .WorkingDir = svc.workdir,
@@ -892,25 +981,18 @@ pub fn executeCompose(
                 const svc = cf.services[order[rev]];
                 const cname = try svc.resolvedContainerName(alloc, cf.project);
                 defer alloc.free(cname);
-                pod.removeContainer(client, logger, cname, true) catch |err| switch (err) {
-                    pod.ApiError.NotFound => {},
-                    else => return err,
-                };
-                try stdout.print("{s} removed\n", .{cname});
+                if (try deleteIfExists(client, logger, "containers", cname)) {
+                    try stdout.print("{s} removed\n", .{cname});
+                } else {
+                    try stdout.print("{s} absent\n", .{cname});
+                }
             }
             for (cf.networks) |net| {
-                pod.removeNetwork(client, logger, net.name, true) catch |err| switch (err) {
-                    pod.ApiError.NotFound => {},
-                    else => return err,
-                };
+                _ = try deleteIfExists(client, logger, "networks", net.name);
             }
         },
         .ps => {
-            if (opts.json) {
-                try pod.listContainersJson(client, logger, true, stdout);
-            } else {
-                try pod.listContainers(client, logger, true, stdout);
-            }
+            try listProjectContainers(client, logger, cf.project, opts.json, stdout);
         },
     }
 }
@@ -1003,4 +1085,166 @@ test "topoSortServices rejects cycles and unknown dependencies without leaking" 
         ComposeError.MissingServiceImage,
         parseComposeYaml(alloc, "services:\n  web:\n    init: true\n", "p", "/tmp"),
     );
+}
+
+test "executeCompose up, ps, down, and sandbox pre-flight denial over mock socket" {
+    const th = @import("podman_test_helpers.zig");
+    const alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makeDir("data");
+    try tmp.dir.writeFile(.{ .sub_path = "db.env", .data = "DB_PASS=secret\n" });
+    try tmp.dir.writeFile(.{
+        .sub_path = "blocked.yaml",
+        .data =
+        \\name: demo
+        \\services:
+        \\  api:
+        \\    image: alpine:3.20
+        \\    depends_on: [db]
+        \\    mem_limit: 512m
+        \\  db:
+        \\    image: postgres:16-alpine
+        \\    env_file: db.env
+        \\
+        ,
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "compose.yaml",
+        .data =
+        \\name: demo
+        \\networks:
+        \\  back:
+        \\    driver: bridge
+        \\    internal: true
+        \\services:
+        \\  api:
+        \\    image: alpine:3.20
+        \\    depends_on: [db]
+        \\    mem_limit: 128m
+        \\  db:
+        \\    image: postgres:16-alpine
+        \\    env_file: db.env
+        \\    volumes: ["./data:/var/lib/data:ro"]
+        \\
+        ,
+    });
+
+    const blocked_path = try tmp.dir.realpathAlloc(alloc, "blocked.yaml");
+    defer alloc.free(blocked_path);
+    const compose_path = try tmp.dir.realpathAlloc(alloc, "compose.yaml");
+    defer alloc.free(compose_path);
+
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    // 1) Pre-flight sandbox violation with out-of-order topological indices ([1, 0])
+    //    must fail before touching any daemon socket and free slot 1 without crashing or leaking.
+    {
+        const unused_client = http.Client{ .allocator = alloc, .socket_path = "/tmp/zp-compose-unused.sock" };
+        var sink = std.ArrayList(u8).init(alloc);
+        defer sink.deinit();
+        try std.testing.expectError(pod.ApiError.PolicyViolation, executeCompose(&unused_client, &logger, .{
+            .action = .up,
+            .file = blocked_path,
+            .profile = .sandbox,
+        }, sink.writer()));
+    }
+
+    // 2) Full up -> ps -> down lifecycle over mock Unix socket.
+    const sock_path = try std.fmt.allocPrint(alloc, "/tmp/zp-compose-{d}.sock", .{std.time.nanoTimestamp()});
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const net_resp = "{\"Id\":\"net1234567890\",\"Warning\":\"\"}";
+    const db_resp = "{\"Id\":\"db1234567890abcd\"}";
+    const api_resp = "{\"Id\":\"api1234567890abc\"}";
+    const ps_resp = "[{\"Id\":\"db1234567890abcd\",\"Names\":[\"/demo_db_1\"],\"Image\":\"postgres:16-alpine\",\"Status\":\"Up 2s\"}]";
+    const err404 = "{\"message\":\"no such\"}";
+
+    const replies = [_]th.ScriptedReply{
+        .{
+            .expected_prefix = "POST /v1.40/networks/create HTTP/1.1\r\n",
+            .expected_substring = "\"Name\":\"back\"",
+            .raw_response = std.fmt.comptimePrint(
+                "HTTP/1.1 201 Created\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ net_resp.len, net_resp },
+            ),
+        },
+        .{
+            .expected_prefix = "POST /v1.40/containers/create?name=demo_db_1 HTTP/1.1\r\n",
+            .expected_substring = "DB_PASS=secret",
+            .raw_response = std.fmt.comptimePrint(
+                "HTTP/1.1 201 Created\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ db_resp.len, db_resp },
+            ),
+        },
+        .{
+            .expected_prefix = "POST /v1.40/containers/db1234567890abcd/start HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 204 No Content\r\n\r\n",
+        },
+        .{
+            .expected_prefix = "POST /v1.40/containers/create?name=demo_api_1 HTTP/1.1\r\n",
+            .expected_substring = "\"com.docker.compose.service\":\"api\"",
+            .raw_response = std.fmt.comptimePrint(
+                "HTTP/1.1 201 Created\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ api_resp.len, api_resp },
+            ),
+        },
+        .{
+            .expected_prefix = "POST /v1.40/containers/api1234567890abc/start HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 204 No Content\r\n\r\n",
+        },
+        .{
+            .expected_prefix = "GET /v1.40/containers/json?all=true&filters=",
+            .expected_substring = "com.docker.compose.project%3Ddemo",
+            .raw_response = std.fmt.comptimePrint(
+                "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ ps_resp.len, ps_resp },
+            ),
+        },
+        .{
+            .expected_prefix = "DELETE /v1.40/containers/demo_api_1?force=true HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 204 No Content\r\n\r\n",
+        },
+        .{
+            .expected_prefix = "DELETE /v1.40/containers/demo_db_1?force=true HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint(
+                "HTTP/1.1 404 Not Found\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ err404.len, err404 },
+            ),
+        },
+        .{
+            .expected_prefix = "DELETE /v1.40/networks/back?force=true HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 204 No Content\r\n\r\n",
+        },
+    };
+
+    var ctx = th.MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, th.runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path };
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    try executeCompose(&client, &logger, .{ .action = .up, .file = compose_path }, out.writer());
+    try executeCompose(&client, &logger, .{ .action = .ps, .file = compose_path }, out.writer());
+    try executeCompose(&client, &logger, .{ .action = .down, .file = compose_path }, out.writer());
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "demo_db_1 (db1234567890) started") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "demo_api_1 (api123456789) started") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "postgres:16-alpine") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "demo_api_1 removed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "demo_db_1 absent") != null);
 }
