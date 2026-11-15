@@ -19,21 +19,22 @@ status: active
 
 | Metric | Value |
 | :--- | :--- |
-| Tracked Playbook Bugs | **41** |
-| Analyzed `error.log` Lines | **18690** (17800 wrapper/hook noise lines filtered) |
+| Tracked Playbook Bugs | **45** |
+| Analyzed `error.log` Lines | **18759** (17867 wrapper/hook noise lines filtered) |
 | Allocator Leak Sightings (`[gpa]`) | **10** |
-| Unique Compiler Diagnostics | **60** |
+| Unique Compiler Diagnostics | **62** |
 | Unique Domain `error.*` Variants | **39** |
 
 ## Bug-Playbook Pattern Themes (`BUG-001`–`BUG-NNN`)
 
 | Tag | Count | Focus Area |
 | :--- | ---: | :--- |
-| `#bug-pattern` | 41 | All recorded recurring defect classes |
-| `#security-gate` | 24 | Fail-closed validation, path/symlink/URL/timeout & audit integrity |
+| `#bug-pattern` | 45 | All recorded recurring defect classes |
+| `#security-gate` | 26 | Fail-closed validation, path/symlink/URL/timeout & audit integrity |
 | `#memory-safety` | 7 | Allocator discipline, chain consistency & pointer/bounds safety |
 | `#reliability` | 7 | Lifecycle cleanup/rollback, compose parity, tests & E2E scripts |
-| `#memory-leak` | 3 | UAF/OOM/non-sequential cleanup leaks under std.testing.allocator |
+| `#memory-leak` | 4 | UAF/OOM/non-sequential cleanup leaks under std.testing.allocator |
+| `#concurrency` | 1 | Tracked invariant |
 
 ## Top Zig Compiler & Leak Diagnostics (`error.log`)
 

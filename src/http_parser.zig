@@ -65,7 +65,9 @@ fn decodeChunked(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
         if (size == 0) {
             const term_end = std.math.add(usize, pos, 2) catch return Error.InvalidResponse;
             if (term_end > data.len) return Error.InvalidResponse;
-            break;
+            if (std.mem.eql(u8, data[pos..term_end], "\r\n")) break;
+            if (std.mem.indexOfPos(u8, data, pos, "\r\n\r\n") != null) break;
+            return Error.InvalidResponse;
         }
         // BUG-010: the projected total must use checked arithmetic too — a
         // huge `size` combined with already-buffered bytes would overflow a
@@ -275,4 +277,13 @@ test "parseResponse rejects adversarial truncated chunks, size overflows, and sm
     for (malformed_inputs) |bad| {
         try std.testing.expectError(Error.InvalidResponse, parseResponse(alloc, bad));
     }
+}
+
+test "parseResponse supports chunked responses with HTTP trailers" {
+    const alloc = std.testing.allocator;
+    const raw = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nExpires: Wed, 21 Oct 2025 07:28:00 GMT\r\n\r\n";
+    const resp = try parseResponse(alloc, raw);
+    defer resp.deinit();
+    try std.testing.expectEqualStrings("hello", resp.body);
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
 }

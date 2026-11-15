@@ -366,15 +366,20 @@ fn streamChunked(
         pos = line_end + 2;
 
         if (chunk_size == 0) {
-            // Require trailing `\r\n` after `0\r\n`.
-            while (buf.items.len - pos < 2) {
+            // Require trailing `\r\n` (empty trailer) or valid trailer section ending in `\r\n\r\n`.
+            while (true) {
+                if (buf.items.len - pos >= 2 and std.mem.eql(u8, buf.items[pos .. pos + 2], "\r\n")) {
+                    return;
+                }
+                if (std.mem.indexOfPos(u8, buf.items, pos, "\r\n\r\n")) |_| {
+                    return;
+                }
+                if (buf.items.len - pos >= max_header_bytes) return Error.InvalidResponse;
                 try waitReadable(stream.handle, timeout_ms);
                 const n = try stream.read(&tmp);
                 if (n == 0) return Error.InvalidResponse;
                 try buf.appendSlice(tmp[0..n]);
             }
-            if (!std.mem.eql(u8, buf.items[pos .. pos + 2], "\r\n")) return Error.InvalidResponse;
-            return;
         }
 
         // Stream chunk payload directly without buffering the entire chunk in memory.

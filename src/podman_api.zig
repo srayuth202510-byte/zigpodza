@@ -216,7 +216,7 @@ pub fn startContainer(client: *const http.Client, logger: *log.Logger, id: []con
     const resp = try client.request("POST", path, null);
     defer resp.deinit();
 
-    if (resp.status != 204 and resp.status != 304) {
+    if (resp.status != 204 and resp.status != 304 and !resp.ok()) {
         return logApiFailure(logger, "POST", path, resp);
     }
     logger.info("started container {s}", .{utils.shortId(id)});
@@ -232,7 +232,7 @@ pub fn stopContainer(client: *const http.Client, logger: *log.Logger, id: []cons
     const resp = try client.request("POST", path, null);
     defer resp.deinit();
 
-    if (resp.status != 204 and resp.status != 304) {
+    if (resp.status != 204 and resp.status != 304 and !resp.ok()) {
         return logApiFailure(logger, "POST", path, resp);
     }
     logger.info("stopped container {s}", .{utils.shortId(id)});
@@ -255,7 +255,7 @@ pub fn restartContainer(client: *const http.Client, logger: *log.Logger, id: []c
     const resp = try client.request("POST", path, null);
     defer resp.deinit();
 
-    if (resp.status != 204) {
+    if (resp.status != 204 and !resp.ok()) {
         return logApiFailure(logger, "POST", path, resp);
     }
     logger.info("restarted container {s}", .{utils.shortId(id)});
@@ -272,7 +272,7 @@ pub fn pauseContainer(client: *const http.Client, logger: *log.Logger, id: []con
     const resp = try client.request("POST", path, null);
     defer resp.deinit();
 
-    if (resp.status != 204) {
+    if (resp.status != 204 and !resp.ok()) {
         return logApiFailure(logger, "POST", path, resp);
     }
     logger.info("paused container {s}", .{utils.shortId(id)});
@@ -289,7 +289,7 @@ pub fn unpauseContainer(client: *const http.Client, logger: *log.Logger, id: []c
     const resp = try client.request("POST", path, null);
     defer resp.deinit();
 
-    if (resp.status != 204) {
+    if (resp.status != 204 and !resp.ok()) {
         return logApiFailure(logger, "POST", path, resp);
     }
     logger.info("unpaused container {s}", .{utils.shortId(id)});
@@ -312,7 +312,7 @@ pub fn renameContainer(client: *const http.Client, logger: *log.Logger, id: []co
     const resp = try client.request("POST", path, null);
     defer resp.deinit();
 
-    if (resp.status != 204) {
+    if (resp.status != 204 and !resp.ok()) {
         return logApiFailure(logger, "POST", path, resp);
     }
     logger.info("renamed container {s} -> {s}", .{ utils.shortId(id), new_name });
@@ -336,7 +336,7 @@ pub fn killContainer(client: *const http.Client, logger: *log.Logger, id: []cons
     const resp = try client.request("POST", path, null);
     defer resp.deinit();
 
-    if (resp.status != 204) {
+    if (resp.status != 204 and !resp.ok()) {
         return logApiFailure(logger, "POST", path, resp);
     }
     logger.info("killed container {s} (signal={s})", .{ utils.shortId(id), signal });
@@ -394,7 +394,7 @@ pub fn removeContainer(client: *const http.Client, logger: *log.Logger, id: []co
     const resp = try client.request("DELETE", path, null);
     defer resp.deinit();
 
-    if (resp.status != 204) {
+    if (resp.status != 204 and !resp.ok()) {
         return logApiFailure(logger, "DELETE", path, resp);
     }
     logger.info("removed container {s}", .{utils.shortId(id)});
@@ -1509,8 +1509,9 @@ test "restart, pause, unpause, rename, and removeImage endpoints + validation" {
 
     const replies = [_]ScriptedReply{
         .{
+            // Test that 200 OK (from proxies) is accepted alongside 204 No Content.
             .expected_prefix = "POST /v1.40/containers/web/restart?t=5 HTTP/1.1\r\n",
-            .raw_response = "HTTP/1.1 204 No Content\r\n\r\n",
+            .raw_response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
         },
         .{
             .expected_prefix = "POST /v1.40/containers/web/pause HTTP/1.1\r\n",

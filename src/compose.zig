@@ -622,7 +622,20 @@ fn applyServiceMapItem(
         try pod.validateLabel(.{ .key = sub_key, .value = sub_val });
         try appendDupLabel(alloc, &svc.labels, .{ .key = sub_key, .value = sub_val });
     } else if (std.mem.eql(u8, key, "depends_on")) {
+        if (std.mem.eql(u8, sub_key, "condition")) {
+            // Support long-syntax depends_on condition checks fail-closed.
+            if (!std.mem.eql(u8, sub_val, "service_healthy") and
+                !std.mem.eql(u8, sub_val, "service_started") and
+                !std.mem.eql(u8, sub_val, "service_completed_successfully"))
+            {
+                return ComposeError.InvalidComposeSyntax;
+            }
+            return;
+        }
         try pod.validateIdentifier(sub_key);
+        for (svc.depends_on) |existing| {
+            if (std.mem.eql(u8, existing, sub_key)) return;
+        }
         try appendDupStr(alloc, &svc.depends_on, sub_key);
     } else if (std.mem.eql(u8, key, "networks")) {
         try pod.validateIdentifier(sub_key);
@@ -1466,6 +1479,42 @@ test "BUG-027: scalar list values parsed and long-syntax or unknown keys rejecte
     for (invalid_cases) |bad_yaml| {
         try std.testing.expectError(ComposeError.InvalidComposeSyntax, parseComposeYaml(alloc, bad_yaml, "demo", "/tmp"));
     }
+}
+
+test "parseComposeYaml supports depends_on map syntax with conditions" {
+    const alloc = std.testing.allocator;
+    const yaml =
+        \\services:
+        \\  app:
+        \\    image: alpine:3.20
+        \\    depends_on:
+        \\      db:
+        \\        condition: service_healthy
+        \\  db:
+        \\    image: postgres:16-alpine
+    ;
+    var cf = try parseComposeYaml(alloc, yaml, "demo", "/tmp");
+    defer cf.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), cf.services[0].depends_on.len);
+    try std.testing.expectEqualStrings("db", cf.services[0].depends_on[0]);
+
+    const order = try topoSortServices(alloc, cf.services);
+    defer alloc.free(order);
+    try std.testing.expectEqual(@as(usize, 1), order[0]); // db (index 1) must precede app (index 0)
+    try std.testing.expectEqual(@as(usize, 0), order[1]);
+
+    const invalid_cond_yaml =
+        \\services:
+        \\  app:
+        \\    image: alpine:3.20
+        \\    depends_on:
+        \\      db:
+        \\        condition: invalid_condition
+        \\  db:
+        \\    image: postgres:16-alpine
+    ;
+    try std.testing.expectError(ComposeError.InvalidComposeSyntax, parseComposeYaml(alloc, invalid_cond_yaml, "demo", "/tmp"));
 }
 
 test "BUG-028: compose service networks attach container, label network, and enforce policy" {
