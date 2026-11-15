@@ -9,9 +9,11 @@
    - Always use `std.math.add` (or checked arithmetic) when computing offsets/lengths from untrusted socket data (`decodeChunked` in `src/http.zig`, `demuxLogs` in `src/podman_api.zig`).
    - Enforce `max_response_bytes` before buffering or appending streamed payloads.
 
-3. **Input & Protocol Validation**:
+3. **Input, Parser & Protocol Validation**:
    - Call `http.validateRequestTarget(path)` inside `http.Client.request` before opening the socket.
    - Call `podman_api.validateIdentifier(...)` on every container ID or name before formatting REST API URLs.
+   - Keep `validateNetworkMode` strictly restricted to the 5 built-in modes (`BUG-016`); attach user-defined compose `networks:` via `NetworkingConfig.EndpointsConfig` + `validateIdentifier`, verify every service network against `networks:` + `policy.isNetworkAllowed` (`BUG-028`), and fail closed (`InvalidComposeSyntax`) on unsupported keys, inline `{...}`, or `- key: val` long syntax (`BUG-027`).
+   - Run `repairAuditTail(f)` in `Logger.log` under `lockAudit` (`BUG-030`), and keep `verifyAuditFile` and `writeAuditJson` on shared `evaluateAuditContent`/`parseAuditFields` logic (`BUG-036`).
 
 4. **Zig 0.13 Compatibility**:
    - `std.net.connectUnixSocket` returns `error.PermissionDenied` (not `error.AccessDenied`); verify stdlib error sets when adding error switches.

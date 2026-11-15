@@ -320,10 +320,10 @@ status: active
 - **Symptom**: `compose up` สร้าง compose network ตาม section `networks:` ของไฟล์ แต่ **ไม่มี container ใดถูก join** เข้ากับ network นั้น เพราะ `ComposeService.networks` ถูก parse และ validate แล้ว (ใน [src/compose.zig](../../src/compose.zig)) แต่ไม่เคยถูกอ่านในขั้นตอนสร้าง container — `HostConfig.NetworkMode` มาจาก `network_mode` เท่านั้น ทำให้ traffic เดินผ่าน default bridge และ `compose down` พยายามลบ network ที่ยังมี container ผูกอยู่
 - **Root Cause**: ฟีลด์ถูกเพิ่มในระดับ parser แต่ไม่มีขั้นตอน "apply" ที่เชื่อม parser กับ request ที่ส่ง daemon ทำให้เกิด dead field ที่ผ่านการตรวจสอบแต่ไม่มีผล
 - **Fix**:
-  - ในขั้นตอนสร้าง container ให้ map `svc.networks` → `HostConfig.NetworkMode` (เลือก network แรกที่ประกาศไว้) และตั้ง label `com.docker.compose.network`
-  - เพิ่ม unit test ที่ยืนยันว่า container ที่สร้างมี `NetworkMode` ตรงกับ `networks:` ในไฟล์
-  - ถ้ายังไม่รองรับ ให้คืน `ComposeError.InvalidComposeSyntax` พร้อมข้อความชัดเจนแทนการเงียบ ๆ
-- **Prevention Rule**: ทุกฟีลด์ที่ parser รับเข้ามาต้องมี consumer ที่ชัดเจนในขั้นตอน apply/execute — ฟีลด์ที่ยังไม่ได้ใช้งานต้องถูกปฏิเสธอย่างชัดเจน ไม่ใช่ถูกเก็บไว้เฉย ๆ
+  - ในขั้นตอนสร้าง container ให้ส่ง `svc.networks` ผ่าน `ContainerCreateRequest.NetworkingConfig.EndpointsConfig` (แทนการคลาย allow-list 5 โหมดของ `HostConfig.NetworkMode` เพื่อรักษา `BUG-016`) พร้อมตั้ง label `com.docker.compose.network`
+  - บังคับให้ทุก network ใน `svc.networks` ต้องประกาศใน `networks:` ส่วนบน, ห้ามใช้ร่วมกับ `network_mode:`, และตรวจ `policy.isNetworkAllowed()` ในโหมด `--profile=sandbox`
+  - เพิ่ม unit test ที่ยืนยันการส่ง `NetworkingConfig.EndpointsConfig`, label `com.docker.compose.network`, และ sandbox policy deny
+- **Prevention Rule**: ทุกฟีลด์ที่ parser รับเข้ามาต้องมี consumer ที่ชัดเจนในขั้นตอน pre-flight และ execute โดยไม่ลดความเข้มของ allow-list เดิม (`validateNetworkMode`) — ฟีลด์ที่ยังไม่ได้ใช้งานต้องถูกปฏิเสธอย่างชัดเจน ไม่ใช่ถูกเก็บไว้เฉย ๆ
 
 ---
 
@@ -414,10 +414,10 @@ status: active
 - **Symptom**: การลบ `\n` ท้ายบรรทัดสุดท้ายของ `audit.log` (ซึ่งเป็น entry ที่ commit สำเร็จแล้ว) ทำให้ `verifyAuditFile` ใน [src/log.zig](../../src/log.zig) ข้ามบรรทัดนั้นทิ้งทั้งที่มัน parse เป็น entry ที่สมบูรณ์ — ผลคือการตัดหางท้ายไฟล์ (ลบทั้ง entry) ไม่ถูกตรวจจับ และ `zigpod audit` ยังรายงาน `valid: true` พร้อมจำนวน entry ที่น้อยลง (คนละ root cause กับ BUG-030 แต่อยู่ในโฟลเดอร์เดียวกัน)
 - **Root Cause**: `verifyAuditFile` แยก "บรรทัดที่ยังไม่ commit" ออกจาก "บรรทัดปกติ" ด้วยเงื่อนไขเดียวคือ `lines.peek() == null` ซึ่งตัดทิ้งทั้งกรณีที่ไม่มี `\n` ปิดท้ายจริง และกรณีที่เป็น entry สมบูรณ์ที่ถูกตัด newline ทิ้ง
 - **Fix**:
-  - แยกให้ชัดว่าส่วนท้ายที่ไม่มี `\n` เป็น "uncommitted" เฉพาะเมื่อเนื้อหาไม่ได้ parse เป็น entry ที่สมบูรณ์ (5 field, hash 64 hex) — ถ้า parse ได้ให้ verify และนับตามปกติ
-  - publish `head_hash` (มีอยู่แล้วใน `writeAuditJson`) ไปยังจุดยึดภายนอก เพื่อให้ตรวจจับการตัดท้ายไฟล์แบบ pure-tail ได้
-  - เพิ่ม unit test: entry สมบูรณ์ที่ถูกลบ newline ต้องถูกรายงานว่าเสีย
-- **Prevention Rule**: การแยก "uncommitted tail" ออกจาก "ข้อมูลที่ commit แล้ว" ต้องอิงจากความสมบูรณ์ของ **เนื้อหา** ไม่ใช่แค่การมี newline ปิดท้าย
+  - ใช้ `evaluateAuditContent` + `parseAuditFields` ร่วมกันระหว่าง `verifyAuditFile` และ `writeAuditJson`; ถือว่าส่วนท้ายที่ไม่มี `\n` เป็น "uncommitted" เฉพาะเมื่อ parse ไม่ได้เป็น entry 5-field (hash 64 hex) — ถ้า parse ได้ให้ verify, นับ entry, และตรวจ tamper ตามปกติ พร้อมให้ `repairAuditTail` คืน `\n` แทนการตัดทิ้ง
+  - publish `head_hash` (มีอยู่แล้วใน `writeAuditJson`) เพื่อตรวจจับการตัดท้ายไฟล์แบบ pure-tail
+  - เพิ่ม unit test ครอบคลุมทั้ง valid entry ที่ไม่มี `\n` (ต้องไม่ถูกข้าม/ลดจำนวน), tampered entry ที่ไม่มี `\n` (ต้องคืน `AuditTampered` / `valid=false`), และ fuzz flip ถึงไบต์สุดท้าย (`mutated.len - 1`)
+- **Prevention Rule**: การแยก "uncommitted tail" ออกจาก "ข้อมูลที่ commit แล้ว" ต้องอิงจากความสมบูรณ์ของ **เนื้อหา** ไม่ใช่แค่การมี newline ปิดท้าย และตัวตรวจกับตัวสรุปรายงานต้องใช้ parser/evaluator ร่วมกันเสมอ
 
 ---
 

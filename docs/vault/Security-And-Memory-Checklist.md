@@ -26,7 +26,8 @@ status: active
 - [ ] Error paths ที่มี `ArrayList` / temporary allocation ต้องมี `errdefer` และมี unit test พิสูจน์ว่าไม่ leak
 - [ ] Slice/array ที่ populate ตาม index แบบไม่เรียงลำดับ (เช่น `topoSortServices`) ต้องใช้ nullable slots (`?T` + `@memset(..., null)`) และ caller/callee ownership ต้องตรง doc comment (BUG-038)
 - [ ] ห้ามฝังการจองหน่วยความจำ (`alloc.dupe`) ไว้ภายใน argument list ของฟังก์ชันที่อาจคืน error — ต้องมี `errdefer` ชัดเจน (BUG-035)
-- [ ] `repairAuditTail` ต้องทำงานใน **write path** ของ `audit.log` ไม่ใช่เฉพาะตอน `Logger.init` (BUG-030)
+- [ ] `repairAuditTail` ต้องทำงานใน **write path** ของ `audit.log` ภายใต้ `lockAudit` และห้าม truncate ทับ entry 5-field สมบูรณ์ที่ขาดเพียง `\n` (BUG-030, BUG-036)
+- [ ] `compose up` ต้องติดตาม container หลัง `createContainer` สำเร็จ (ก่อน `startContainer`) และเฉพาะ network ที่สร้างใหม่ในรอบนั้น พร้อม `errdefer rollbackComposeUp` หลัง slice cleanup `defer` (BUG-029)
 
 ## 2. Protocol & Input Security Gates `#security-gate`
 
@@ -55,8 +56,9 @@ status: active
 - [ ] `createContainer` ต้อง re-validate `HostConfig.PortBindings` เช่นเดียวกับ `ExposedPorts` และห้ามใช้ `catch unreachable` ใน path ที่ข้อมูลมาจากภายนอก (BUG-034)
 - [ ] ทุกการเรียก `std.posix.poll` ต้องตรวจค่าที่คืนมา — `0` = timeout ต้องกลายเป็น `Error.Timeout` ไม่ใช่ no-op (BUG-032)
 - [ ] ทุก `writeAll` บน socket ต้องมี deadline เท่ากับฝั่งอ่าน (BUG-037)
-- [ ] ไฟล์ log/audit ต้องเปิดแบบ fail-closed: `O_NOFOLLOW` (ห้าม symlink) + `fchmod 0o640` หลังเปิด ไม่พึ่งแค่ mode argument ตอน create (BUG-031)
-- [ ] `verifyAuditFile` ต้องแยก "uncommitted tail" จาก "entry ที่ commit แล้ว" ด้วยความสมบูรณ์ของเนื้อหา ไม่ใช่แค่การมี newline ปิดท้าย (BUG-036)
+- [ ] ไฟล์ log/audit ต้องเปิดแบบ fail-closed: `O_NOFOLLOW` (ห้าม symlink) + `fchmod 0o640` หลังเปิด ไม่พึ่งแค่ mode argument ตอน create และ `zigpod.toml` ต้องเป็นไฟล์ธรรมดาของ UID ปัจจุบัน ไม่มีสิทธิ์ `g+w`/`o+w` พร้อม validate `socket_path` (BUG-031, BUG-033)
+- [ ] `verifyAuditFile` และ `writeAuditJson` ใช้ `evaluateAuditContent`/`parseAuditFields` ร่วมกัน แยก uncommitted tail ด้วยความสมบูรณ์ของเนื้อหา (5 field + hash 64 hex) และทดสอบ corrupt ถึงไบต์สุดท้าย `\n` ใน fuzz (BUG-036)
+- [ ] `compose.yaml` parser fail-closed (`InvalidComposeSyntax`) สำหรับ unsupported property, scalar/block/inline `{...}`, และ long-syntax `- type: bind`; service `networks:` ต้องประกาศอยู่ใน `networks:`, ไม่ขัดกับ `network_mode:`, ตรวจ `policy.isNetworkAllowed`, และส่งผ่าน `NetworkingConfig.EndpointsConfig` + label `com.docker.compose.network` โดยคง allow-list ของ `validateNetworkMode` ครบ (BUG-016, BUG-027, BUG-028)
 
 ## 3. Logging, Tamper Evidence & Operations
 

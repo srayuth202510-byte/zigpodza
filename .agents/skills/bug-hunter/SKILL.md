@@ -15,7 +15,7 @@ Use this skill whenever diagnosing an error, reviewing code changes, or auditing
 Read or search `docs/vault/` first with `rg`:
 - `docs/vault/00-Index.md` — Knowledge graph & quick queries
 - `docs/vault/Architecture-Map.md` — Module ownership & trust boundaries
-- `docs/vault/Bug-Playbook.md` — Known bug patterns (`BUG-001`..`BUG-005`)
+- `docs/vault/Bug-Playbook.md` — Known bug patterns (`BUG-001`..`BUG-041`)
 - `docs/vault/Security-And-Memory-Checklist.md` — Mandatory invariants
 
 ```bash
