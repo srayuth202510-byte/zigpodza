@@ -315,6 +315,11 @@ Apply defense-in-depth limits in `HostConfig` when launching containers:
 - `--entrypoint <CMD>`: Override container image entrypoint (`Entrypoint`)
 - `--hostname <NAME>`: Set RFC-1123 container hostname (`Hostname`, max 64 chars)
 - `--restart <POLICY>`: Restart policy (`no`, `always`, `unless-stopped`, `on-failure[:N]`)
+- `--shm-size <SIZE>`: Size of `/dev/shm` (`HostConfig.ShmSize`, up to 64 GiB or `policy.max_shm_bytes` in sandbox)
+- `--ulimit <NAME=SOFT[:HARD]>`: Set container rlimit against an allow-list (`nofile`, `nproc`, `fsize`, `core`, `memlock`, `stack`, `data`, `cpu`, `as`, repeatable)
+- `--init`: Run a minimal init process as PID 1 inside the container (`HostConfig.Init`)
+- `--health-cmd <CMD>` / `--health-interval <DUR>`: Configure container healthcheck (`Healthcheck.Test` and `Interval` with `ms`/`s`/`m`/`h`)
+- `zigpod compose up|down|ps [-f FILE]`: Pure-Zig Compose-lite stack manager with `depends_on` topological sorting, cycle rejection, and sandbox policy checks
 - `-i, --interactive` / `-t, --tty` (`-it`): Attach interactive stdin and allocate a pseudo-TTY over HTTP `101 Switching Protocols`
 
 ```bash

@@ -10,6 +10,7 @@ const eql = t.eql;
 
 pub const Label = t.Label;
 pub const RestartPolicySpec = t.RestartPolicySpec;
+pub const UlimitSpec = t.UlimitSpec;
 pub const CpOpts = t.CpOpts;
 
 pub fn parseProfile(s: []const u8) ParseError!Profile {
@@ -315,6 +316,86 @@ pub fn parseNetworkDriver(s: []const u8) ParseError![]const u8 {
     return error.InvalidValue;
 }
 
+const allowed_ulimits = [_][]const u8{
+    "nofile",
+    "nproc",
+    "fsize",
+    "core",
+    "memlock",
+    "stack",
+    "data",
+    "cpu",
+    "as",
+};
+
+/// Parses `--shm-size` (positive byte size up to 64 GiB).
+pub fn parseShmSizeBytes(s: []const u8) ParseError!i64 {
+    const bytes = try parseMemoryBytes(s);
+    if (bytes > 64 * 1024 * 1024 * 1024) return error.InvalidValue;
+    return bytes;
+}
+
+/// Parses `--ulimit NAME=SOFT[:HARD]` against an allow-list of Linux rlimit names.
+pub fn parseUlimitSpec(s: []const u8) ParseError!UlimitSpec {
+    const eq = std.mem.indexOfScalar(u8, s, '=') orelse return error.InvalidValue;
+    const name = s[0..eq];
+    const rest = s[eq + 1 ..];
+    if (name.len == 0 or rest.len == 0) return error.InvalidValue;
+    var allowed = false;
+    for (allowed_ulimits) |u| {
+        if (eql(name, u)) {
+            allowed = true;
+            break;
+        }
+    }
+    if (!allowed) return error.InvalidValue;
+
+    const colon_opt = std.mem.indexOfScalar(u8, rest, ':');
+    const soft_str = if (colon_opt) |c| rest[0..c] else rest;
+    const hard_str = if (colon_opt) |c| rest[c + 1 ..] else soft_str;
+    if (soft_str.len == 0 or hard_str.len == 0) return error.InvalidValue;
+    for (soft_str) |c| if (!std.ascii.isDigit(c)) return error.InvalidValue;
+    for (hard_str) |c| if (!std.ascii.isDigit(c)) return error.InvalidValue;
+
+    const soft = std.fmt.parseInt(i64, soft_str, 10) catch return error.InvalidValue;
+    const hard = std.fmt.parseInt(i64, hard_str, 10) catch return error.InvalidValue;
+    if (soft < 0 or hard < soft or hard > 1_000_000_000_000) return error.InvalidValue;
+    return .{ .name = name, .soft = soft, .hard = hard };
+}
+
+pub fn parseHealthCmd(s: []const u8) ParseError![]const u8 {
+    return parseBoundedControlFree(s, 1024);
+}
+
+/// Parses positive duration strings (`500ms`, `30s`, `5m`, `1h`) into nanoseconds (1ms..24h).
+pub fn parseDurationNanos(s: []const u8) ParseError!i64 {
+    if (s.len < 2 or s.len > 24) return error.InvalidValue;
+    var num_str: []const u8 = s;
+    var mult: i64 = 1_000_000_000;
+    if (std.mem.endsWith(u8, s, "ms")) {
+        num_str = s[0 .. s.len - 2];
+        mult = 1_000_000;
+    } else if (std.mem.endsWith(u8, s, "s")) {
+        num_str = s[0 .. s.len - 1];
+        mult = 1_000_000_000;
+    } else if (std.mem.endsWith(u8, s, "m")) {
+        num_str = s[0 .. s.len - 1];
+        mult = 60 * 1_000_000_000;
+    } else if (std.mem.endsWith(u8, s, "h")) {
+        num_str = s[0 .. s.len - 1];
+        mult = 3600 * 1_000_000_000;
+    } else {
+        return error.InvalidValue;
+    }
+    if (num_str.len == 0) return error.InvalidValue;
+    for (num_str) |c| if (!std.ascii.isDigit(c)) return error.InvalidValue;
+    const val = std.fmt.parseInt(i64, num_str, 10) catch return error.InvalidValue;
+    if (val <= 0) return error.InvalidValue;
+    const ns = std.math.mul(i64, val, mult) catch return error.InvalidValue;
+    if (ns < 1_000_000 or ns > 24 * 3600 * @as(i64, 1_000_000_000)) return error.InvalidValue;
+    return ns;
+}
+
 const ContainerPathRef = struct {
     container: []const u8,
     path: []const u8,
@@ -611,4 +692,33 @@ test "parseCpEndpoints splits CONTAINER:PATH and host endpoints" {
     try std.testing.expectError(error.InvalidValue, parseCpEndpoints("web:", "/tmp/b"));
     try std.testing.expectError(error.InvalidValue, parseCpEndpoints(":/x", "/tmp/b"));
     try std.testing.expectError(error.InvalidValue, parseCpEndpoints("", "/tmp/b"));
+}
+
+test "parseShmSizeBytes, parseUlimitSpec, parseHealthCmd, and parseDurationNanos enforce bounds" {
+    try std.testing.expectEqual(@as(i64, 64 * 1024 * 1024), try parseShmSizeBytes("64m"));
+    try std.testing.expectError(error.InvalidValue, parseShmSizeBytes("0"));
+    try std.testing.expectError(error.InvalidValue, parseShmSizeBytes("128g"));
+
+    const ul1 = try parseUlimitSpec("nofile=1024");
+    try std.testing.expectEqualStrings("nofile", ul1.name);
+    try std.testing.expectEqual(@as(i64, 1024), ul1.soft);
+    try std.testing.expectEqual(@as(i64, 1024), ul1.hard);
+    const ul2 = try parseUlimitSpec("nproc=64:128");
+    try std.testing.expectEqual(@as(i64, 64), ul2.soft);
+    try std.testing.expectEqual(@as(i64, 128), ul2.hard);
+    try std.testing.expectError(error.InvalidValue, parseUlimitSpec("bogus=10"));
+    try std.testing.expectError(error.InvalidValue, parseUlimitSpec("nofile=200:100"));
+    try std.testing.expectError(error.InvalidValue, parseUlimitSpec("nofile="));
+
+    try std.testing.expectEqualStrings("wget -qO- http://127.0.0.1/", try parseHealthCmd("wget -qO- http://127.0.0.1/"));
+    try std.testing.expectError(error.InvalidValue, parseHealthCmd(""));
+    try std.testing.expectError(error.InvalidValue, parseHealthCmd("echo\nbad"));
+
+    try std.testing.expectEqual(@as(i64, 500_000_000), try parseDurationNanos("500ms"));
+    try std.testing.expectEqual(@as(i64, 30_000_000_000), try parseDurationNanos("30s"));
+    try std.testing.expectEqual(@as(i64, 120_000_000_000), try parseDurationNanos("2m"));
+    try std.testing.expectEqual(@as(i64, 3_600_000_000_000), try parseDurationNanos("1h"));
+    try std.testing.expectError(error.InvalidValue, parseDurationNanos("0s"));
+    try std.testing.expectError(error.InvalidValue, parseDurationNanos("25h"));
+    try std.testing.expectError(error.InvalidValue, parseDurationNanos("10"));
 }

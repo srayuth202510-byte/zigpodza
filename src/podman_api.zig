@@ -15,6 +15,8 @@ pub const api_prefix = validate.api_prefix;
 pub const ApiError = types.ApiError;
 pub const TmpfsBounds = types.TmpfsBounds;
 pub const RestartPolicy = types.RestartPolicy;
+pub const Ulimit = types.Ulimit;
+pub const HealthConfig = types.HealthConfig;
 pub const HostConfig = types.HostConfig;
 pub const Mount = types.Mount;
 pub const PortMapping = types.PortMapping;
@@ -68,6 +70,9 @@ pub const validateRestartPolicy = validate.validateRestartPolicy;
 pub const validateLabel = validate.validateLabel;
 pub const validateNetworkDriver = validate.validateNetworkDriver;
 pub const validateCpContainerPath = validate.validateCpContainerPath;
+pub const validateShmSize = validate.validateShmSize;
+pub const validateUlimit = validate.validateUlimit;
+pub const validateHealthConfig = validate.validateHealthConfig;
 pub const loadAndMergeEnv = validate.loadAndMergeEnv;
 const validateMount = validate.validateMount;
 const appendQueryEncoded = validate.appendQueryEncoded;
@@ -134,9 +139,12 @@ pub fn createContainer(
     // Defense in depth: validate identity/network/capability/resource fields (BUG-016).
     if (cfg.Hostname) |h| try validateHostname(h);
     if (cfg.Labels) |labels| for (labels.entries) |entry| try validateLabel(entry);
+    if (cfg.Healthcheck) |hc| try validateHealthConfig(hc);
     if (cfg.WorkingDir) |w| try validateWorkdir(w);
     if (cfg.User) |u| try validateUser(u);
     if (cfg.HostConfig) |hc| {
+        if (hc.ShmSize) |shm| try validateShmSize(shm);
+        if (hc.Ulimits) |ulimits| for (ulimits) |u| try validateUlimit(u);
         if (hc.NanoCpus) |nc| try validateNanoCpus(nc);
         if (hc.RestartPolicy) |rp| try validateRestartPolicy(rp);
         if (hc.NetworkMode) |m| try validateNetworkMode(m);

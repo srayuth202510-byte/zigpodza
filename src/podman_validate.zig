@@ -506,6 +506,47 @@ pub fn loadAndMergeEnv(
     };
 }
 
+pub fn validateShmSize(shm_bytes: i64) ApiError!void {
+    if (shm_bytes <= 0 or shm_bytes > 64 * 1024 * 1024 * 1024) return ApiError.InvalidCpuLimit;
+}
+
+const allowed_ulimit_names = [_][]const u8{
+    "nofile",
+    "nproc",
+    "fsize",
+    "core",
+    "memlock",
+    "stack",
+    "data",
+    "cpu",
+    "as",
+};
+
+pub fn validateUlimit(u: types.Ulimit) ApiError!void {
+    var allowed = false;
+    for (allowed_ulimit_names) |name| {
+        if (std.mem.eql(u8, u.Name, name)) {
+            allowed = true;
+            break;
+        }
+    }
+    if (!allowed) return ApiError.InvalidUlimit;
+    if (u.Soft < 0 or u.Hard < u.Soft or u.Hard > 1_000_000_000_000) return ApiError.InvalidUlimit;
+}
+
+pub fn validateHealthConfig(hc: types.HealthConfig) ApiError!void {
+    if (hc.Test.len == 0 or hc.Test.len > 8) return ApiError.InvalidHealthcheck;
+    for (hc.Test) |arg| {
+        if (arg.len == 0 or arg.len > 1024) return ApiError.InvalidHealthcheck;
+        for (arg) |c| {
+            if (c < 0x20 or c == 0x7f) return ApiError.InvalidHealthcheck;
+        }
+    }
+    if (hc.Interval) |iv| {
+        if (iv < 1_000_000 or iv > 24 * 3600 * @as(i64, 1_000_000_000)) return ApiError.InvalidHealthcheck;
+    }
+}
+
 // ---------------------------------------------------------------- tests
 
 test "validateIdentifier rejects traversal, injection, and invalid sizes" {

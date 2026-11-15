@@ -9,6 +9,9 @@ pub const Volume = types.Volume;
 pub const PortMapping = types.PortMapping;
 pub const Label = types.Label;
 pub const RestartPolicySpec = types.RestartPolicySpec;
+pub const UlimitSpec = types.UlimitSpec;
+pub const ComposeAction = types.ComposeAction;
+pub const ComposeOpts = types.ComposeOpts;
 pub const Profile = types.Profile;
 pub const RunOpts = types.RunOpts;
 pub const AttachOpts = types.AttachOpts;
@@ -69,6 +72,10 @@ const parseRestartPolicy = specs.parseRestartPolicy;
 const parseEnvFilePath = specs.parseEnvFilePath;
 const parseNetworkDriver = specs.parseNetworkDriver;
 const parseCpEndpoints = specs.parseCpEndpoints;
+const parseShmSizeBytes = specs.parseShmSizeBytes;
+const parseUlimitSpec = specs.parseUlimitSpec;
+const parseHealthCmd = specs.parseHealthCmd;
+const parseDurationNanos = specs.parseDurationNanos;
 
 /// `args` excludes the program name. Slices in the result point into `args`
 /// or into memory from `allocator` (use an arena).
@@ -173,6 +180,8 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
         try parseBuild(rest)
     else if (eql(name, "pod"))
         try parsePodCmd(rest)
+    else if (eql(name, "compose"))
+        try parseCompose(rest)
     else if (eql(name, "completion"))
         try parseCompletion(rest)
     else if (eql(name, "audit"))
@@ -203,6 +212,63 @@ fn parseAudit(args: []const []const u8) ParseError!Command {
         }
     }
     return .{ .audit = opts };
+}
+
+fn parseCompose(args: []const []const u8) ParseError!Command {
+    var action: ?ComposeAction = null;
+    var file: ?[]const u8 = null;
+    var detach = false;
+    var json = false;
+    var profile: Profile = .default;
+    var policy_path: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (eql(a, "-f") or eql(a, "--file")) {
+            file = try parseEnvFilePath(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--file=")) {
+            file = try parseEnvFilePath(a["--file=".len..]);
+        } else if (eql(a, "-d") or eql(a, "--detach")) {
+            detach = true;
+        } else if (eql(a, "--json")) {
+            json = true;
+        } else if (eql(a, "--profile")) {
+            profile = try parseProfile(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--profile=")) {
+            profile = try parseProfile(a["--profile=".len..]);
+        } else if (eql(a, "--policy")) {
+            policy_path = try parsePolicyPath(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--policy=")) {
+            policy_path = try parsePolicyPath(a["--policy=".len..]);
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else if (action == null) {
+            if (eql(a, "up")) {
+                action = .up;
+            } else if (eql(a, "down")) {
+                action = .down;
+            } else if (eql(a, "ps")) {
+                action = .ps;
+            } else {
+                return error.InvalidValue;
+            }
+        } else {
+            return error.TooManyArguments;
+        }
+    }
+
+    const act = action orelse return error.MissingArgument;
+    if (act != .up and (detach or profile != .default or policy_path != null)) return error.UnknownFlag;
+    if (act != .ps and json) return error.UnknownFlag;
+    return .{ .compose = .{
+        .action = act,
+        .file = file,
+        .detach = detach,
+        .json = json,
+        .profile = profile,
+        .policy_path = policy_path,
+    } };
 }
 
 fn parseBuild(args: []const []const u8) ParseError!Command {
@@ -394,6 +460,8 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
     errdefer ports.deinit();
     var labels = std.ArrayList(Label).init(allocator);
     errdefer labels.deinit();
+    var ulimits = std.ArrayList(UlimitSpec).init(allocator);
+    errdefer ulimits.deinit();
     var cap_drop = std.ArrayList([]const u8).init(allocator);
     errdefer cap_drop.deinit();
     var cap_add = std.ArrayList([]const u8).init(allocator);
@@ -489,11 +557,30 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
             opts.restart_policy = try parseRestartPolicy(try takeValue(args, &i));
         } else if (std.mem.startsWith(u8, a, "--restart=")) {
             opts.restart_policy = try parseRestartPolicy(a["--restart=".len..]);
+        } else if (eql(a, "--shm-size")) {
+            opts.shm_size = try parseShmSizeBytes(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--shm-size=")) {
+            opts.shm_size = try parseShmSizeBytes(a["--shm-size=".len..]);
+        } else if (eql(a, "--ulimit")) {
+            try ulimits.append(try parseUlimitSpec(try takeValue(args, &i)));
+        } else if (std.mem.startsWith(u8, a, "--ulimit=")) {
+            try ulimits.append(try parseUlimitSpec(a["--ulimit=".len..]));
+        } else if (eql(a, "--init")) {
+            opts.init = true;
+        } else if (eql(a, "--health-cmd")) {
+            opts.health_cmd = try parseHealthCmd(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--health-cmd=")) {
+            opts.health_cmd = try parseHealthCmd(a["--health-cmd=".len..]);
+        } else if (eql(a, "--health-interval")) {
+            opts.health_interval_ns = try parseDurationNanos(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--health-interval=")) {
+            opts.health_interval_ns = try parseDurationNanos(a["--health-interval=".len..]);
         } else if (isFlag(a)) {
             return error.UnknownFlag;
         } else break; // first positional = IMAGE; everything after is the command
     }
     if (i >= args.len) return error.MissingArgument;
+    if (opts.health_interval_ns != null and opts.health_cmd == null) return error.InvalidValue;
     opts.image = args[i];
     opts.cmd = args[i + 1 ..];
     opts.env = try env.toOwnedSlice();
@@ -506,6 +593,8 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
     errdefer allocator.free(opts.ports);
     opts.labels = try labels.toOwnedSlice();
     errdefer allocator.free(opts.labels);
+    opts.ulimits = try ulimits.toOwnedSlice();
+    errdefer allocator.free(opts.ulimits);
     opts.cap_drop = try cap_drop.toOwnedSlice();
     errdefer allocator.free(opts.cap_drop);
     opts.cap_add = try cap_add.toOwnedSlice();

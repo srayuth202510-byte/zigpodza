@@ -10,6 +10,7 @@ const pod = @import("podman_api.zig");
 const pods = @import("podman_pods.zig");
 const build_mod = @import("podman_build.zig");
 const transfer = @import("podman_transfer.zig");
+const compose = @import("compose.zig");
 const policy = @import("policy.zig");
 
 pub const version = "0.1.0";
@@ -229,6 +230,7 @@ fn dispatch(
             .to_container => try transfer.cpToContainer(client, logger, opts.container, opts.host_path, opts.container_path, stdout),
             .from_container => try transfer.cpFromContainer(client, logger, opts.container, opts.container_path, opts.host_path, stdout),
         },
+        .compose => |opts| try compose.executeCompose(client, logger, opts, stdout),
         .system => |s| switch (s.action) {
             .ping => try pod.systemPing(client, logger, stdout),
             .df => try pod.systemDf(client, logger, stdout),
@@ -364,6 +366,27 @@ fn dispatch(
             }
             for (r.cap_drop) |c| try pod.validateCapability(c);
             for (r.cap_add) |c| try pod.validateCapability(c);
+            if (r.shm_size) |shm| try pod.validateShmSize(shm);
+
+            var ulimit_buf = std.ArrayList(pod.Ulimit).init(client.allocator);
+            defer ulimit_buf.deinit();
+            for (r.ulimits) |u| {
+                const mapped = pod.Ulimit{ .Name = u.name, .Soft = u.soft, .Hard = u.hard };
+                try pod.validateUlimit(mapped);
+                try ulimit_buf.append(mapped);
+            }
+
+            var hc_test_buf: [2][]const u8 = undefined;
+            var api_healthcheck: ?pod.HealthConfig = null;
+            if (r.health_cmd) |hcmd| {
+                hc_test_buf = .{ "CMD-SHELL", hcmd };
+                const hc = pod.HealthConfig{
+                    .Test = &hc_test_buf,
+                    .Interval = r.health_interval_ns,
+                };
+                try pod.validateHealthConfig(hc);
+                api_healthcheck = hc;
+            }
 
             var ep_slice: [1][]const u8 = undefined;
             const api_entrypoint: ?[]const []const u8 = if (r.entrypoint) |ep| blk: {
@@ -375,10 +398,13 @@ fn dispatch(
             const auto_remove = r.detach and r.remove;
             const has_host_cfg = auto_remove or
                 r.read_only or
+                r.init or
                 r.no_new_privileges or
                 r.memory != null or
+                r.shm_size != null or
                 r.nano_cpus != null or
                 r.pids_limit != null or
+                ulimit_buf.items.len > 0 or
                 api_restart_policy != null or
                 has_binding or
                 r.network != null or
@@ -389,10 +415,13 @@ fn dispatch(
             const host_cfg: ?pod.HostConfig = if (has_host_cfg) .{
                 .AutoRemove = auto_remove,
                 .ReadonlyRootfs = r.read_only,
+                .Init = if (r.init) true else null,
                 .Memory = r.memory,
+                .ShmSize = r.shm_size,
                 .NanoCpus = r.nano_cpus,
                 .PidsLimit = r.pids_limit,
                 .RestartPolicy = api_restart_policy,
+                .Ulimits = if (ulimit_buf.items.len > 0) ulimit_buf.items else null,
                 .SecurityOpt = if (r.no_new_privileges) sec_opts else null,
                 .PortBindings = if (has_binding) .{ .ports = port_buf.items } else null,
                 .NetworkMode = r.network,
@@ -411,6 +440,7 @@ fn dispatch(
                 .ExposedPorts = if (port_buf.items.len > 0) .{ .ports = port_buf.items } else null,
                 .WorkingDir = r.workdir,
                 .User = r.user,
+                .Healthcheck = api_healthcheck,
                 .AttachStdin = r.interactive,
                 .OpenStdin = r.interactive,
                 .AttachStdout = !r.detach and (r.interactive or r.tty),
@@ -551,6 +581,30 @@ fn reportFailure(logger: *log.Logger, cmd: cli.Command, socket_path: []const u8,
             "api.loadAndMergeEnv",
             "Rejected malformed or oversized --env-file (must contain KEY=VALUE lines <= 1 MiB).",
         ),
+        pod.ApiError.InvalidUlimit => logger.deny(
+            "api.validateUlimit",
+            "Rejected invalid --ulimit specification (must be allowed name with 0 <= soft <= hard).",
+        ),
+        pod.ApiError.InvalidHealthcheck => logger.deny(
+            "api.validateHealthConfig",
+            "Rejected invalid --health-cmd / --health-interval configuration.",
+        ),
+        compose.ComposeError.CyclicDependency,
+        compose.ComposeError.UnknownDependency,
+        => logger.deny(
+            "compose.topoSortServices",
+            "Rejected compose.yaml dependency graph (cycle or unknown service in depends_on).",
+        ),
+        compose.ComposeError.ComposeFileNotFound,
+        compose.ComposeError.InvalidComposePath,
+        compose.ComposeError.InvalidComposeSyntax,
+        compose.ComposeError.MissingServiceImage,
+        compose.ComposeError.DuplicateService,
+        compose.ComposeError.TooManyServices,
+        => logger.deny(
+            "compose.loadComposeFile",
+            "Rejected missing or malformed compose.yaml file.",
+        ),
         pod.ApiError.InvalidPolicyFile => logger.deny(
             "policy.loadPolicyFile",
             "Rejected missing or malformed policy file (zigpod-policy.json).",
@@ -590,6 +644,7 @@ test {
     _ = pods;
     _ = build_mod;
     _ = transfer;
+    _ = compose;
     _ = policy;
     _ = @import("utils.zig");
     std.testing.refAllDecls(@This());

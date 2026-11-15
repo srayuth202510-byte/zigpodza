@@ -183,9 +183,13 @@ cat > "$ENV_FILE" <<'EOF'
 FROM_ENV_FILE=yes
 EOF
 
-RUN_OUT=$("$BIN" --socket "$SOCK" run --rm -m 64m --pids-limit 32 --cpus 0.5 --env-file "$ENV_FILE" -l app=smoke --entrypoint /bin/echo --hostname smoke-host --restart on-failure:2 --read-only --no-new-privileges -v /srv/data:/data -p 8080:80 -p 127.0.0.1:9000:9000/udp --network none -w /work -u 1000:1000 --cap-drop ALL --cap-add NET_BIND_SERVICE alpine:3.20 echo ok)
+RUN_OUT=$("$BIN" --socket "$SOCK" run --rm -m 64m --shm-size 32m --pids-limit 32 --cpus 0.5 --ulimit nofile=1024:2048 --init --health-cmd "true" --health-interval 10s --env-file "$ENV_FILE" -l app=smoke --entrypoint /bin/echo --hostname smoke-host --restart on-failure:2 --read-only --no-new-privileges -v /srv/data:/data -p 8080:80 -p 127.0.0.1:9000:9000/udp --network none -w /work -u 1000:1000 --cap-drop ALL --cap-add NET_BIND_SERVICE alpine:3.20 echo ok)
 echo "$RUN_OUT" | grep -q "ok"
 grep -q '"ReadonlyRootfs":true' "$REQ_LOG"
+grep -q '"Init":true' "$REQ_LOG"
+grep -q '"ShmSize":33554432' "$REQ_LOG"
+grep -q '"Ulimits":\[{"Name":"nofile","Soft":1024,"Hard":2048}\]' "$REQ_LOG"
+grep -q '"Healthcheck":{"Test":\["CMD-SHELL","true"\],"Interval":10000000000}' "$REQ_LOG"
 grep -q '"NanoCpus":500000000' "$REQ_LOG"
 grep -q '"FROM_ENV_FILE=yes"' "$REQ_LOG"
 grep -q '"Labels":{"app":"smoke"}' "$REQ_LOG"
@@ -331,6 +335,18 @@ fi
 
 if "$BIN" --socket "$SOCK" run --cpus 0 alpine:3.20 >/dev/null 2>&1; then
     echo "[FAIL] expected --cpus 0 to fail pre-flight validation" >&2
+    exit 1
+fi
+
+BAD_COMPOSE="$SMOKE_WORK/bad-compose.yaml"
+cat > "$BAD_COMPOSE" <<'EOF'
+services:
+  web:
+    image: alpine:3.20
+    network_mode: host
+EOF
+if "$BIN" --socket "$SOCK" compose up -f "$BAD_COMPOSE" --profile=sandbox >/dev/null 2>&1; then
+    echo "[FAIL] expected compose up --profile=sandbox with network_mode: host to fail pre-flight" >&2
     exit 1
 fi
 

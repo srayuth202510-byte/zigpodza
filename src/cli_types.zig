@@ -34,6 +34,12 @@ pub const usage =
     \\      --entrypoint CMD           Overwrite default image entrypoint
     \\      --hostname NAME            Container host name
     \\      --restart POLICY           Restart policy: no|always|unless-stopped|on-failure[:N]
+    \\      --shm-size SIZE            Size of /dev/shm (e.g., 64m, 256m)
+    \\      --ulimit NAME=SOFT[:HARD]  Set resource limit (repeatable, e.g. nofile=1024:2048)
+    \\      --init                     Run an init process inside the container
+    \\      --health-cmd CMD           Command to run to check container health
+    \\      --health-interval DUR      Time between running the health check (e.g., 30s, 500ms)
+    \\  compose up|down|ps [-f FILE] [-d] [--json]  Manage multi-container stacks from compose.yaml
     \\  ps [-a] [--json]               List containers (-a: include stopped, --json: JSON output)
     \\  images [--json]                List local images (--json: JSON output)
     \\  pull IMAGE                     Pull an image from a registry
@@ -130,6 +136,12 @@ pub const RestartPolicySpec = struct {
     max_retry_count: u32 = 0,
 };
 
+pub const UlimitSpec = struct {
+    name: []const u8,
+    soft: i64,
+    hard: i64,
+};
+
 pub const RunOpts = struct {
     image: []const u8,
     cmd: []const []const u8 = &.{},
@@ -138,6 +150,7 @@ pub const RunOpts = struct {
     volumes: []const Volume = &.{},
     ports: []const PortMapping = &.{},
     labels: []const Label = &.{},
+    ulimits: []const UlimitSpec = &.{},
     cap_drop: []const []const u8 = &.{},
     cap_add: []const []const u8 = &.{},
     name: ?[]const u8 = null,
@@ -155,9 +168,13 @@ pub const RunOpts = struct {
     remove: bool = false,
     read_only: bool = false,
     no_new_privileges: bool = false,
+    init: bool = false,
     memory: ?i64 = null,
+    shm_size: ?i64 = null,
     pids_limit: ?i64 = null,
     nano_cpus: ?i64 = null,
+    health_cmd: ?[]const u8 = null,
+    health_interval_ns: ?i64 = null,
 };
 
 pub const RmOpts = struct {
@@ -368,6 +385,21 @@ pub const PolicyOpts = struct {
     json: bool = false,
 };
 
+pub const ComposeAction = enum {
+    up,
+    down,
+    ps,
+};
+
+pub const ComposeOpts = struct {
+    action: ComposeAction,
+    file: ?[]const u8 = null,
+    detach: bool = false,
+    json: bool = false,
+    profile: Profile = .default,
+    policy_path: ?[]const u8 = null,
+};
+
 pub const Command = union(enum) {
     help,
     client_version,
@@ -412,6 +444,7 @@ pub const Command = union(enum) {
     policy: PolicyOpts,
     build: BuildOpts,
     pod: PodOpts,
+    compose: ComposeOpts,
     completion: Shell,
 };
 
@@ -427,6 +460,7 @@ pub const Parsed = struct {
                 if (r.volumes.len > 0) allocator.free(r.volumes);
                 if (r.ports.len > 0) allocator.free(r.ports);
                 if (r.labels.len > 0) allocator.free(r.labels);
+                if (r.ulimits.len > 0) allocator.free(r.ulimits);
                 if (r.cap_drop.len > 0) allocator.free(r.cap_drop);
                 if (r.cap_add.len > 0) allocator.free(r.cap_add);
             },

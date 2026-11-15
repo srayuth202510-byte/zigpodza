@@ -1407,3 +1407,107 @@ test "cpFromContainer unpacks safely and blocks Tar-Slip, symlink escapes, and p
     joined = true;
     try std.testing.expectEqual(replies.len, ctx.matched);
 }
+
+test "scanCpArchive rejects hardlink escapes, oversized PAX headers, and truncated tar streams" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // 1) Hardlink (typeflag '1') pointing outside archive root must be rejected fail-closed.
+    {
+        var hl_buf = std.ArrayList(u8).init(alloc);
+        defer hl_buf.deinit();
+        var hdr = [_]u8{0} ** 512;
+        @memcpy(hdr[0..4], "evil");
+        @memcpy(hdr[100..107], "000644 ");
+        hdr[107] = 0;
+        @memcpy(hdr[108..115], "000000 ");
+        hdr[115] = 0;
+        @memcpy(hdr[116..123], "000000 ");
+        hdr[123] = 0;
+        @memcpy(hdr[124..135], "00000000000");
+        hdr[135] = 0;
+        @memcpy(hdr[136..147], "00000000000");
+        hdr[147] = 0;
+        @memset(hdr[148..156], ' ');
+        hdr[156] = '1'; // hard_link
+        const target = "../../etc/shadow";
+        @memcpy(hdr[157 .. 157 + target.len], target);
+        @memcpy(hdr[257..263], "ustar\x00");
+        @memcpy(hdr[263..265], "00");
+        var sum: u32 = 0;
+        for (hdr) |b| sum += b;
+        _ = std.fmt.bufPrint(hdr[148..154], "{o:0>6}", .{sum}) catch unreachable;
+        hdr[154] = 0;
+        hdr[155] = ' ';
+        try hl_buf.appendSlice(&hdr);
+        try build_mod.writeTarTrailer(&hl_buf);
+
+        try tmp.dir.writeFile(.{ .sub_path = "hardlink.tar", .data = hl_buf.items });
+        const f = try tmp.dir.openFile("hardlink.tar", .{});
+        defer f.close();
+        try std.testing.expectError(error.TarUnsupportedHeader, scanCpArchive(alloc, f));
+    }
+
+    // 2) Oversized PAX extended header (typeflag 'x' with path > MAX_PATH_BYTES) must fail.
+    {
+        var pax_buf = std.ArrayList(u8).init(alloc);
+        defer pax_buf.deinit();
+        const long_path = "a" ** (std.fs.MAX_PATH_BYTES + 64);
+        const rec_body = try std.fmt.allocPrint(alloc, "path={s}\n", .{long_path});
+        defer alloc.free(rec_body);
+        const total_len = rec_body.len + 5; // "NNNN "
+        const pax_payload = try std.fmt.allocPrint(alloc, "{d:0>4} {s}", .{ total_len, rec_body });
+        defer alloc.free(pax_payload);
+
+        var hdr = [_]u8{0} ** 512;
+        @memcpy(hdr[0..10], "PaxHeader/");
+        @memcpy(hdr[100..107], "000644 ");
+        hdr[107] = 0;
+        @memcpy(hdr[108..115], "000000 ");
+        hdr[115] = 0;
+        @memcpy(hdr[116..123], "000000 ");
+        hdr[123] = 0;
+        _ = std.fmt.bufPrint(hdr[124..135], "{o:0>11}", .{pax_payload.len}) catch unreachable;
+        hdr[135] = 0;
+        @memcpy(hdr[136..147], "00000000000");
+        hdr[147] = 0;
+        @memset(hdr[148..156], ' ');
+        hdr[156] = 'x';
+        @memcpy(hdr[257..263], "ustar\x00");
+        @memcpy(hdr[263..265], "00");
+        var sum: u32 = 0;
+        for (hdr) |b| sum += b;
+        _ = std.fmt.bufPrint(hdr[148..154], "{o:0>6}", .{sum}) catch unreachable;
+        hdr[154] = 0;
+        hdr[155] = ' ';
+        try pax_buf.appendSlice(&hdr);
+        try pax_buf.appendSlice(pax_payload);
+        try build_mod.writePad(&pax_buf, pax_payload.len);
+        try build_mod.writeTarTrailer(&pax_buf);
+
+        try tmp.dir.writeFile(.{ .sub_path = "longpax.tar", .data = pax_buf.items });
+        const f = try tmp.dir.openFile("longpax.tar", .{});
+        defer f.close();
+        if (scanCpArchive(alloc, f)) |s| {
+            if (s.common_root) |cr| alloc.free(cr);
+            return error.TestUnexpectedResult;
+        } else |_| {}
+    }
+
+    // 3) Truncated tar stream (header declares 2048 bytes, stream ends after 64 bytes).
+    {
+        var trunc_buf = std.ArrayList(u8).init(alloc);
+        defer trunc_buf.deinit();
+        try build_mod.writeTarHeader(&trunc_buf, "partial.bin", 2048, '0', "");
+        try trunc_buf.appendNTimes('Z', 64);
+
+        try tmp.dir.writeFile(.{ .sub_path = "trunc.tar", .data = trunc_buf.items });
+        const f = try tmp.dir.openFile("trunc.tar", .{});
+        defer f.close();
+        if (scanCpArchive(alloc, f)) |s| {
+            if (s.common_root) |cr| alloc.free(cr);
+            return error.TestUnexpectedResult;
+        } else |_| {}
+    }
+}

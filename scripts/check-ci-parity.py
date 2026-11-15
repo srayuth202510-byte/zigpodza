@@ -33,6 +33,7 @@ REQUIRED_FILES = [
     "src/cli_specs.zig",
     "src/cli_types.zig",
     "src/completion.zig",
+    "src/compose.zig",
     "src/config.zig",
     "src/demo.zig",
     "src/http.zig",
@@ -103,6 +104,7 @@ CLI_SUBCOMMANDS = [
     "import",
     "attach",
     "cp",
+    "compose",
 ]
 
 HARDENING_FLAGS = [
@@ -116,6 +118,11 @@ HARDENING_FLAGS = [
     "--entrypoint",
     "--hostname",
     "--restart",
+    "--shm-size",
+    "--ulimit",
+    "--init",
+    "--health-cmd",
+    "--health-interval",
 ]
 
 CI_COMMANDS = [

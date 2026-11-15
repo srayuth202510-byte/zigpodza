@@ -4,7 +4,7 @@ const cli_types = @import("cli_types.zig");
 
 pub const Shell = cli_types.Shell;
 
-const subcommands = "run ps images pull rmi tag history commit build start stop restart pause unpause rename kill rm logs top exec attach inspect stats volume network cp pod system port wait diff events policy completion audit demo search save load export import version help";
+const subcommands = "run ps images pull rmi tag history commit build start stop restart pause unpause rename kill rm logs top exec attach inspect stats volume network cp pod compose system port wait diff events policy completion audit demo search save load export import version help";
 
 const bash_template =
     \\# bash completion for zigpod
@@ -31,6 +31,9 @@ const bash_template =
     \\        pod)
     \\            COMPREPLY=( $(compgen -W "create ps stop rm" -- "${{cur}}") )
     \\            ;;
+    \\        compose)
+    \\            COMPREPLY=( $(compgen -W "up down ps" -- "${{cur}}") )
+    \\            ;;
     \\        policy)
     \\            COMPREPLY=( $(compgen -W "show check" -- "${{cur}}") )
     \\            ;;
@@ -38,7 +41,7 @@ const bash_template =
     \\            COMPREPLY=( $(compgen -W "ping df prune" -- "${{cur}}") )
     \\            ;;
     \\        run)
-    \\            COMPREPLY=( $(compgen -W "-d --detach --rm --name -e --env --env-file -v --volume -p --publish -l --label --network -w --workdir -u --user --cap-drop --cap-add -m --memory --cpus --pids-limit --read-only --no-new-privileges --entrypoint --hostname --restart --profile --policy -i --interactive -t --tty" -- "${{cur}}") )
+    \\            COMPREPLY=( $(compgen -W "-d --detach --rm --name -e --env --env-file -v --volume -p --publish -l --label --network -w --workdir -u --user --cap-drop --cap-add -m --memory --cpus --pids-limit --read-only --no-new-privileges --entrypoint --hostname --restart --shm-size --ulimit --init --health-cmd --health-interval --profile --policy -i --interactive -t --tty" -- "${{cur}}") )
     \\            ;;
     \\        *)
     \\            COMPREPLY=()
@@ -83,6 +86,7 @@ const zsh_script =
     \\        'network:Manage networks'
     \\        'cp:Copy files between container and host'
     \\        'pod:Manage pods'
+    \\        'compose:Manage multi-container compose stacks'
     \\        'system:System maintenance'
     \\        'port:List container port mappings'
     \\        'wait:Wait for a container to stop'
@@ -117,6 +121,9 @@ const zsh_script =
     \\        pod)
     \\            _values 'action' create ps stop rm
     \\            ;;
+    \\        compose)
+    \\            _values 'action' up down ps
+    \\            ;;
     \\        policy)
     \\            _values 'action' show check
     \\            ;;
@@ -139,6 +146,7 @@ const fish_template =
     \\complete -c zigpod -n "__fish_seen_subcommand_from volume" -a "ls create rm inspect"
     \\complete -c zigpod -n "__fish_seen_subcommand_from network" -a "ls inspect create rm"
     \\complete -c zigpod -n "__fish_seen_subcommand_from pod" -a "create ps stop rm"
+    \\complete -c zigpod -n "__fish_seen_subcommand_from compose" -a "up down ps"
     \\complete -c zigpod -n "__fish_seen_subcommand_from policy" -a "show check"
     \\complete -c zigpod -n "__fish_seen_subcommand_from system" -a "ping df prune"
     \\

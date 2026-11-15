@@ -19,6 +19,8 @@ pub const ApiError = error{
     InvalidLabel,
     InvalidNetworkDriver,
     InvalidEnvFile,
+    InvalidUlimit,
+    InvalidHealthcheck,
     PolicyViolation,
     InvalidPolicyFile,
     BuildFailed,
@@ -44,13 +46,27 @@ pub const RestartPolicy = struct {
     MaximumRetryCount: u32 = 0,
 };
 
+pub const Ulimit = struct {
+    Name: []const u8,
+    Soft: i64,
+    Hard: i64,
+};
+
+pub const HealthConfig = struct {
+    Test: []const []const u8,
+    Interval: ?i64 = null,
+};
+
 pub const HostConfig = struct {
     AutoRemove: bool = false,
     ReadonlyRootfs: bool = false,
+    Init: ?bool = null,
     Memory: ?i64 = null,
+    ShmSize: ?i64 = null,
     NanoCpus: ?i64 = null,
     PidsLimit: ?i64 = null,
     RestartPolicy: ?RestartPolicy = null,
+    Ulimits: ?[]const Ulimit = null,
     SecurityOpt: ?[]const []const u8 = null,
     PortBindings: ?PortBindings = null,
     NetworkMode: ?[]const u8 = null,
@@ -151,6 +167,7 @@ pub const ContainerCreateRequest = struct {
     ExposedPorts: ?ExposedPorts = null,
     WorkingDir: ?[]const u8 = null,
     User: ?[]const u8 = null,
+    Healthcheck: ?HealthConfig = null,
     AttachStdin: bool = false,
     AttachStdout: bool = false,
     AttachStderr: bool = false,
@@ -607,14 +624,38 @@ test "HostConfig default values are zero/false/null" {
     const hc = HostConfig{};
     try std.testing.expect(hc.AutoRemove == false);
     try std.testing.expect(hc.ReadonlyRootfs == false);
+    try std.testing.expect(hc.Init == null);
     try std.testing.expect(hc.Memory == null);
+    try std.testing.expect(hc.ShmSize == null);
     try std.testing.expect(hc.PidsLimit == null);
+    try std.testing.expect(hc.Ulimits == null);
     try std.testing.expect(hc.SecurityOpt == null);
     try std.testing.expect(hc.PortBindings == null);
     try std.testing.expect(hc.NetworkMode == null);
     try std.testing.expect(hc.CapDrop == null);
     try std.testing.expect(hc.CapAdd == null);
     try std.testing.expect(hc.Tmpfs == null);
+}
+
+test "ContainerCreateRequest serializes ShmSize, Ulimits, Init, and Healthcheck" {
+    const alloc = std.testing.allocator;
+    const ulimits = [_]Ulimit{.{ .Name = "nofile", .Soft = 1024, .Hard = 2048 }};
+    const hc_cmd = [_][]const u8{ "CMD-SHELL", "wget -qO- http://127.0.0.1/" };
+    const req = ContainerCreateRequest{
+        .Image = "alpine:3.20",
+        .Healthcheck = .{ .Test = &hc_cmd, .Interval = 15_000_000_000 },
+        .HostConfig = .{
+            .Init = true,
+            .ShmSize = 64 * 1024 * 1024,
+            .Ulimits = &ulimits,
+        },
+    };
+    const json = try std.json.stringifyAlloc(alloc, req, .{ .emit_null_optional_fields = false });
+    defer alloc.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Init\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"ShmSize\":67108864") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Ulimits\":[{\"Name\":\"nofile\",\"Soft\":1024,\"Hard\":2048}]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Healthcheck\":{\"Test\":[\"CMD-SHELL\",\"wget -qO- http://127.0.0.1/\"],\"Interval\":15000000000}") != null);
 }
 
 test "ContainerSummary default values" {

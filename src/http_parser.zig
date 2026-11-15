@@ -256,3 +256,23 @@ test "fuzz parseResponse and decodeChunked with deterministic PRNG" {
         } else |_| {}
     }
 }
+
+test "parseResponse rejects adversarial truncated chunks, size overflows, and smuggling" {
+    const alloc = std.testing.allocator;
+    const malformed_inputs = [_][]const u8{
+        "HTTP/1.1 200 OK\r\nContent-Length: 5", // missing \r\n\r\n
+        "NOTHTTP/1.1 200 OK\r\n\r\n",
+        "HTTP/1.1 abc OK\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort",
+        "HTTP/1.1 200 OK\r\nContent-Length: 999999999999\r\n\r\nx",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhelloXX0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\nhi\r\n0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n10000000\r\nhi\r\n0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n;ext=only\r\n0\r\n\r\n",
+    };
+    for (malformed_inputs) |bad| {
+        try std.testing.expectError(Error.InvalidResponse, parseResponse(alloc, bad));
+    }
+}

@@ -16,6 +16,7 @@ pub const default_cap_drop_all = [_][]const u8{"ALL"};
 pub const Policy = struct {
     profile: []const u8 = "sandbox",
     max_memory_bytes: i64 = default_sandbox_memory_bytes,
+    max_shm_bytes: i64 = 64 * 1024 * 1024,
     max_pids_limit: i64 = default_sandbox_pids_limit,
     max_nano_cpus: i64 = default_sandbox_nano_cpus,
     require_read_only: bool = true,
@@ -115,6 +116,7 @@ pub fn loadPolicyFile(allocator: std.mem.Allocator, path: []const u8) !std.json.
 
 pub fn validatePolicySchema(pol: Policy) ApiError!void {
     if (pol.max_memory_bytes <= 0) return ApiError.InvalidPolicyFile;
+    if (pol.max_shm_bytes <= 0) return ApiError.InvalidPolicyFile;
     if (pol.max_pids_limit <= 0) return ApiError.InvalidPolicyFile;
     if (pol.max_nano_cpus <= 0) return ApiError.InvalidPolicyFile;
     if (pol.allowed_networks.len == 0) return ApiError.InvalidPolicyFile;
@@ -132,6 +134,10 @@ pub fn checkRunPolicy(r: cli.RunOpts, pol: Policy) ?[]const u8 {
 
     const mem = r.memory orelse return "policy.max_memory_bytes";
     if (mem <= 0 or mem > pol.max_memory_bytes) return "policy.max_memory_bytes";
+
+    if (r.shm_size) |shm| {
+        if (shm <= 0 or shm > pol.max_shm_bytes) return "policy.max_shm_bytes";
+    }
 
     const pids = r.pids_limit orelse return "policy.max_pids_limit";
     if (pids <= 0 or pids > pol.max_pids_limit) return "policy.max_pids_limit";
