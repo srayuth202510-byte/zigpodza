@@ -406,6 +406,7 @@ make debug-logs N=15             # summarize top errors in error.log and recent 
 make bugs            # terminal summary of tracked bugs, module tests, and security gates
 make dashboard       # update docs/vault/Bug-Dashboard.md & .zig-cache/bug-dashboard.html
 make knowledge-sync  # auto-sync graph/dashboard + detect unrecorded src/ BUG-NNN/validator/error gaps
+make distill-lessons # distill error.log + Bug-Playbook patterns into docs/vault/Lessons-Learned.md
 make install-hooks   # activate tracked .githooks/pre-commit (pairs with .agents/hooks.json Stop hook)
 make dashboard-serve # start local web UI on http://127.0.0.1:8765
 python3 scripts/bug-dashboard.py summary --json

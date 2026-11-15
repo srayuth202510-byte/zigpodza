@@ -22,9 +22,11 @@ flowchart LR
     MOC --> BUGS["[[Bug-Playbook]]"]
     MOC --> SEC["[[Security-And-Memory-Checklist]]"]
     MOC --> DASH["[[Bug-Dashboard]]"]
+    MOC --> LESSONS["[[Lessons-Learned]]"]
     ARCH --> SEC
     BUGS --> SEC
     BUGS --> DASH
+    BUGS --> LESSONS
 ```
 
 ## Notes
@@ -32,6 +34,7 @@ flowchart LR
 - [[Bug-Dashboard]] — แดชบอร์ดสรุปสถานะบั๊ก (`BUG-001` ถึง `BUG-041`), Coverage ของ Unit Tests ต่อโมดูล และสถานะ Security/Memory Gates
 - [[Architecture-Map]] — แผนผังโมดูล, เส้นทางข้อมูล, Ownership ของหน่วยความจำ และ Trust Boundaries
 - [[Bug-Playbook]] — คลังบันทึก Bug & Post-mortem (`BUG-001` ถึง `BUG-041`) พร้อมวิธีป้องกันไม่ให้เกิดซ้ำ
+- [[Lessons-Learned]] — บทเรียนสกัดจาก `error.log` + `Bug-Playbook` พร้อมสถานะการครอบคลุมใน `.agents/rules/*.md`
 - [[Security-And-Memory-Checklist]] — กฎเหล็กที่ตรวจอัตโนมัติด้วย `scripts/auto-audit.sh` และ `scripts/security-check.sh`
 
 ## Quick Queries for AI (`rg`)
@@ -48,5 +51,6 @@ rg -n "#memory-safety|#security-gate" docs/vault/
 
 # ซิงก์ Knowledge Graph และ Bug-Dashboard อัตโนมัติ (หรือเปิดใช้ผ่าน .agents/hooks.json Stop hook & git pre-commit)
 python3 scripts/knowledge-sync.py --sync
+make distill-lessons
 make install-hooks
 ```

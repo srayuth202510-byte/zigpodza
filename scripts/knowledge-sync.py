@@ -5,12 +5,14 @@ Provides shared synchronization and drift detection for:
   --sync        Rebuild .zig-cache/knowledge-graph.json and docs/vault/Bug-Dashboard.md when needed
   --stop-hook   Antigravity Stop hook: sync deterministic knowledge and request continuation on unrecorded patterns
   --pre-commit  Git pre-commit hook: sync/auto-stage Bug-Dashboard.md and verify vault/audit parity before commit
-  --self-test   Run isolated temporary-repo tests covering pass, continue, loop-guard, and pre-commit paths
+  --distill     Analyze error.log + Bug-Playbook.md into docs/vault/Lessons-Learned.md (filters transient hook noise)
+  --self-test   Run isolated temporary-repo tests covering pass, continue, loop-guard, distill, and pre-commit paths
 """
 
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import os
 import re
@@ -32,6 +34,31 @@ KNOWLEDGE_GLOBS = (
     "docs/vault/*.md",
     ".agents/rules/*.md",
     "scripts/auto-audit.sh",
+)
+
+NOISE_LINE_RES = (
+    re.compile(r"auto-audit detected \d+ failure\(s\):"),
+    re.compile(r"^FAIL:\s*scripts/security-check\.sh failed:"),
+    re.compile(r"^FAIL:\s*Missing executable "),
+    re.compile(r"^\+\-\s*zig test "),
+    re.compile(r"^(?:test|test transitive failure|\^|Build Summary:.*)$"),
+    re.compile(r"^error: the following (?:build )?command failed"),
+    re.compile(r"^==>\s*\[\d+/\d+\]"),
+)
+DIAG_FILE_RE = re.compile(r"(?:\S*/)?(src/[A-Za-z0-9_./]+\.zig):\d+:\d+:\s*(error:\s*.+)$")
+STDLIB_DIAG_RE = re.compile(r"\S*/lib/std/([A-Za-z0-9_./]+\.zig):\d+:\d+:\s*(error:\s*.+)$")
+GENERIC_ERR_RE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}T\S+\s+\[ERROR\]\s+)?(?:FAIL:\s+.+|error:\s+.+)$")
+LEAK_ADDR_RE = re.compile(r"\[gpa\]\s*\(err\):\s*memory address\s+0x[0-9a-fA-F]+\s+leaked")
+TEST_FAIL_RE = re.compile(r"^error:\s*'([^']+)' failed:")
+ERR_VARIANT_RE = re.compile(r"\berror\.([A-Z][A-Za-z0-9_]+)\b")
+
+RULE_SIGNAL_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"switch must handle all possibilities", re.I), ".agents/rules/zig-0.13-gotchas.md"),
+    (re.compile(r"never mutated|shadows declaration|shadows primitive|shadows capture", re.I), ".agents/rules/zig-0.13-gotchas.md"),
+    (re.compile(r"undeclared identifier 'ApiError'", re.I), ".agents/rules/zig-0.13-gotchas.md"),
+    (re.compile(r"expected type 'error\{OutOfMemory\}!void'|jsonStringify|stringify\.zig", re.I), ".agents/rules/zig-0.13-gotchas.md"),
+    (re.compile(r"expected type '\[\]u8', found '\[\]const u8'|GenericWriter|ArrayListAligned", re.I), ".agents/rules/zig-0.13-gotchas.md"),
+    (re.compile(r"\[gpa\].*leaked|memory address leaked|Segmentation fault", re.I), ".agents/rules/memory-and-security.md"),
 )
 
 
@@ -259,6 +286,8 @@ def collect_knowledge_texts(root: Path, staged_only: bool) -> tuple[str, str, st
         rel_files = sorted(set(found))
 
     for rel in rel_files:
+        if rel == "docs/vault/Lessons-Learned.md":
+            continue
         txt = read_repo_text(root, rel, staged_only)
         if not txt:
             continue
@@ -413,6 +442,284 @@ def handle_pre_commit(root: Path, run_audit: bool = True) -> int:
                 return res.returncode
 
     return 0
+
+
+def is_noise_error_line(line: str) -> bool:
+    s = line.strip()
+    if not s:
+        return True
+    return any(pat.search(s) for pat in NOISE_LINE_RES)
+
+
+def normalize_compiler_msg(msg: str, root: Path) -> str:
+    clean = msg.replace(str(root), "<repo>")
+    clean = re.sub(r"__anon_\d+", "__anon_N", clean)
+    return clean[:140]
+
+
+def normalize_diagnostic_line(line: str, root: Path) -> tuple[str, str] | None:
+    s = line.strip()
+    if is_noise_error_line(s):
+        return None
+    if LEAK_ADDR_RE.search(s):
+        return ("leak", "[gpa] memory address leaked")
+    if s.startswith("Segmentation fault at address "):
+        return ("panic", "Segmentation fault")
+    m_test = TEST_FAIL_RE.match(s)
+    if m_test:
+        return ("test_fail", m_test.group(1))
+    m_std = STDLIB_DIAG_RE.search(s)
+    if m_std:
+        return ("compiler", normalize_compiler_msg(f"<zig-stdlib>/{m_std.group(1)}: {m_std.group(2)}", root))
+    m_src = DIAG_FILE_RE.search(s)
+    if m_src:
+        return ("compiler", normalize_compiler_msg(m_src.group(2), root))
+    if "panic:" in s.lower():
+        clean = re.sub(r"0x[0-9a-fA-F]+", "0xADDR", s.replace(str(root), "<repo>"))
+        return ("panic", clean[:140])
+    if GENERIC_ERR_RE.match(s):
+        clean = re.sub(r"^\d{4}-\d{2}-\d{2}T\S+\s+\[ERROR\]\s+", "", s)
+        clean = clean.replace(str(root), "<repo>")
+        if re.search(r"src/[A-Za-z0-9_./]+\.zig:\d+:\d+:", clean):
+            clean = re.sub(r"src/[A-Za-z0-9_./]+\.zig:\d+:\d+:\s*", "", clean)
+            return ("compiler", normalize_compiler_msg(clean, root))
+        return ("runtime", clean[:140])
+    return None
+
+
+def analyze_error_log(root: Path) -> dict[str, Any]:
+    err_path = root / "error.log"
+    if not err_path.is_file():
+        return {
+            "exists": False,
+            "total_lines": 0,
+            "filtered_noise": 0,
+            "compiler_counts": Counter(),
+            "leak_count": 0,
+            "panic_counts": Counter(),
+            "test_fail_counts": Counter(),
+            "variant_counts": Counter(),
+        }
+
+    lines = err_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    compiler_counts: Counter[str] = Counter()
+    panic_counts: Counter[str] = Counter()
+    test_fail_counts: Counter[str] = Counter()
+    variant_counts: Counter[str] = Counter()
+    leak_count = 0
+    filtered_noise = 0
+
+    for line in lines:
+        for m in ERR_VARIANT_RE.finditer(line):
+            variant_counts[f"error.{m.group(1)}"] += 1
+        norm = normalize_diagnostic_line(line, root)
+        if norm is None:
+            filtered_noise += 1
+            continue
+        kind, sig = norm
+        if kind == "compiler":
+            compiler_counts[sig] += 1
+        elif kind == "leak":
+            leak_count += 1
+        elif kind == "panic":
+            panic_counts[sig] += 1
+        elif kind == "test_fail":
+            test_fail_counts[sig] += 1
+
+    return {
+        "exists": True,
+        "total_lines": len(lines),
+        "filtered_noise": filtered_noise,
+        "compiler_counts": compiler_counts,
+        "leak_count": leak_count,
+        "panic_counts": panic_counts,
+        "test_fail_counts": test_fail_counts,
+        "variant_counts": variant_counts,
+    }
+
+
+def collect_playbook_summary(root: Path) -> dict[str, Any]:
+    pb_path = root / "docs" / "vault" / "Bug-Playbook.md"
+    if not pb_path.is_file():
+        return {"total_bugs": 0, "tag_counts": Counter(), "bugs": []}
+    text = pb_path.read_text(encoding="utf-8", errors="replace")
+    tag_counts: Counter[str] = Counter()
+    bugs: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        if line.startswith("## BUG-"):
+            m = re.match(r"^##\s+(BUG-\d+):\s*(.+)$", line)
+            if m:
+                bugs.append((m.group(1), m.group(2).strip()))
+            for tag in re.findall(r"#[a-z0-9-]+", line):
+                tag_counts[tag] += 1
+    return {"total_bugs": len(bugs), "tag_counts": tag_counts, "bugs": bugs}
+
+
+def load_rule_docs(root: Path) -> dict[str, str]:
+    docs: dict[str, str] = {}
+    for p in sorted((root / ".agents" / "rules").glob("*.md")):
+        docs[p.relative_to(root).as_posix()] = p.read_text(encoding="utf-8", errors="replace")
+    return docs
+
+
+def classify_diagnostic_coverage(root: Path, sig: str, rule_docs: dict[str, str], vault_corpus: str) -> str:
+    for pat, rel_doc in RULE_SIGNAL_HINTS:
+        if pat.search(sig) and rel_doc in rule_docs:
+            return f"Covered ([{Path(rel_doc).name}](../../{rel_doc}))"
+    token = sig.removeprefix("error.")
+    if token and (token in vault_corpus or any(token in txt for txt in rule_docs.values())):
+        return "Covered (Vault / Rules)"
+    return "Candidate for `/learn`"
+
+
+def md_cell(text: str) -> str:
+    return text.replace("|", "\\|").replace("`", "'")
+
+
+def render_lessons_markdown(
+    root: Path,
+    err_stats: dict[str, Any],
+    pb_summary: dict[str, Any],
+    rule_docs: dict[str, str],
+    vault_corpus: str,
+) -> str:
+    lines = [
+        "---",
+        "tags:",
+        "  - lessons-learned",
+        "  - bug-pattern",
+        "  - zig-0.13",
+        "  - error-analysis",
+        "aliases:",
+        "  - ZigPod Lessons Learned",
+        "status: active",
+        "---",
+        "",
+        "# ZigPod Distilled Bug & Error Lessons",
+        "",
+        "กลับไปที่ [[00-Index]] · คลังบั๊ก [[Bug-Playbook]] · เช็กลิสต์ [[Security-And-Memory-Checklist]] · แดชบอร์ด [[Bug-Dashboard]]",
+        "",
+        "> สร้าง/อัปเดตเมื่อสั่ง `python3 scripts/knowledge-sync.py --distill` (`make distill-lessons`) โดยกรอง hook/build wrapper noise ออกจาก [error.log](../../error.log) และผสานกับ [[Bug-Playbook]] + `.agents/rules/*.md`",
+        "",
+        "## Snapshot Summary",
+        "",
+        "| Metric | Value |",
+        "| :--- | :--- |",
+        f"| Tracked Playbook Bugs | **{pb_summary['total_bugs']}** |",
+        f"| Analyzed `error.log` Lines | **{err_stats['total_lines']}** ({err_stats['filtered_noise']} wrapper/hook noise lines filtered) |",
+        f"| Allocator Leak Sightings (`[gpa]`) | **{err_stats['leak_count']}** |",
+        f"| Unique Compiler Diagnostics | **{len(err_stats['compiler_counts'])}** |",
+        f"| Unique Domain `error.*` Variants | **{len(err_stats['variant_counts'])}** |",
+        "",
+        "## Bug-Playbook Pattern Themes (`BUG-001`–`BUG-NNN`)",
+        "",
+        "| Tag | Count | Focus Area |",
+        "| :--- | ---: | :--- |",
+    ]
+    tag_focus = {
+        "#bug-pattern": "All recorded recurring defect classes",
+        "#security-gate": "Fail-closed validation, path/symlink/URL/timeout & audit integrity",
+        "#memory-safety": "Allocator discipline, chain consistency & pointer/bounds safety",
+        "#reliability": "Lifecycle cleanup/rollback, compose parity, tests & E2E scripts",
+        "#memory-leak": "UAF/OOM/non-sequential cleanup leaks under std.testing.allocator",
+    }
+    for tag, count in pb_summary["tag_counts"].most_common():
+        lines.append(f"| `{tag}` | {count} | {tag_focus.get(tag, 'Tracked invariant')} |")
+    if not pb_summary["tag_counts"]:
+        lines.append("| `-` | 0 | No Bug-Playbook headings found |")
+
+    uncovered: list[str] = []
+    lines.extend([
+        "",
+        "## Top Zig Compiler & Leak Diagnostics (`error.log`)",
+        "",
+        "| Hits | Normalized Diagnostic | Coverage |",
+        "| ---: | :--- | :--- |",
+    ])
+    top_diags = list(err_stats["compiler_counts"].most_common(12))
+    if err_stats["leak_count"]:
+        top_diags.append(("[gpa] memory address leaked", err_stats["leak_count"]))
+    for psig, pcnt in err_stats["panic_counts"].most_common(4):
+        top_diags.append((psig, pcnt))
+    top_diags.sort(key=lambda kv: kv[1], reverse=True)
+    top_diags = top_diags[:15]
+    for sig, cnt in top_diags:
+        cov = classify_diagnostic_coverage(root, sig, rule_docs, vault_corpus)
+        if cov.startswith("Candidate"):
+            uncovered.append(sig)
+        lines.append(f"| {cnt} | `{md_cell(sig)}` | {cov} |")
+    if not top_diags:
+        lines.append("| 0 | `No compiler/leak diagnostics in error.log` | - |")
+
+    lines.extend([
+        "",
+        "## Top Domain Error Variants (`error.<Name>`)",
+        "",
+        "| Hits | Error Variant | Coverage |",
+        "| ---: | :--- | :--- |",
+    ])
+    for var_name, cnt in err_stats["variant_counts"].most_common(15):
+        cov = classify_diagnostic_coverage(root, var_name, rule_docs, vault_corpus)
+        if cov.startswith("Candidate"):
+            uncovered.append(var_name)
+        lines.append(f"| {cnt} | `{md_cell(var_name)}` | {cov} |")
+    if not err_stats["variant_counts"]:
+        lines.append("| 0 | `No domain error.* tokens in error.log` | - |")
+
+    if err_stats["test_fail_counts"]:
+        lines.extend([
+            "",
+            "## Frequent Regression Test Failures During Fixes",
+            "",
+            "| Hits | Test Name |",
+            "| ---: | :--- |",
+        ])
+        for tname, cnt in err_stats["test_fail_counts"].most_common(10):
+            lines.append(f"| {cnt} | `{md_cell(tname)}` |")
+
+    lines.extend(["", "## Distillation Candidates for `/learn`", ""])
+    if uncovered:
+        lines.append("> [!note] Unmapped Error Signatures")
+        for item in uncovered[:10]:
+            lines.append(f"> - `{md_cell(item)}` — not yet referenced in `.agents/rules/*.md` or `docs/vault/`")
+    else:
+        lines.append("All top recurring diagnostics and error variants above are covered by `.agents/rules/*.md` or `docs/vault/`.")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def distill_lessons(root: Path, output_path: Path | None = None) -> dict[str, Any]:
+    target = (output_path if output_path is not None else root / "docs" / "vault" / "Lessons-Learned.md")
+    if not target.is_absolute():
+        target = root / target
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    err_stats = analyze_error_log(root)
+    pb_summary = collect_playbook_summary(root)
+    rule_docs = load_rule_docs(root)
+    _, vault_corpus, _ = collect_knowledge_texts(root, staged_only=False)
+
+    rendered = render_lessons_markdown(root, err_stats, pb_summary, rule_docs, vault_corpus)
+    before = target.read_bytes() if target.is_file() else b""
+    changed = rendered.encode("utf-8") != before
+    if changed or not target.is_file():
+        target.write_text(rendered, encoding="utf-8")
+
+    graph_script = root / "scripts" / "graph-query.py"
+    if graph_script.is_file():
+        res = run_cmd([sys.executable, str(graph_script), "update"], cwd=root, check=False)
+        if res.returncode != 0:
+            raise RuntimeError(f"graph-query.py update failed: {res.stderr.strip() or res.stdout.strip()}")
+
+    return {
+        "output": target.relative_to(root).as_posix() if target.is_relative_to(root) else str(target),
+        "updated": changed,
+        "error_lines": err_stats["total_lines"],
+        "filtered_noise": err_stats["filtered_noise"],
+        "unique_compiler_diags": len(err_stats["compiler_counts"]),
+        "unique_variants": len(err_stats["variant_counts"]),
+        "total_bugs": pb_summary["total_bugs"],
+    }
 
 
 def _write_test_repo(tmp: Path) -> None:
@@ -586,7 +893,34 @@ def run_self_test() -> int:
         )
         assert json.loads(p7.stdout) == {}, f"expected clean stop after docs, got {p7.stdout}"
 
-    print("[PASS] knowledge-sync self-test: all 7 cases passed.")
+        # 8. --distill filters noise, extracts Zig diagnostics/leaks/variants, and flags unmapped signatures
+        (repo / "error.log").write_text(
+            "\n".join([
+                "2026-11-15T00:00:00Z [ERROR] auto-audit detected 1 failure(s):",
+                "FAIL: scripts/security-check.sh failed: ==> [1/4] Checking Zig test suite",
+                "/tmp/fake/src/demo.zig:10:5: error: switch must handle all possibilities",
+                "[gpa] (err): memory address 0xdeadbeef leaked:",
+                "error.InvalidBrandNewThing",
+                "error.InvalidWidget",
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        p8 = subprocess.run(
+            [sys.executable, str(script), "--root", str(repo), "--distill"],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        d8 = json.loads(p8.stdout)
+        assert d8["filtered_noise"] >= 2, f"expected noise filtered, got {d8}"
+        assert d8["unique_compiler_diags"] == 1, f"expected 1 compiler diag, got {d8}"
+        lessons_txt = (repo / "docs" / "vault" / "Lessons-Learned.md").read_text(encoding="utf-8")
+        assert "switch must handle all possibilities" in lessons_txt
+        assert "[gpa] memory address leaked" in lessons_txt
+        assert "auto-audit detected" not in lessons_txt
+        assert "InvalidBrandNewThing" in lessons_txt and "Candidate for `/learn`" in lessons_txt
+
+    print("[PASS] knowledge-sync self-test: all 8 cases passed.")
     return 0
 
 
@@ -594,8 +928,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="ZigPod automatic knowledge sync and drift-check CLI")
     p.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="Repository root directory")
     p.add_argument("--force", action="store_true", help="Force regeneration in --sync mode")
+    p.add_argument("--output", type=Path, default=None, help="Output path for --distill")
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--sync", action="store_true", help="Sync knowledge graph and Bug-Dashboard.md")
+    mode.add_argument("--distill", action="store_true", help="Distill error.log + Bug-Playbook.md into docs/vault/Lessons-Learned.md")
     mode.add_argument("--stop-hook", action="store_true", help="Handle Antigravity Stop lifecycle hook")
     mode.add_argument("--pre-commit", action="store_true", help="Handle Git pre-commit hook")
     mode.add_argument("--self-test", action="store_true", help="Run isolated self-tests")
@@ -612,6 +948,10 @@ def main(argv: list[str] | None = None) -> int:
         res = sync_knowledge(root, paths=None, force=args.force, stage_dashboard=False)
         gaps = inspect_knowledge_gaps(root, staged_only=False)
         res["knowledge_gaps"] = gaps
+        print(json.dumps(res, ensure_ascii=False))
+        return 0
+    if args.distill:
+        res = distill_lessons(root, output_path=args.output)
         print(json.dumps(res, ensure_ascii=False))
         return 0
     if args.stop_hook:
