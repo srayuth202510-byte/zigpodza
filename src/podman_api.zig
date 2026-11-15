@@ -128,6 +128,8 @@ pub fn createContainer(
     name: ?[]const u8,
 ) ![]u8 {
     if (name) |n| try validateIdentifier(n);
+    // Defense in depth: validate image reference before touching the socket (BUG-043).
+    try validateResourceRef(cfg.Image);
     // Defense in depth: never serialize an unsafe mount even if a caller
     // constructed `Mount` values by hand (BUG-014).
     if (cfg.Mounts) |mounts| {
@@ -240,7 +242,7 @@ pub fn stopContainer(client: *const http.Client, logger: *log.Logger, id: []cons
 pub fn restartContainer(client: *const http.Client, logger: *log.Logger, id: []const u8, timeout_secs: ?u32) !void {
     try validateIdentifier(id);
     if (timeout_secs) |t| {
-        if (t > 3600) return ApiError.InvalidIdentifier;
+        if (t > 3600) return ApiError.InvalidTimeout;
     }
 
     const path = if (timeout_secs) |t|
@@ -768,10 +770,14 @@ fn pumpBidirectional(
                 (fds[1].revents & std.posix.POLL.IN) == 0)
             {
                 active_stdin = null;
+                // Signal EOF to peer on local stdin error (BUG-042).
+                std.posix.shutdown(stream.handle, .send) catch {};
             } else if ((fds[1].revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) != 0) {
                 const n = std.posix.read(active_stdin.?, &buf) catch 0;
                 if (n == 0) {
                     active_stdin = null;
+                    // Forward local stdin EOF by shutting down the send half of the socket (BUG-042).
+                    std.posix.shutdown(stream.handle, .send) catch {};
                 } else {
                     try http.writeAllWithTimeout(stream, buf[0..n], timeout_ms);
                 }
@@ -931,6 +937,14 @@ test "end-to-end container lifecycle over mock Unix socket has zero memory leaks
     try std.testing.expectError(
         ApiError.InvalidIdentifier,
         createContainer(&client, &logger, .{ .Image = "alpine:3.20" }, "../bad"),
+    );
+    try std.testing.expectError(
+        ApiError.InvalidIdentifier,
+        createContainer(&client, &logger, .{ .Image = "alpine;rm -rf /" }, null),
+    );
+    try std.testing.expectError(
+        ApiError.InvalidIdentifier,
+        createContainer(&client, &logger, .{ .Image = "web/../../etc/shadow" }, null),
     );
     try std.testing.expectError(ApiError.InvalidIdentifier, removeContainer(&client, &logger, "../bad", true));
 
@@ -1533,7 +1547,7 @@ test "restart, pause, unpause, rename, and removeImage endpoints + validation" {
 
     // Pre-flight validation must reject bad identifiers before touching the socket.
     try std.testing.expectError(ApiError.InvalidIdentifier, restartContainer(&client, &logger, "../bad", 5));
-    try std.testing.expectError(ApiError.InvalidIdentifier, restartContainer(&client, &logger, "web", 99999));
+    try std.testing.expectError(ApiError.InvalidTimeout, restartContainer(&client, &logger, "web", 99999));
     try std.testing.expectError(ApiError.InvalidIdentifier, pauseContainer(&client, &logger, "../bad"));
     try std.testing.expectError(ApiError.InvalidIdentifier, unpauseContainer(&client, &logger, "../bad"));
     try std.testing.expectError(ApiError.InvalidIdentifier, renameContainer(&client, &logger, "web", "../bad"));
@@ -1839,4 +1853,81 @@ test "BUG-032: interactive attach and exec return Error.Timeout on silent upgrad
         http.Error.InvalidResponse,
         pumpBidirectional(alloc, .{ .handle = err_pipe[1] }, "", null, sink.writer(), true, 25),
     );
+}
+
+test "BUG-042: pumpBidirectional shuts down send half on stdin EOF" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-stdin-eof-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const ServerContext = struct {
+        srv: *std.net.Server,
+        saw_eof: bool = false,
+
+        fn run(ctx: *@This()) void {
+            var fds = [_]std.posix.pollfd{.{
+                .fd = ctx.srv.stream.handle,
+                .events = std.posix.POLL.IN,
+                .revents = 0,
+            }};
+            const ready = std.posix.poll(&fds, 2000) catch return;
+            if (ready == 0) return;
+
+            const conn = ctx.srv.accept() catch return;
+            defer conn.stream.close();
+
+            var conn_fds = [_]std.posix.pollfd{.{
+                .fd = conn.stream.handle,
+                .events = std.posix.POLL.IN,
+                .revents = 0,
+            }};
+
+            // 1. Read input forwarded by pumpBidirectional
+            if ((std.posix.poll(&conn_fds, 2000) catch return) == 0) return;
+            var in_buf: [32]u8 = undefined;
+            const n1 = conn.stream.read(&in_buf) catch return;
+            if (!std.mem.eql(u8, in_buf[0..n1], "ping\n")) return;
+
+            // 2. Next read must return 0 because pumpBidirectional shut down send on stdin EOF
+            if ((std.posix.poll(&conn_fds, 2000) catch return) == 0) return;
+            const n2 = conn.stream.read(&in_buf) catch return;
+            if (n2 == 0) {
+                ctx.saw_eof = true;
+                conn.stream.writeAll("pong\n") catch {};
+            }
+        }
+    };
+
+    var server_ctx = ServerContext{ .srv = &server };
+    const thread = try std.Thread.spawn(.{}, ServerContext.run, .{&server_ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client_stream = try std.net.connectUnixSocket(sock_path);
+    defer client_stream.close();
+
+    const pipe_fds = try std.posix.pipe();
+    _ = try std.posix.write(pipe_fds[1], "ping\n");
+    std.posix.close(pipe_fds[1]); // Close pipe write end to trigger EOF after "ping\n"
+
+    var output = std.ArrayList(u8).init(alloc);
+    defer output.deinit();
+
+    try pumpBidirectional(alloc, client_stream, "", pipe_fds[0], output.writer(), true, 500);
+    std.posix.close(pipe_fds[0]);
+
+    thread.join();
+    joined = true;
+
+    try std.testing.expect(server_ctx.saw_eof);
+    try std.testing.expectEqualStrings("pong\n", output.items);
 }

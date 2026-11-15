@@ -22,6 +22,7 @@ pub const ApiError = error{
     InvalidShmSize,
     InvalidUlimit,
     InvalidHealthcheck,
+    InvalidTimeout,
     PolicyViolation,
     InvalidPolicyFile,
     BuildFailed,

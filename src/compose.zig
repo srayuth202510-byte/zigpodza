@@ -301,15 +301,20 @@ fn appendDupPort(alloc: std.mem.Allocator, dst: *[]cli.PortMapping, pm: cli.Port
         dst.* = &.{};
     }
     const ip_dup: ?[]const u8 = if (pm.host_ip) |ip| try alloc.dupe(u8, ip) else null;
-    errdefer if (ip_dup) |ip| alloc.free(ip);
-    const proto_dup = try alloc.dupe(u8, pm.proto);
-    errdefer alloc.free(proto_dup);
-    try list.append(.{
+    const proto_dup = alloc.dupe(u8, pm.proto) catch |err| {
+        if (ip_dup) |ip| alloc.free(ip);
+        return err;
+    };
+    list.append(.{
         .host_ip = ip_dup,
         .host_port = pm.host_port,
         .container_port = pm.container_port,
         .proto = proto_dup,
-    });
+    }) catch |err| {
+        if (ip_dup) |ip| alloc.free(ip);
+        alloc.free(proto_dup);
+        return err;
+    };
     dst.* = try list.toOwnedSlice();
 }
 
@@ -324,10 +329,15 @@ fn appendDupVolume(alloc: std.mem.Allocator, dst: *[]cli.Volume, v: cli.Volume) 
         dst.* = &.{};
     }
     const src_dup = try alloc.dupe(u8, v.source);
-    errdefer alloc.free(src_dup);
-    const dst_dup = try alloc.dupe(u8, v.destination);
-    errdefer alloc.free(dst_dup);
-    try list.append(.{ .source = src_dup, .destination = dst_dup, .readonly = v.readonly });
+    const dst_dup = alloc.dupe(u8, v.destination) catch |err| {
+        alloc.free(src_dup);
+        return err;
+    };
+    list.append(.{ .source = src_dup, .destination = dst_dup, .readonly = v.readonly }) catch |err| {
+        alloc.free(src_dup);
+        alloc.free(dst_dup);
+        return err;
+    };
     dst.* = try list.toOwnedSlice();
 }
 
@@ -342,10 +352,15 @@ fn appendDupLabel(alloc: std.mem.Allocator, dst: *[]cli.Label, lbl: cli.Label) !
         dst.* = &.{};
     }
     const k_dup = try alloc.dupe(u8, lbl.key);
-    errdefer alloc.free(k_dup);
-    const v_dup = try alloc.dupe(u8, lbl.value);
-    errdefer alloc.free(v_dup);
-    try list.append(.{ .key = k_dup, .value = v_dup });
+    const v_dup = alloc.dupe(u8, lbl.value) catch |err| {
+        alloc.free(k_dup);
+        return err;
+    };
+    list.append(.{ .key = k_dup, .value = v_dup }) catch |err| {
+        alloc.free(k_dup);
+        alloc.free(v_dup);
+        return err;
+    };
     dst.* = try list.toOwnedSlice();
 }
 
@@ -517,6 +532,7 @@ pub fn parseComposeYaml(
     if (services.items.len == 0) return ComposeError.InvalidComposeSyntax;
     for (services.items) |s| {
         if (s.image.len == 0) return ComposeError.MissingServiceImage;
+        try pod.validateResourceRef(s.image);
         if (s.network_mode != null and s.networks.len > 0) return ComposeError.InvalidComposeSyntax;
         for (s.networks) |net_name| {
             var declared = false;
@@ -621,6 +637,7 @@ fn applyServiceScalarOrFlow(alloc: std.mem.Allocator, svc: *ComposeService, key:
     if (trimmed.len > 0 and trimmed[0] == '{') return ComposeError.InvalidComposeSyntax;
     const val = unquoteScalar(val_raw);
     if (std.mem.eql(u8, key, "image")) {
+        try pod.validateResourceRef(val);
         const img = try alloc.dupe(u8, val);
         if (svc.image.len > 0) alloc.free(svc.image);
         svc.image = img;
@@ -1700,4 +1717,89 @@ test "BUG-029: compose up rolls back created containers and newly created networ
     thread.join();
     joined = true;
     try std.testing.expectEqual(replies.len, ctx.matched);
+}
+
+test "BUG-043: parseComposeYaml rejects invalid image references" {
+    const alloc = std.testing.allocator;
+    const bad_yaml1 =
+        \\services:
+        \\  app:
+        \\    image: "alpine;rm -rf /"
+    ;
+    try std.testing.expectError(pod.ApiError.InvalidIdentifier, parseComposeYaml(alloc, bad_yaml1, "demo", "/tmp"));
+
+    const bad_yaml2 =
+        \\services:
+        \\  app:
+        \\    image: "web/../../etc/shadow"
+    ;
+    try std.testing.expectError(pod.ApiError.InvalidIdentifier, parseComposeYaml(alloc, bad_yaml2, "demo", "/tmp"));
+}
+
+test "BUG-044: appendDupPort, appendDupVolume, appendDupLabel OOM handling does not double free" {
+    const port_template = cli.PortMapping{
+        .host_ip = "127.0.0.1",
+        .host_port = 8080,
+        .container_port = 80,
+        .proto = "tcp",
+    };
+    var fail_idx: usize = 0;
+    while (fail_idx < 6) : (fail_idx += 1) {
+        var fa = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_idx });
+        const alloc = fa.allocator();
+        var ports: []cli.PortMapping = &.{};
+
+        appendDupPort(alloc, &ports, port_template) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        for (ports) |p| {
+            if (p.host_ip) |ip| alloc.free(ip);
+            alloc.free(p.proto);
+        }
+        alloc.free(ports);
+    }
+
+    const vol_template = cli.Volume{
+        .source = "/tmp/data",
+        .destination = "/data",
+        .readonly = true,
+    };
+    fail_idx = 0;
+    while (fail_idx < 6) : (fail_idx += 1) {
+        var fa = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_idx });
+        const alloc = fa.allocator();
+        var vols: []cli.Volume = &.{};
+
+        appendDupVolume(alloc, &vols, vol_template) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        for (vols) |v| {
+            alloc.free(v.source);
+            alloc.free(v.destination);
+        }
+        alloc.free(vols);
+    }
+
+    const label_template = cli.Label{
+        .key = "app",
+        .value = "web",
+    };
+    fail_idx = 0;
+    while (fail_idx < 6) : (fail_idx += 1) {
+        var fa = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_idx });
+        const alloc = fa.allocator();
+        var labels: []cli.Label = &.{};
+
+        appendDupLabel(alloc, &labels, label_template) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        for (labels) |l| {
+            alloc.free(l.key);
+            alloc.free(l.value);
+        }
+        alloc.free(labels);
+    }
 }

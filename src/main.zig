@@ -363,6 +363,7 @@ fn dispatch(
             }
 
             // Validate identity/network/capability/resource flags before touching the socket.
+            try pod.validateResourceRef(r.image);
             if (r.network) |m| try pod.validateNetworkMode(m);
             if (r.workdir) |w| try pod.validateWorkdir(w);
             if (r.user) |u| try pod.validateUser(u);
@@ -605,6 +606,10 @@ fn reportFailure(logger: *log.Logger, cmd: cli.Command, socket_path: []const u8,
         pod.ApiError.InvalidHealthcheck => logger.deny(
             "api.validateHealthConfig",
             "Rejected invalid --health-cmd / --health-interval configuration.",
+        ),
+        pod.ApiError.InvalidTimeout => logger.deny(
+            "api.restartContainer",
+            "Rejected invalid container restart timeout (must be <= 3600 seconds).",
         ),
         compose.ComposeError.CyclicDependency,
         compose.ComposeError.UnknownDependency,

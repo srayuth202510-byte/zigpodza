@@ -19,9 +19,9 @@ status: active
 
 | Metric | Value |
 | :--- | :--- |
-| Tracked Bug Patterns | **41** (41 Guarded) |
+| Tracked Bug Patterns | **45** (45 Guarded) |
 | Zig Source Modules | **24** |
-| Unit & Integration Tests | **239** |
+| Unit & Integration Tests | **242** |
 | Static Security & Memory Gates | **9/9 PASS** |
 
 ## Guard Coverage Map
@@ -132,6 +132,16 @@ flowchart LR
     BUG041["BUG-041"] --> SEC["[[Security-And-Memory-Checklist]]"]
     BUG041 --> src_podman_validate_zig["src/podman_validate.zig"]
     BUG041 --> src_main_zig["src/main.zig"]
+    BUG042["BUG-042"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG042 --> src_podman_api_zig["src/podman_api.zig"]
+    BUG043["BUG-043"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG043 --> src_podman_images_zig["src/podman_images.zig"]
+    BUG043 --> src_podman_api_zig["src/podman_api.zig"]
+    BUG044["BUG-044"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG044 --> src_compose_zig["src/compose.zig"]
+    BUG045["BUG-045"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG045 --> src_podman_types_zig["src/podman_types.zig"]
+    BUG045 --> src_podman_api_zig["src/podman_api.zig"]
 ```
 
 ## Bug Pattern Registry
@@ -179,6 +189,10 @@ flowchart LR
 | [BUG-039](../../docs/vault/Bug-Playbook.md#L448) | Multi-Line CLI Piped to `grep -q` Causing `BrokenPipe` Teardown Abort | `#bug-pattern` `#reliability` | [podman-e2e.sh](../../scripts/podman-e2e.sh), [smoke.sh](../../scripts/smoke.sh), [auto-audit.sh](../../scripts/auto-audit.sh) | **Guarded** |
 | [BUG-040](../../docs/vault/Bug-Playbook.md#L459) | Silent `else |_| {}` Test Swallowing & Hardcoded Mock `Content-Length` | `#bug-pattern` `#reliability` | [podman_transfer.zig](../../src/podman_transfer.zig), [main.zig](../../src/main.zig), [auto-audit.sh](../../scripts/auto-audit.sh) | **Guarded** |
 | [BUG-041](../../docs/vault/Bug-Playbook.md#L470) | `--shm-size` Error Aliasing (`InvalidCpuLimit`) Corrupting Audit Telemetry | `#bug-pattern` `#security-gate` | [podman_validate.zig](../../src/podman_validate.zig), [main.zig](../../src/main.zig), [podman_types.zig](../../src/podman_types.zig), [policy.zig](../../src/policy.zig), [auto-audit.sh](../../scripts/auto-audit.sh) | **Guarded** |
+| [BUG-042](../../docs/vault/Bug-Playbook.md#L481) | Interactive / Attached Session Hang on Stdin EOF (`pumpBidirectional` missing `shutdown(.send)`) | `#bug-pattern` `#concurrency` | [podman_api.zig](../../src/podman_api.zig) | **Guarded** |
+| [BUG-043](../../docs/vault/Bug-Playbook.md#L490) | Unvalidated Image References in `pullImage`, `createContainer`, and Compose | `#bug-pattern` `#security-gate` | [podman_images.zig](../../src/podman_images.zig), [podman_api.zig](../../src/podman_api.zig), [main.zig](../../src/main.zig), [compose.zig](../../src/compose.zig) | **Guarded** |
+| [BUG-044](../../docs/vault/Bug-Playbook.md#L499) | Double Free on OOM in Compose Slice Builders (`appendDupPort`, `appendDupVolume`, `appendDupLabel`) | `#memory-leak` `#bug-pattern` | [compose.zig](../../src/compose.zig) | **Guarded** |
+| [BUG-045](../../docs/vault/Bug-Playbook.md#L508) | Container Restart Timeout Error Aliasing (`InvalidIdentifier`) Corrupting Audit Telemetry | `#bug-pattern` `#security-gate` | [podman_types.zig](../../src/podman_types.zig), [podman_api.zig](../../src/podman_api.zig), [main.zig](../../src/main.zig) | **Guarded** |
 
 ## Module Test & Allocator Coverage
 
@@ -188,23 +202,23 @@ flowchart LR
 | [cli_specs.zig](../../src/cli_specs.zig) | 724 | 28 | 17 | `std.testing.allocator` |
 | [cli_types.zig](../../src/cli_types.zig) | 714 | 57 | 12 | `std.testing.allocator` |
 | [completion.zig](../../src/completion.zig) | 270 | 2 | 5 | `std.testing.allocator` |
-| [compose.zig](../../src/compose.zig) | 1703 | 14 | 6 | `std.testing.allocator` |
+| [compose.zig](../../src/compose.zig) | 1805 | 14 | 8 | `std.testing.allocator` |
 | [config.zig](../../src/config.zig) | 348 | 9 | 6 | `std.testing.allocator` |
 | [demo.zig](../../src/demo.zig) | 487 | 6 | 2 | `std.testing.allocator` |
 | [http.zig](../../src/http.zig) | 846 | 23 | 6 | `std.testing.allocator` |
 | [http_parser.zig](../../src/http_parser.zig) | 278 | 2 | 9 | `std.testing.allocator` |
 | [http_types.zig](../../src/http_types.zig) | 268 | 19 | 11 | `std.testing.allocator` |
 | [log.zig](../../src/log.zig) | 850 | 20 | 12 | `std.testing.allocator` |
-| [main.zig](../../src/main.zig) | 1108 | 2 | 4 | `gpa.deinit() != .leak` |
-| [podman_api.zig](../../src/podman_api.zig) | 1842 | 118 | 14 | `std.testing.allocator` |
+| [main.zig](../../src/main.zig) | 1113 | 2 | 4 | `gpa.deinit() != .leak` |
+| [podman_api.zig](../../src/podman_api.zig) | 1933 | 118 | 15 | `std.testing.allocator` |
 | [podman_build.zig](../../src/podman_build.zig) | 594 | 8 | 6 | `std.testing.allocator` |
-| [podman_images.zig](../../src/podman_images.zig) | 665 | 7 | 7 | `std.testing.allocator` |
+| [podman_images.zig](../../src/podman_images.zig) | 671 | 7 | 7 | `std.testing.allocator` |
 | [podman_logs.zig](../../src/podman_logs.zig) | 838 | 10 | 8 | `std.testing.allocator` |
 | [podman_pods.zig](../../src/podman_pods.zig) | 331 | 4 | 4 | `std.testing.allocator` |
 | [podman_system.zig](../../src/podman_system.zig) | 1161 | 17 | 6 | `std.testing.allocator` |
 | [podman_test_helpers.zig](../../src/podman_test_helpers.zig) | 308 | 4 | 7 | `std.testing.allocator` |
 | [podman_transfer.zig](../../src/podman_transfer.zig) | 1566 | 9 | 10 | `std.testing.allocator` |
-| [podman_types.zig](../../src/podman_types.zig) | 1061 | 70 | 35 | `std.testing.allocator` |
+| [podman_types.zig](../../src/podman_types.zig) | 1062 | 70 | 35 | `std.testing.allocator` |
 | [podman_validate.zig](../../src/podman_validate.zig) | 1008 | 49 | 17 | `std.testing.allocator` |
 | [policy.zig](../../src/policy.zig) | 389 | 18 | 5 | `std.testing.allocator` |
 | [utils.zig](../../src/utils.zig) | 42 | 3 | 2 | `stack-only (no heap)` |
@@ -511,3 +525,31 @@ flowchart LR
 - **Root Cause**: นำ `ApiError` จาก validator เดิมมา reuse ข้ามโดเมนเมื่อเพิ่ม flag ใหม่
 - **Fix**: เพิ่ม `ApiError.InvalidShmSize` ใน `src/podman_types.zig`, คืนจาก `validateShmSize` พร้อม `max_shm_bytes`, map เป็น `"api.validateShmSize"` ใน `src/main.zig`, และเพิ่ม boundary test ใน `src/policy.zig`; เพิ่ม static check ใน `scripts/auto-audit.sh`
 - **Prevention**: ทุก validation domain ใหม่ต้องมี `ApiError` variant และ audit rule เฉพาะของตัวเอง — ห้าม alias ไปใช้ error ของ flag อื่น
+
+### BUG-042 — Interactive / Attached Session Hang on Stdin EOF (`pumpBidirectional` missing `shutdown(.send)`)
+- **Source**: [docs/vault/Bug-Playbook.md:481](../../docs/vault/Bug-Playbook.md#L481) · **Status**: `Guarded`
+- **Symptom**: เมื่อรัน interactive/attached session (`zigpod run -i ...` หรือ `zigpod exec -i ...`) โดยส่ง input ผ่าน pipe หรือกด Ctrl-D (stdin EOF) โปรเซสฝั่งคอนเทนเนอร์ไม่ได้รับสัญญาณสิ้นสุด input และค้างจน interactive timeout (5 นาที)
+- **Root Cause**: ใน `pumpBidirectional` ของ `src/podman_api.zig` เมื่อ `active_stdin` อ่านได้ 0 ไบต์ (EOF) หรือเจอ `POLL.ERR`/`NVAL` ตัวแปร `active_stdin` ถูกรีเซ็ตเป็น `null` แต่ไม่ได้ทำ half-close บน socket stream ทำให้ runtime/conmon ฝั่งเซิร์ฟเวอร์ยังคงรอข้อมูลต่อ
+- **Fix**: เมื่อ `active_stdin` ได้รับ EOF หรือ error ให้เรียก `std.posix.shutdown(stream.handle, .send) catch {};` เพื่อส่งสัญญาณ TCP/Unix FIN เฉพาะขา write โดยคงขา recv ไว้รับ output จากคอนเทนเนอร์
+- **Prevention**: สตรีมแบบสองทิศทาง (duplex) ที่จำลอง stdin/stdout ต้องส่ง half-close (`shutdown(.send)`) เมื่อ input ฝั่ง client สิ้นสุด เพื่อแจ้ง container init process ให้ทราบ EOF
+
+### BUG-043 — Unvalidated Image References in `pullImage`, `createContainer`, and Compose
+- **Source**: [docs/vault/Bug-Playbook.md:490](../../docs/vault/Bug-Playbook.md#L490) · **Status**: `Guarded`
+- **Symptom**: การส่งชื่ออิมเมจที่มีอักขระ shell injection (`alpine;rm -rf /`) หรือ path traversal (`web/../../etc/shadow`) ใน `pullImage`, `createContainer`, หรือ `compose.yaml` สามารถหลุดผ่าน pre-flight validation ไปกระทบ REST API socket ได้โดยตรง
+- **Root Cause**: มีการเรียก `validateResourceRef` เฉพาะใน `removeImage` และ `inspect` แต่ขาดหายไปใน `pullImage` (`src/podman_images.zig`), `createContainer` (`src/podman_api.zig`), CLI `run` dispatch (`src/main.zig`), และ Compose parser (`src/compose.zig`)
+- **Fix**: เพิ่ม `try validateResourceRef(image);` ในทุก entry point (`pullImage`, `createContainer`, CLI run dispatch, `applyServiceScalarOrFlow`, และ `parseComposeYaml` service validation loop)
+- **Prevention**: ทุก input ที่ระบุอิมเมจหรือทรัพยากรภายนอกต้องผ่าน `validateResourceRef` ตั้งแต่ pre-flight validation ก่อนสร้าง request path หรือ JSON payload
+
+### BUG-044 — Double Free on OOM in Compose Slice Builders (`appendDupPort`, `appendDupVolume`, `appendDupLabel`)
+- **Source**: [docs/vault/Bug-Playbook.md:499](../../docs/vault/Bug-Playbook.md#L499) · **Status**: `Guarded`
+- **Symptom**: เมื่อเกิด OutOfMemory ขณะ parse Compose file ที่มี `ports`, `volumes`, หรือ `labels` โปรเซสเกิด panic / crash จาก double free ใน memory allocator
+- **Root Cause**: ใน `appendDupPort`, `appendDupVolume`, `appendDupLabel` ของ `src/compose.zig` มีการตั้ง function-level `errdefer` บนฟิลด์ที่ duped ใหม่ แต่เมื่อ `list.append` นำเข้า `list.items` สำเร็จแล้ว `dst.* = try list.toOwnedSlice();` เกิด OOM ทั้ง outer `errdefer` (ที่วน loop ฟรีทุกตัวใน `list.items`) และ inner `errdefer` ต่างก็สั่ง free ซ้ำที่ pointer เดิม
+- **Fix**: ปรับโครงสร้าง ownership transfer โดยใช้ `catch` จัดการ free ก่อน `list.append` และไม่คง `errdefer` ที่ชี้ไปยัง pointer ที่ถูกโอนกรรมสิทธิ์เข้า `list.items` แล้ว
+- **Prevention**: ปฏิบัติตามกฎ Ownership & Error Domains — โอนย้ายกรรมสิทธิ์หน่วยความจำอย่างหมดจด (`catch` free ก่อน append) ห้ามเก็บ `errdefer` ของ pointer เดียวกันซ้อนกับ container errdefer
+
+### BUG-045 — Container Restart Timeout Error Aliasing (`InvalidIdentifier`) Corrupting Audit Telemetry
+- **Source**: [docs/vault/Bug-Playbook.md:508](../../docs/vault/Bug-Playbook.md#L508) · **Status**: `Guarded`
+- **Symptom**: เมื่อสั่ง `restartContainer` ด้วย `timeout_secs > 3600` ฟังก์ชันคืน `ApiError.InvalidIdentifier` ทำให้ `reportFailure` บันทึก deny rule `"api.validateIdentifier"` แทนที่จะเป็น rule เฉพาะของ restart timeout
+- **Root Cause**: Reuse `InvalidIdentifier` แทนที่จะนิยาม dedicated `InvalidTimeout` สำหรับ timeout validation domain
+- **Fix**: เพิ่ม `ApiError.InvalidTimeout` ใน `src/podman_types.zig`, คืนจาก `restartContainer` ใน `src/podman_api.zig`, และ map เข้า deny rule `"api.restartContainer"` ใน `src/main.zig`
+- **Prevention**: ห้าม reuse error code ข้าม validation domain — แต่ละขอบเขตการตรวจสอบต้องมี error code และ audit rule ที่สะท้อนสาเหตุที่แท้จริง

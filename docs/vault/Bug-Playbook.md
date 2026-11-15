@@ -475,3 +475,39 @@ status: active
   - เพิ่ม `ApiError.InvalidShmSize` ใน [src/podman_types.zig](../../src/podman_types.zig), คืนจาก `validateShmSize` พร้อม `max_shm_bytes`, map เป็น `"api.validateShmSize"` ใน [src/main.zig](../../src/main.zig), และเพิ่ม boundary test ใน [src/policy.zig](../../src/policy.zig)
   - เพิ่ม static check ใน [scripts/auto-audit.sh](../../scripts/auto-audit.sh)
 - **Prevention Rule**: ทุก validation domain ใหม่ต้องมี `ApiError` variant และ audit rule เฉพาะของตัวเอง — ห้าม alias ไปใช้ error ของ flag อื่น
+
+---
+
+## BUG-042: Interactive / Attached Session Hang on Stdin EOF (`pumpBidirectional` missing `shutdown(.send)`) `#bug-pattern` `#concurrency`
+
+- **Symptom**: เมื่อรัน interactive/attached session (`zigpod run -i ...` หรือ `zigpod exec -i ...`) โดยส่ง input ผ่าน pipe หรือกด Ctrl-D (stdin EOF) โปรเซสฝั่งคอนเทนเนอร์ไม่ได้รับสัญญาณสิ้นสุด input และค้างจน interactive timeout (5 นาที)
+- **Root Cause**: ใน `pumpBidirectional` ของ [src/podman_api.zig](../../src/podman_api.zig) เมื่อ `active_stdin` อ่านได้ 0 ไบต์ (EOF) หรือเจอ `POLL.ERR`/`NVAL` ตัวแปร `active_stdin` ถูกรีเซ็ตเป็น `null` แต่ไม่ได้ทำ half-close บน socket stream ทำให้ runtime/conmon ฝั่งเซิร์ฟเวอร์ยังคงรอข้อมูลต่อ
+- **Fix**: เมื่อ `active_stdin` ได้รับ EOF หรือ error ให้เรียก `std.posix.shutdown(stream.handle, .send) catch {};` เพื่อส่งสัญญาณ TCP/Unix FIN เฉพาะขา write โดยคงขา recv ไว้รับ output จากคอนเทนเนอร์
+- **Prevention Rule**: สตรีมแบบสองทิศทาง (duplex) ที่จำลอง stdin/stdout ต้องส่ง half-close (`shutdown(.send)`) เมื่อ input ฝั่ง client สิ้นสุด เพื่อแจ้ง container init process ให้ทราบ EOF
+
+---
+
+## BUG-043: Unvalidated Image References in `pullImage`, `createContainer`, and Compose `#bug-pattern` `#security-gate`
+
+- **Symptom**: การส่งชื่ออิมเมจที่มีอักขระ shell injection (`alpine;rm -rf /`) หรือ path traversal (`web/../../etc/shadow`) ใน `pullImage`, `createContainer`, หรือ `compose.yaml` สามารถหลุดผ่าน pre-flight validation ไปกระทบ REST API socket ได้โดยตรง
+- **Root Cause**: มีการเรียก `validateResourceRef` เฉพาะใน `removeImage` และ `inspect` แต่ขาดหายไปใน `pullImage` ([src/podman_images.zig](../../src/podman_images.zig)), `createContainer` ([src/podman_api.zig](../../src/podman_api.zig)), CLI `run` dispatch ([src/main.zig](../../src/main.zig)), และ Compose parser ([src/compose.zig](../../src/compose.zig))
+- **Fix**: เพิ่ม `try validateResourceRef(image);` ในทุก entry point (`pullImage`, `createContainer`, CLI run dispatch, `applyServiceScalarOrFlow`, และ `parseComposeYaml` service validation loop)
+- **Prevention Rule**: ทุก input ที่ระบุอิมเมจหรือทรัพยากรภายนอกต้องผ่าน `validateResourceRef` ตั้งแต่ pre-flight validation ก่อนสร้าง request path หรือ JSON payload
+
+---
+
+## BUG-044: Double Free on OOM in Compose Slice Builders (`appendDupPort`, `appendDupVolume`, `appendDupLabel`) `#memory-leak` `#bug-pattern`
+
+- **Symptom**: เมื่อเกิด OutOfMemory ขณะ parse Compose file ที่มี `ports`, `volumes`, หรือ `labels` โปรเซสเกิด panic / crash จาก double free ใน memory allocator
+- **Root Cause**: ใน `appendDupPort`, `appendDupVolume`, `appendDupLabel` ของ [src/compose.zig](../../src/compose.zig) มีการตั้ง function-level `errdefer` บนฟิลด์ที่ duped ใหม่ แต่เมื่อ `list.append` นำเข้า `list.items` สำเร็จแล้ว `dst.* = try list.toOwnedSlice();` เกิด OOM ทั้ง outer `errdefer` (ที่วน loop ฟรีทุกตัวใน `list.items`) และ inner `errdefer` ต่างก็สั่ง free ซ้ำที่ pointer เดิม
+- **Fix**: ปรับโครงสร้าง ownership transfer โดยใช้ `catch` จัดการ free ก่อน `list.append` และไม่คง `errdefer` ที่ชี้ไปยัง pointer ที่ถูกโอนกรรมสิทธิ์เข้า `list.items` แล้ว
+- **Prevention Rule**: ปฏิบัติตามกฎ Ownership & Error Domains — โอนย้ายกรรมสิทธิ์หน่วยความจำอย่างหมดจด (`catch` free ก่อน append) ห้ามเก็บ `errdefer` ของ pointer เดียวกันซ้อนกับ container errdefer
+
+---
+
+## BUG-045: Container Restart Timeout Error Aliasing (`InvalidIdentifier`) Corrupting Audit Telemetry `#bug-pattern` `#security-gate`
+
+- **Symptom**: เมื่อสั่ง `restartContainer` ด้วย `timeout_secs > 3600` ฟังก์ชันคืน `ApiError.InvalidIdentifier` ทำให้ `reportFailure` บันทึก deny rule `"api.validateIdentifier"` แทนที่จะเป็น rule เฉพาะของ restart timeout
+- **Root Cause**: Reuse `InvalidIdentifier` แทนที่จะนิยาม dedicated `InvalidTimeout` สำหรับ timeout validation domain
+- **Fix**: เพิ่ม `ApiError.InvalidTimeout` ใน [src/podman_types.zig](../../src/podman_types.zig), คืนจาก `restartContainer` ใน [src/podman_api.zig](../../src/podman_api.zig), และ map เข้า deny rule `"api.restartContainer"` ใน [src/main.zig](../../src/main.zig)
+- **Prevention Rule**: ห้าม reuse error code ข้าม validation domain — แต่ละขอบเขตการตรวจสอบต้องมี error code และ audit rule ที่สะท้อนสาเหตุที่แท้จริง

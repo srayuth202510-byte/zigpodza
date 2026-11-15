@@ -253,6 +253,34 @@ else
     fail "Missing executable knowledge-sync.py / .githooks/pre-commit or Stop hook config in .agents/hooks.json."
 fi
 
+# 8n. Require pumpBidirectional socket shutdown on stdin EOF (BUG-042)
+if has_match 'std\.posix\.shutdown\(stream\.handle, \.send\)' "src/podman_api.zig"; then
+    pass "pumpBidirectional socket shutdown on stdin EOF enforced (BUG-042)."
+else
+    fail "Missing std.posix.shutdown(stream.handle, .send) in src/podman_api.zig (see BUG-042)."
+fi
+
+# 8o. Require validateResourceRef in pullImage, createContainer, CLI run, and compose (BUG-043)
+if has_match 'try validateResourceRef\(image\)' "src/podman_images.zig" && has_match 'try validateResourceRef\(cfg\.Image\)' "src/podman_api.zig" && has_match 'try pod\.validateResourceRef\(r\.image\)' "src/main.zig" && has_match 'try pod\.validateResourceRef\(val\)' "src/compose.zig"; then
+    pass "validateResourceRef enforced across pull, create, run, and compose (BUG-043)."
+else
+    fail "Missing validateResourceRef check in pullImage, createContainer, main run, or compose (see BUG-043)."
+fi
+
+# 8p. Forbid double-freeing errdefer after append in compose slice builders (BUG-044)
+if ! has_match 'errdefer alloc\.free\(proto_dup\)' "src/compose.zig" && ! has_match 'errdefer alloc\.free\(dst_dup\)' "src/compose.zig" && ! has_match 'errdefer alloc\.free\(v_dup\)' "src/compose.zig"; then
+    pass "No double-freeing errdefer in compose slice builders (BUG-044)."
+else
+    fail "Found redundant errdefer causing double free on OOM in src/compose.zig (see BUG-044)."
+fi
+
+# 8q. Require dedicated InvalidTimeout error variant and api.restartContainer deny rule (BUG-045)
+if has_match 'InvalidTimeout' "src/podman_types.zig" && has_match 'return ApiError\.InvalidTimeout' "src/podman_api.zig" && has_match 'api\.restartContainer' "src/main.zig"; then
+    pass "Dedicated ApiError.InvalidTimeout and api.restartContainer telemetry enforced (BUG-045)."
+else
+    fail "Missing InvalidTimeout variant or api.restartContainer deny rule (see BUG-045)."
+fi
+
 # 9. Run security-check.sh (includes zig build test & ELF hardening when zig is installed)
 SEC_OUT=""
 if SEC_OUT="$("$ROOT_DIR/scripts/security-check.sh" 2>&1)"; then

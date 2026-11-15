@@ -96,6 +96,7 @@ pub fn listImagesJson(client: *const http.Client, logger: *log.Logger, writer: a
 }
 
 pub fn pullImage(client: *const http.Client, logger: *log.Logger, image: []const u8, writer: anytype) !void {
+    try validateResourceRef(image);
     var path_buf = std.ArrayList(u8).init(client.allocator);
     defer path_buf.deinit();
     try path_buf.appendSlice(api_prefix ++ "/images/create?fromImage=");
@@ -589,6 +590,11 @@ test "pullImage streams status lines and fails closed on error line and HTTP fai
 
     var out = std.ArrayList(u8).init(alloc);
     defer out.deinit();
+
+    // Pre-flight image validation must reject bad identifiers before touching the socket (BUG-043).
+    try std.testing.expectError(ApiError.InvalidIdentifier, pullImage(&client, &logger, "alpine;rm -rf /", out.writer()));
+    try std.testing.expectError(ApiError.InvalidIdentifier, pullImage(&client, &logger, "web/../../etc/shadow", out.writer()));
+    try std.testing.expectError(ApiError.InvalidIdentifier, pullImage(&client, &logger, "", out.writer()));
 
     try pullImage(&client, &logger, "alpine:3.20", out.writer());
     try std.testing.expect(std.mem.indexOf(u8, out.items, "Pulling from library/alpine") != null);

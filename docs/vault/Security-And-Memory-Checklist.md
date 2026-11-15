@@ -28,6 +28,7 @@ status: active
 - [ ] ห้ามฝังการจองหน่วยความจำ (`alloc.dupe`) ไว้ภายใน argument list ของฟังก์ชันที่อาจคืน error — ต้องมี `errdefer` ชัดเจน (BUG-035)
 - [ ] `repairAuditTail` ต้องทำงานใน **write path** ของ `audit.log` ภายใต้ `lockAudit` และห้าม truncate ทับ entry 5-field สมบูรณ์ที่ขาดเพียง `\n` (BUG-030, BUG-036)
 - [ ] `compose up` ต้องติดตาม container หลัง `createContainer` สำเร็จ (ก่อน `startContainer`) และเฉพาะ network ที่สร้างใหม่ในรอบนั้น พร้อม `errdefer rollbackComposeUp` หลัง slice cleanup `defer` (BUG-029)
+- [ ] `appendDupPort`, `appendDupVolume`, `appendDupLabel` ใน `compose.zig` ต้อง transfer ownership ก่อน append (`catch` free) และไม่คง function-level `errdefer` ที่ชี้ไปยัง pointer ที่ append เข้า `list.items` แล้ว ป้องกัน double free เมื่อ `toOwnedSlice` เกิด OOM (BUG-044)
 
 ## 2. Protocol & Input Security Gates `#security-gate`
 
@@ -59,6 +60,9 @@ status: active
 - [ ] ไฟล์ log/audit ต้องเปิดแบบ fail-closed: `O_NOFOLLOW` (ห้าม symlink) + `fchmod 0o640` หลังเปิด ไม่พึ่งแค่ mode argument ตอน create และ `zigpod.toml` ต้องเป็นไฟล์ธรรมดาของ UID ปัจจุบัน ไม่มีสิทธิ์ `g+w`/`o+w` พร้อม validate `socket_path` (BUG-031, BUG-033)
 - [ ] `verifyAuditFile` และ `writeAuditJson` ใช้ `evaluateAuditContent`/`parseAuditFields` ร่วมกัน แยก uncommitted tail ด้วยความสมบูรณ์ของเนื้อหา (5 field + hash 64 hex) และทดสอบ corrupt ถึงไบต์สุดท้าย `\n` ใน fuzz (BUG-036)
 - [ ] `compose.yaml` parser fail-closed (`InvalidComposeSyntax`) สำหรับ unsupported property, scalar/block/inline `{...}`, และ long-syntax `- type: bind`; service `networks:` ต้องประกาศอยู่ใน `networks:`, ไม่ขัดกับ `network_mode:`, ตรวจ `policy.isNetworkAllowed`, และส่งผ่าน `NetworkingConfig.EndpointsConfig` + label `com.docker.compose.network` โดยคง allow-list ของ `validateNetworkMode` ครบ (BUG-016, BUG-027, BUG-028)
+- [ ] ทุก entry point ที่รับ image reference (`pullImage`, `createContainer`, CLI run dispatch, Compose parser) ต้องผ่าน `validateResourceRef` แบบ pre-flight (BUG-043)
+- [ ] การ forward duplex stream ใน `pumpBidirectional` ต้องส่ง `std.posix.shutdown(stream.handle, .send)` เมื่อ stdin EOF/error ป้องกัน container init process แขวนรอ input (BUG-042)
+- [ ] `restartContainer` เมื่อ `timeout_secs > 3600` ต้องคืน `ApiError.InvalidTimeout` และ map เป็น `"api.restartContainer"` deny telemetry (ห้าม alias เป็น `InvalidIdentifier`) (BUG-045)
 
 ## 3. Logging, Tamper Evidence & Operations
 
