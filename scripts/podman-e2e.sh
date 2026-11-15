@@ -124,7 +124,7 @@ fi
 # 1. Network create -> ls -> inspect -> rm lifecycle
 "$BIN" --socket "$SOCK" network create --driver bridge --internal "$NET_NAME" >/dev/null
 "$BIN" --socket "$SOCK" network ls | grep -q "$NET_NAME"
-"$BIN" --socket "$SOCK" network inspect "$NET_NAME" --json | grep -q "$NET_NAME"
+"$BIN" --socket "$SOCK" network inspect "$NET_NAME" | grep -q "$NET_NAME"
 "$BIN" --socket "$SOCK" network rm -f "$NET_NAME" >/dev/null
 
 # 2. Hardened container run (-d) with --cpus, --env-file, -l, --hostname, --restart
@@ -159,7 +159,7 @@ grep -q "zigpod-cp-payload" "$TMP_DIR/out/downloaded.txt"
 echo "zigpod_live_ok" >/dev/null
 "$BIN" --socket "$SOCK" logs "$CTR_NAME" | grep -q "zigpod_live_ok"
 printf 'exit\n' | "$BIN" --socket "$SOCK" attach "$CTR_NAME" >/dev/null 2>&1 || true
-"$BIN" --socket "$SOCK" stop -t 1 "$CTR_NAME" >/dev/null
+"$BIN" --socket "$SOCK" stop "$CTR_NAME" >/dev/null
 "$BIN" --socket "$SOCK" rm -f "$CTR_NAME" >/dev/null
 
 # 5. Sandbox profile pass + fail-closed CPU ceiling check

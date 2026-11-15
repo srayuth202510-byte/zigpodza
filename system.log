@@ -415,3 +415,17 @@
 2026-11-15T09:59:54Z [INFO] auto-audit passed (hook=true)
 2026-11-15T10:00:05Z [INFO] auto-audit passed (hook=false)
 2026-11-15T10:00:06Z [INFO] auto-audit passed (hook=false)
+2026-11-15T10:07:43Z [INFO] auto-audit passed (hook=true)
+2026-11-15T10:08:11Z [INFO] zigpod 0.1.0 command=system socket=/tmp/zigpod-real-e2e.bEHlQb/podman.sock
+2026-11-15T10:08:11Z [DEBUG] GET /v1.40/_ping
+2026-11-15T10:08:11Z [INFO] system ping succeeded
+2026-11-15T10:08:24Z [INFO] auto-audit passed (hook=true)
+2026-11-15T10:08:40Z [INFO] zigpod 0.1.0 command=system socket=/tmp/zigpod-real-e2e.XPXa5W/podman.sock
+2026-11-15T10:08:40Z [DEBUG] GET /v1.40/_ping
+2026-11-15T10:08:40Z [INFO] system ping succeeded
+2026-11-15T10:09:25Z [INFO] auto-audit passed (hook=true)
+2026-11-15T10:09:53Z [INFO] zigpod 0.1.0 command=system socket=/tmp/zigpod-real-e2e.uoY65I/podman.sock
+2026-11-15T10:09:53Z [DEBUG] GET /v1.40/_ping
+2026-11-15T10:09:53Z [INFO] system ping succeeded
+2026-11-15T10:10:21Z [INFO] auto-audit passed (hook=false)
+2026-11-15T10:10:21Z [INFO] auto-audit passed (hook=false)
