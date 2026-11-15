@@ -223,6 +223,25 @@ else
     fail "Missing write-path audit tail repair in Logger.log or shared complete-entry verification (see BUG-030/BUG-036)."
 fi
 
+# 8l. Require interactive poll timeout checks, build entry errdefer/OOM test, and bounded socket writes (BUG-032 / BUG-035 / BUG-037)
+if ! has_match '_\s*=\s*(try\s+)?std\.posix\.poll\(' "src/" && has_match 'interactive_timeout_ms' "src/http_types.zig" && has_match 'interactiveTimeoutMs\(' "src/podman_api.zig"; then
+    pass "All std.posix.poll results are checked and interactive sessions enforce bounded timeout (BUG-032)."
+else
+    fail "Found discarded std.posix.poll result in src/ or missing interactive_timeout_ms deadline (see BUG-032)."
+fi
+
+if has_match 'errdefer alloc\.free\(name\);' "src/podman_build.zig" && has_match 'checkAllAllocationFailures' "src/podman_build.zig" && ! has_match '\.name\s*=\s*try\s+alloc\.dupe' "src/podman_build.zig"; then
+    pass "Build context entry allocation uses explicit errdefer and OOM regression coverage (BUG-035)."
+else
+    fail "Inline .name alloc.dupe without errdefer or missing OOM test in src/podman_build.zig (see BUG-035)."
+fi
+
+if has_match 'pub fn writeAllWithTimeout\(' "src/http.zig" && has_match 'try writeAllWithTimeout\(' "src/http.zig" && has_match 'try http\.writeAllWithTimeout\(' "src/podman_api.zig" && ! has_match 'try stream\.writeAll\(' "src/http.zig" && ! has_match 'try stream\.writeAll\(' "src/podman_api.zig"; then
+    pass "Socket writes enforce writeAllWithTimeout across http.zig and podman_api.zig (BUG-037)."
+else
+    fail "Missing writeAllWithTimeout guard or unguarded 'try stream.writeAll' remains (see BUG-037)."
+fi
+
 # 9. Run security-check.sh (includes zig build test & ELF hardening when zig is installed)
 SEC_OUT=""
 if SEC_OUT="$("$ROOT_DIR/scripts/security-check.sh" 2>&1)"; then

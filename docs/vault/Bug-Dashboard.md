@@ -21,7 +21,7 @@ status: active
 | :--- | :--- |
 | Tracked Bug Patterns | **41** (41 Guarded) |
 | Zig Source Modules | **24** |
-| Unit & Integration Tests | **236** |
+| Unit & Integration Tests | **239** |
 | Static Security & Memory Gates | **9/9 PASS** |
 
 ## Guard Coverage Map
@@ -107,6 +107,7 @@ flowchart LR
     BUG031 --> src_log_zig["src/log.zig"]
     BUG032["BUG-032"] --> SEC["[[Security-And-Memory-Checklist]]"]
     BUG032 --> src_podman_api_zig["src/podman_api.zig"]
+    BUG032 --> src_http_types_zig["src/http_types.zig"]
     BUG033["BUG-033"] --> SEC["[[Security-And-Memory-Checklist]]"]
     BUG033 --> src_config_zig["src/config.zig"]
     BUG034["BUG-034"] --> SEC["[[Security-And-Memory-Checklist]]"]
@@ -114,10 +115,12 @@ flowchart LR
     BUG034 --> src_podman_types_zig["src/podman_types.zig"]
     BUG035["BUG-035"] --> SEC["[[Security-And-Memory-Checklist]]"]
     BUG035 --> src_podman_build_zig["src/podman_build.zig"]
+    BUG035 --> scripts_auto_audit_sh["scripts/auto-audit.sh"]
     BUG036["BUG-036"] --> SEC["[[Security-And-Memory-Checklist]]"]
     BUG036 --> src_log_zig["src/log.zig"]
     BUG037["BUG-037"] --> SEC["[[Security-And-Memory-Checklist]]"]
     BUG037 --> src_http_zig["src/http.zig"]
+    BUG037 --> src_podman_api_zig["src/podman_api.zig"]
     BUG038["BUG-038"] --> SEC["[[Security-And-Memory-Checklist]]"]
     BUG038 --> src_compose_zig["src/compose.zig"]
     BUG039["BUG-039"] --> SEC["[[Security-And-Memory-Checklist]]"]
@@ -166,12 +169,12 @@ flowchart LR
 | [BUG-029](../../docs/vault/Bug-Playbook.md#L330) | `compose up` Missing Rollback on Partial Failure | `#bug-pattern` `#reliability` | [compose.zig](../../src/compose.zig) | **Guarded** |
 | [BUG-030](../../docs/vault/Bug-Playbook.md#L341) | Audit Tail Repair Only Runs at `Logger.init` | `#bug-pattern` `#memory-safety` | [log.zig](../../src/log.zig) | **Guarded** |
 | [BUG-031](../../docs/vault/Bug-Playbook.md#L352) | Log Files Follow Symlinks and Do Not Enforce Mode 0640 | `#bug-pattern` `#security-gate` | [config.zig](../../src/config.zig), [log.zig](../../src/log.zig) | **Guarded** |
-| [BUG-032](../../docs/vault/Bug-Playbook.md#L364) | Attach/Exec Poll Timeout Discarded → Infinite Loop | `#bug-pattern` `#security-gate` | [podman_api.zig](../../src/podman_api.zig) | **Guarded** |
+| [BUG-032](../../docs/vault/Bug-Playbook.md#L364) | Attach/Exec Poll Timeout Discarded → Infinite Loop | `#bug-pattern` `#security-gate` | [podman_api.zig](../../src/podman_api.zig), [http_types.zig](../../src/http_types.zig), [auto-audit.sh](../../scripts/auto-audit.sh) | **Guarded** |
 | [BUG-033](../../docs/vault/Bug-Playbook.md#L376) | Implicit `zigpod.toml` Can Redirect the API Socket | `#bug-pattern` `#security-gate` | [config.zig](../../src/config.zig) | **Guarded** |
 | [BUG-034](../../docs/vault/Bug-Playbook.md#L389) | `HostConfig.PortBindings` Not Re-Validated → `catch unreachable` Panic | `#bug-pattern` `#memory-safety` | [podman_api.zig](../../src/podman_api.zig), [podman_types.zig](../../src/podman_types.zig) | **Guarded** |
-| [BUG-035](../../docs/vault/Bug-Playbook.md#L401) | Build Context Entry Name Leak on Append Failure | `#bug-pattern` `#memory-leak` | [podman_build.zig](../../src/podman_build.zig) | **Guarded** |
+| [BUG-035](../../docs/vault/Bug-Playbook.md#L401) | Build Context Entry Name Leak on Append Failure | `#bug-pattern` `#memory-leak` | [podman_build.zig](../../src/podman_build.zig), [auto-audit.sh](../../scripts/auto-audit.sh) | **Guarded** |
 | [BUG-036](../../docs/vault/Bug-Playbook.md#L412) | `verifyAuditFile` Ignores a Complete Final Entry Without Trailing Newline | `#bug-pattern` `#security-gate` | [log.zig](../../src/log.zig) | **Guarded** |
-| [BUG-037](../../docs/vault/Bug-Playbook.md#L424) | Unbounded Socket Write in `connectAndSend` | `#bug-pattern` `#security-gate` | [http.zig](../../src/http.zig) | **Guarded** |
+| [BUG-037](../../docs/vault/Bug-Playbook.md#L424) | Unbounded Socket Write in `connectAndSend` | `#bug-pattern` `#security-gate` | [http.zig](../../src/http.zig), [podman_api.zig](../../src/podman_api.zig), [auto-audit.sh](../../scripts/auto-audit.sh) | **Guarded** |
 | [BUG-038](../../docs/vault/Bug-Playbook.md#L436) | Out-of-Order Topological Cleanup & `loadComposeFile` Project Leak | `#bug-pattern` `#memory-leak` | [compose.zig](../../src/compose.zig) | **Guarded** |
 | [BUG-039](../../docs/vault/Bug-Playbook.md#L448) | Multi-Line CLI Piped to `grep -q` Causing `BrokenPipe` Teardown Abort | `#bug-pattern` `#reliability` | [podman-e2e.sh](../../scripts/podman-e2e.sh), [smoke.sh](../../scripts/smoke.sh), [auto-audit.sh](../../scripts/auto-audit.sh) | **Guarded** |
 | [BUG-040](../../docs/vault/Bug-Playbook.md#L459) | Silent `else |_| {}` Test Swallowing & Hardcoded Mock `Content-Length` | `#bug-pattern` `#reliability` | [podman_transfer.zig](../../src/podman_transfer.zig), [main.zig](../../src/main.zig), [auto-audit.sh](../../scripts/auto-audit.sh) | **Guarded** |
@@ -188,13 +191,13 @@ flowchart LR
 | [compose.zig](../../src/compose.zig) | 1703 | 14 | 6 | `std.testing.allocator` |
 | [config.zig](../../src/config.zig) | 348 | 9 | 6 | `std.testing.allocator` |
 | [demo.zig](../../src/demo.zig) | 487 | 6 | 2 | `std.testing.allocator` |
-| [http.zig](../../src/http.zig) | 668 | 21 | 5 | `std.testing.allocator` |
+| [http.zig](../../src/http.zig) | 846 | 23 | 6 | `std.testing.allocator` |
 | [http_parser.zig](../../src/http_parser.zig) | 278 | 2 | 9 | `std.testing.allocator` |
-| [http_types.zig](../../src/http_types.zig) | 263 | 18 | 11 | `std.testing.allocator` |
+| [http_types.zig](../../src/http_types.zig) | 268 | 19 | 11 | `std.testing.allocator` |
 | [log.zig](../../src/log.zig) | 850 | 20 | 12 | `std.testing.allocator` |
 | [main.zig](../../src/main.zig) | 1108 | 2 | 4 | `gpa.deinit() != .leak` |
-| [podman_api.zig](../../src/podman_api.zig) | 1695 | 118 | 13 | `std.testing.allocator` |
-| [podman_build.zig](../../src/podman_build.zig) | 545 | 8 | 5 | `std.testing.allocator` |
+| [podman_api.zig](../../src/podman_api.zig) | 1842 | 118 | 14 | `std.testing.allocator` |
+| [podman_build.zig](../../src/podman_build.zig) | 594 | 8 | 6 | `std.testing.allocator` |
 | [podman_images.zig](../../src/podman_images.zig) | 665 | 7 | 7 | `std.testing.allocator` |
 | [podman_logs.zig](../../src/podman_logs.zig) | 838 | 10 | 8 | `std.testing.allocator` |
 | [podman_pods.zig](../../src/podman_pods.zig) | 331 | 4 | 4 | `std.testing.allocator` |
@@ -415,8 +418,8 @@ flowchart LR
 - **Source**: [docs/vault/Bug-Playbook.md:318](../../docs/vault/Bug-Playbook.md#L318) · **Status**: `Guarded`
 - **Symptom**: `compose up` สร้าง compose network ตาม section `networks:` ของไฟล์ แต่ **ไม่มี container ใดถูก join** เข้ากับ network นั้น เพราะ `ComposeService.networks` ถูก parse และ validate แล้ว (ใน `src/compose.zig`) แต่ไม่เคยถูกอ่านในขั้นตอนสร้าง container — `HostConfig.NetworkMode` มาจาก `network_mode` เท่านั้น ทำให้ traffic เดินผ่าน default bridge และ `compose down` พยายามลบ network ที่ยังมี container ผูกอยู่
 - **Root Cause**: ฟีลด์ถูกเพิ่มในระดับ parser แต่ไม่มีขั้นตอน "apply" ที่เชื่อม parser กับ request ที่ส่ง daemon ทำให้เกิด dead field ที่ผ่านการตรวจสอบแต่ไม่มีผล
-- **Fix**: ในขั้นตอนสร้าง container ให้ map `svc.networks` → `HostConfig.NetworkMode` (เลือก network แรกที่ประกาศไว้) และตั้ง label `com.docker.compose.network`; เพิ่ม unit test ที่ยืนยันว่า container ที่สร้างมี `NetworkMode` ตรงกับ `networks:` ในไฟล์; ถ้ายังไม่รองรับ ให้คืน `ComposeError.InvalidComposeSyntax` พร้อมข้อความชัดเจนแทนการเงียบ ๆ
-- **Prevention**: ทุกฟีลด์ที่ parser รับเข้ามาต้องมี consumer ที่ชัดเจนในขั้นตอน apply/execute — ฟีลด์ที่ยังไม่ได้ใช้งานต้องถูกปฏิเสธอย่างชัดเจน ไม่ใช่ถูกเก็บไว้เฉย ๆ
+- **Fix**: ในขั้นตอนสร้าง container ให้ส่ง `svc.networks` ผ่าน `ContainerCreateRequest.NetworkingConfig.EndpointsConfig` (แทนการคลาย allow-list 5 โหมดของ `HostConfig.NetworkMode` เพื่อรักษา `BUG-016`) พร้อมตั้ง label `com.docker.compose.network`; บังคับให้ทุก network ใน `svc.networks` ต้องประกาศใน `networks:` ส่วนบน, ห้ามใช้ร่วมกับ `network_mode:`, และตรวจ `policy.isNetworkAllowed()` ในโหมด `--profile=sandbox`; เพิ่ม unit test ที่ยืนยันการส่ง `NetworkingConfig.EndpointsConfig`, label `com.docker.compose.network`, และ sandbox policy deny
+- **Prevention**: ทุกฟีลด์ที่ parser รับเข้ามาต้องมี consumer ที่ชัดเจนในขั้นตอน pre-flight และ execute โดยไม่ลดความเข้มของ allow-list เดิม (`validateNetworkMode`) — ฟีลด์ที่ยังไม่ได้ใช้งานต้องถูกปฏิเสธอย่างชัดเจน ไม่ใช่ถูกเก็บไว้เฉย ๆ
 
 ### BUG-029 — `compose up` Missing Rollback on Partial Failure
 - **Source**: [docs/vault/Bug-Playbook.md:330](../../docs/vault/Bug-Playbook.md#L330) · **Status**: `Guarded`
@@ -443,7 +446,7 @@ flowchart LR
 - **Source**: [docs/vault/Bug-Playbook.md:364](../../docs/vault/Bug-Playbook.md#L364) · **Status**: `Guarded`
 - **Symptom**: `zigpod attach` และ `zigpod exec -it` แฮงก์ไม่จบเมื่อ daemon ยอมรับการ upgrade แล้วไม่ส่งข้อมูลต่อ (หรือ container ถูก kill ขณะ daemon ยังถือ attach socket ไว้) เพราะ `std.posix.poll` คืนค่า `0` เมื่อ timeout แต่ถูกทิ้งด้วย `_ =` ใน `src/podman_api.zig` → ลูปวนต่อไปเรื่อย ๆ โดยไม่เคยคืน `Error.Timeout` (ต่างจากทุก endpoint อื่นที่บังคับ deadline ผ่าน `waitReadable`)
 - **Root Cause**: ผู้เรียก `poll` ไม่ตรวจค่าที่คืนมา ทำให้ timeout กลายเป็น no-op
-- **Fix**: ตรวจผลลัพธ์ของ `std.posix.poll` และคืน `http.Error.Timeout` เมื่อค่าเป็น `0` (รวมถึงกรณี `POLLERR`/`POLLHUP` ที่ไม่ได้จัดการ); ใช้ deadline ที่สั้นลงสำหรับ session แบบ interactive แทน `blocking_timeout_ms` (12 ชม.); เพิ่ม unit test ด้วย mock socket ที่ไม่ส่งข้อมูลหลัง upgrade แล้วยืนยันว่าคืน `Error.Timeout`
+- **Fix**: ตรวจผลลัพธ์ของ `std.posix.poll` ใน `pumpBidirectional` ของ `src/podman_api.zig` และคืน `http.Error.Timeout` เมื่อค่าเป็น `0` พร้อมจัดการ `POLL.HUP`/`POLL.ERR`/`POLL.NVAL` ครบทั้ง socket และ `stdin_fd`; เพิ่ม `interactive_timeout_ms` (5 นาที) ใน `src/http_types.zig` และใช้ผ่าน `interactiveTimeoutMs` ใน `attachContainer`/`startExecInteractive` แทน `blocking_timeout_ms` (12 ชม.) พร้อมเพิ่ม gate ใน `scripts/auto-audit.sh`; เพิ่ม unit test (`BUG-032`) ด้วย mock socket ที่ไม่ส่งข้อมูลหลัง `101 Switching Protocols` และ `POLL.ERR` บน `pumpBidirectional` แล้วยืนยันว่าคืน `Error.Timeout` / `Error.InvalidResponse`
 - **Prevention**: ทุกการเรียก `poll`/`select` ต้องตรวจค่าที่คืนมาเสมอ — `0` หมายถึง timeout และต้องถูกแปลงเป็น error ที่ผู้เรียกจัดการได้ ไม่ใช่ทิ้งค่า
 
 ### BUG-033 — Implicit `zigpod.toml` Can Redirect the API Socket
@@ -464,21 +467,21 @@ flowchart LR
 - **Source**: [docs/vault/Bug-Playbook.md:401](../../docs/vault/Bug-Playbook.md#L401) · **Status**: `Guarded`
 - **Symptom**: ใน `collectEntries` ของ `src/podman_build.zig` ค่า `w.path` ที่ถูก `dupe` แล้วจะ leak เมื่อ `list.append` ล้มเหลว เพราะ `errdefer` มีแต่ `linkname` และ entry ที่ append ไม่สำเร็จไม่ได้อยู่ใน `list` จึงไม่ถูก `errdefer` ของชั้นนอกกวาด
 - **Root Cause**: `alloc.dupe` ถูกเรียก "inline" ใน argument list ของ `list.append(...)` ทำให้ ownership ของ allocation ถูกสร้างขึ้นก่อนที่ append จะคืน error
-- **Fix**: แยก `const name = try alloc.dupe(u8, w.path); errdefer alloc.free(name);` ออกมา แล้วค่อย `try list.append(.{ .name = name, ... })`; เพิ่ม regression test ที่ใช้ failing allocator เพื่อยืนยันว่าไม่มี allocation ค้าง
+- **Fix**: แยก `const name = try alloc.dupe(u8, w.path); errdefer alloc.free(name);` ออกมาใน `src/podman_build.zig` ก่อน `try list.append(...)` และแยก helper `realpathOrInvalidHostPath` ให้ propagate `error.OutOfMemory` ไม่กลบเป็น `InvalidHostPath`; เพิ่ม regression test (`BUG-035`) ผ่าน `std.testing.checkAllAllocationFailures` ทั้ง `collectEntries` และ `tarBuildContext` พร้อม static gate ใน `scripts/auto-audit.sh`
 - **Prevention**: ห้ามฝังการจองหน่วยความจำไว้ภายใน argument list ของฟังก์ชันที่อาจคืน error — ต้องจัดการ ownership ด้วย `errdefer` ให้ชัดเจนเสมอ
 
 ### BUG-036 — `verifyAuditFile` Ignores a Complete Final Entry Without Trailing Newline
 - **Source**: [docs/vault/Bug-Playbook.md:412](../../docs/vault/Bug-Playbook.md#L412) · **Status**: `Guarded`
 - **Symptom**: การลบ `\n` ท้ายบรรทัดสุดท้ายของ `audit.log` (ซึ่งเป็น entry ที่ commit สำเร็จแล้ว) ทำให้ `verifyAuditFile` ใน `src/log.zig` ข้ามบรรทัดนั้นทิ้งทั้งที่มัน parse เป็น entry ที่สมบูรณ์ — ผลคือการตัดหางท้ายไฟล์ (ลบทั้ง entry) ไม่ถูกตรวจจับ และ `zigpod audit` ยังรายงาน `valid: true` พร้อมจำนวน entry ที่น้อยลง (คนละ root cause กับ BUG-030 แต่อยู่ในโฟลเดอร์เดียวกัน)
 - **Root Cause**: `verifyAuditFile` แยก "บรรทัดที่ยังไม่ commit" ออกจาก "บรรทัดปกติ" ด้วยเงื่อนไขเดียวคือ `lines.peek() == null` ซึ่งตัดทิ้งทั้งกรณีที่ไม่มี `\n` ปิดท้ายจริง และกรณีที่เป็น entry สมบูรณ์ที่ถูกตัด newline ทิ้ง
-- **Fix**: แยกให้ชัดว่าส่วนท้ายที่ไม่มี `\n` เป็น "uncommitted" เฉพาะเมื่อเนื้อหาไม่ได้ parse เป็น entry ที่สมบูรณ์ (5 field, hash 64 hex) — ถ้า parse ได้ให้ verify และนับตามปกติ; publish `head_hash` (มีอยู่แล้วใน `writeAuditJson`) ไปยังจุดยึดภายนอก เพื่อให้ตรวจจับการตัดท้ายไฟล์แบบ pure-tail ได้; เพิ่ม unit test: entry สมบูรณ์ที่ถูกลบ newline ต้องถูกรายงานว่าเสีย
-- **Prevention**: การแยก "uncommitted tail" ออกจาก "ข้อมูลที่ commit แล้ว" ต้องอิงจากความสมบูรณ์ของ **เนื้อหา** ไม่ใช่แค่การมี newline ปิดท้าย
+- **Fix**: ใช้ `evaluateAuditContent` + `parseAuditFields` ร่วมกันระหว่าง `verifyAuditFile` และ `writeAuditJson`; ถือว่าส่วนท้ายที่ไม่มี `\n` เป็น "uncommitted" เฉพาะเมื่อ parse ไม่ได้เป็น entry 5-field (hash 64 hex) — ถ้า parse ได้ให้ verify, นับ entry, และตรวจ tamper ตามปกติ พร้อมให้ `repairAuditTail` คืน `\n` แทนการตัดทิ้ง; publish `head_hash` (มีอยู่แล้วใน `writeAuditJson`) เพื่อตรวจจับการตัดท้ายไฟล์แบบ pure-tail; เพิ่ม unit test ครอบคลุมทั้ง valid entry ที่ไม่มี `\n` (ต้องไม่ถูกข้าม/ลดจำนวน), tampered entry ที่ไม่มี `\n` (ต้องคืน `AuditTampered` / `valid=false`), และ fuzz flip ถึงไบต์สุดท้าย (`mutated.len - 1`)
+- **Prevention**: การแยก "uncommitted tail" ออกจาก "ข้อมูลที่ commit แล้ว" ต้องอิงจากความสมบูรณ์ของ **เนื้อหา** ไม่ใช่แค่การมี newline ปิดท้าย และตัวตรวจกับตัวสรุปรายงานต้องใช้ parser/evaluator ร่วมกันเสมอ
 
 ### BUG-037 — Unbounded Socket Write in `connectAndSend`
 - **Source**: [docs/vault/Bug-Playbook.md:424](../../docs/vault/Bug-Playbook.md#L424) · **Status**: `Guarded`
 - **Symptom**: `stream.writeAll(req.items)` ใน `src/http.zig` เขียน request ทั้งก้อน (รวม tar ขนาดใหญ่ของ `podman build`) โดยไม่มี deadline — ถ้า daemon หยุดอ่าน socket การเขียนจะ block ไปตลอด ทั้งที่ฝั่งอ่านของ request เดียวกันมี deadline 12 ชั่วโมง (ความไม่สมมาตรที่ไม่ได้ตั้งใจ)
 - **Root Cause**: `connectAndSend` บังคับ timeout เฉพาะฝั่งอ่าน (`waitReadable`) แต่ไม่มีกลไกเดียวกันสำหรับฝั่งเขียน
-- **Fix**: ห่อการเขียนด้วย poll-for-writable ที่มีขอบเขตเวลา หรือตั้ง `SO_SNDTIMEO` บน socket ก่อนเขียน; ใช้ timeout ที่เหมาะสมกับขนาด payload และคืน `Error.Timeout` เมื่อหมดเวลา; เพิ่ม unit test: mock socket ที่อ่านช้า/ไม่อ่าน ต้องได้ `Error.Timeout` แทนการค้าง
+- **Fix**: เพิ่ม `waitWritable` และ `writeAllWithTimeout` (`MSG.DONTWAIT | MSG.NOSIGNAL` + `POLL.OUT` deadline) ใน `src/http.zig` และส่งต่อ `timeout_ms` เข้า `connectAndSend` รวมถึงใช้ `http.writeAllWithTimeout` ใน `pumpBidirectional` ของ `src/podman_api.zig`; ใช้ deadline เดียวกับฝั่งอ่าน (`default_timeout_ms` / `build_timeout_ms` / `interactive_timeout_ms`) และคืน `Error.Timeout` เมื่อหมดเวลา พร้อม gate ใน `scripts/auto-audit.sh`; เพิ่ม unit test (`BUG-037`) ทดสอบทั้ง mock socket ที่ไม่ยอมอ่าน, slow-draining 1 byte/15ms (ต้องได้ `Error.Timeout`), และ multi-chunk happy path
 - **Prevention**: ฝั่งเขียนและฝั่งอ่านของ socket ต้องมี deadline เท่ากัน — ทุก `writeAll` บน socket ต้องมี guard เวลา
 
 ### BUG-038 — Out-of-Order Topological Cleanup & `loadComposeFile` Project Leak

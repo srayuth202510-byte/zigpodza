@@ -132,8 +132,12 @@ fn collectEntries(alloc: std.mem.Allocator, dir: std.fs.Dir) ![]Entry {
             linkname = try alloc.dupe(u8, raw_link);
         }
         errdefer if (linkname.len > 0) alloc.free(linkname);
+
+        // Bind `name` before append so OOM inside `list.append` never leaks it (BUG-035).
+        const name = try alloc.dupe(u8, w.path);
+        errdefer alloc.free(name);
         try list.append(.{
-            .name = try alloc.dupe(u8, w.path),
+            .name = name,
             .kind = kind,
             .size = 0,
             .linkname = linkname,
@@ -154,6 +158,13 @@ pub fn tarBuildContext(alloc: std.mem.Allocator, ctx_dir: []const u8, out: *std.
     return tarDirectoryWithPrefix(alloc, ctx_dir, null, out);
 }
 
+fn realpathOrInvalidHostPath(alloc: std.mem.Allocator, dir: std.fs.Dir) ![]u8 {
+    return dir.realpathAlloc(alloc, ".") catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return ApiError.InvalidHostPath,
+    };
+}
+
 /// Serializes `ctx_dir` into a ustar archive, optionally nesting all entries
 /// under `prefix/` (used by `zigpod cp` for directory uploads).
 pub fn tarDirectoryWithPrefix(
@@ -170,7 +181,7 @@ pub fn tarDirectoryWithPrefix(
     var dir = std.fs.cwd().openDir(ctx_dir, .{ .iterate = true }) catch return ApiError.NotFound;
     defer dir.close();
 
-    const real_ctx = dir.realpathAlloc(alloc, ".") catch return ApiError.InvalidHostPath;
+    const real_ctx = try realpathOrInvalidHostPath(alloc, dir);
     defer alloc.free(real_ctx);
     try validateHostPath(real_ctx, false);
 
@@ -255,7 +266,7 @@ pub fn buildImage(
         return ApiError.NotFound;
     };
     defer dir.close();
-    const real_ctx = dir.realpathAlloc(client.allocator, ".") catch return ApiError.InvalidHostPath;
+    const real_ctx = try realpathOrInvalidHostPath(client.allocator, dir);
     defer client.allocator.free(real_ctx);
     try validateHostPath(real_ctx, false);
     const has_dockerfile = dir.access("Dockerfile", .{}) catch null;
@@ -542,4 +553,42 @@ test "buildImage returns BuildFailed on error stream event" {
     try std.testing.expect(b_failed);
     thread.join();
     joined = true;
+}
+
+test "BUG-035 regression: collectEntries and tarBuildContext do not leak on OOM" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{ .sub_path = "Dockerfile", .data = "FROM alpine:3.20\n" });
+    try tmp.dir.makePath("sub");
+    try tmp.dir.writeFile(.{ .sub_path = "sub/a.txt", .data = "a" });
+    try tmp.dir.writeFile(.{ .sub_path = "sub/b.txt", .data = "b" });
+    try tmp.dir.writeFile(.{ .sub_path = "sub/c.txt", .data = "c" });
+    try tmp.dir.writeFile(.{ .sub_path = "sub/d.txt", .data = "d" });
+    try tmp.dir.symLink("a.txt", "sub/link", .{});
+
+    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir_path);
+
+    const Helper = struct {
+        fn collect(a: std.mem.Allocator, path: []const u8) !void {
+            var d = try std.fs.cwd().openDir(path, .{ .iterate = true });
+            defer d.close();
+            const entries = try collectEntries(a, d);
+            for (entries) |e| {
+                a.free(e.name);
+                a.free(e.linkname);
+            }
+            a.free(entries);
+        }
+
+        fn build(a: std.mem.Allocator, path: []const u8) !void {
+            var tar_buf = std.ArrayList(u8).init(a);
+            defer tar_buf.deinit();
+            try tarBuildContext(a, path, &tar_buf);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(alloc, Helper.collect, .{dir_path});
+    try std.testing.checkAllAllocationFailures(alloc, Helper.build, .{dir_path});
 }

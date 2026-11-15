@@ -8,6 +8,7 @@ pub const parser = @import("http_parser.zig");
 pub const max_response_bytes = types.max_response_bytes;
 pub const max_header_bytes = types.max_header_bytes;
 pub const default_timeout_ms = types.default_timeout_ms;
+pub const interactive_timeout_ms = types.interactive_timeout_ms;
 pub const blocking_timeout_ms = types.blocking_timeout_ms;
 
 pub const Error = types.Error;
@@ -21,15 +22,53 @@ pub const validateRequestTarget = types.validateRequestTarget;
 pub const parseResponseHead = parser.parseResponseHead;
 pub const parseResponse = parser.parseResponse;
 
-fn waitReadable(fd: std.posix.fd_t, timeout_ms: i32) !void {
-    if (timeout_ms < 0) return;
+fn waitPollEvent(fd: std.posix.fd_t, events: i16, timeout_ms: i32) !void {
     var fds = [_]std.posix.pollfd{.{
         .fd = fd,
-        .events = std.posix.POLL.IN,
+        .events = events,
         .revents = 0,
     }};
     const ready = try std.posix.poll(&fds, timeout_ms);
     if (ready == 0) return Error.Timeout;
+}
+
+fn waitReadable(fd: std.posix.fd_t, timeout_ms: i32) !void {
+    if (timeout_ms < 0) return;
+    try waitPollEvent(fd, std.posix.POLL.IN, timeout_ms);
+}
+
+fn waitWritable(fd: std.posix.fd_t, timeout_ms: i32) !void {
+    try waitPollEvent(fd, std.posix.POLL.OUT, timeout_ms);
+}
+
+/// Writes all bytes of `data` to `stream` within `timeout_ms` using non-blocking
+/// `send` + `POLL.OUT` polling so a stalled peer cannot block socket writes
+/// indefinitely (BUG-037). Negative `timeout_ms` waits without a deadline.
+pub fn writeAllWithTimeout(stream: std.net.Stream, data: []const u8, timeout_ms: i32) !void {
+    if (data.len == 0) return;
+    const deadline_ms: ?i128 = if (timeout_ms >= 0)
+        std.time.milliTimestamp() + @as(i128, timeout_ms)
+    else
+        null;
+
+    const flags = std.posix.MSG.DONTWAIT | std.posix.MSG.NOSIGNAL;
+    var sent: usize = 0;
+    while (sent < data.len) {
+        const n = std.posix.send(stream.handle, data[sent..], flags) catch |e| switch (e) {
+            error.WouldBlock => {
+                const remaining_ms: i32 = if (deadline_ms) |dl| blk: {
+                    const rem = dl - std.time.milliTimestamp();
+                    if (rem <= 0) return Error.Timeout;
+                    break :blk @intCast(@min(rem, @as(i128, std.math.maxInt(i32))));
+                } else -1;
+                try waitWritable(stream.handle, remaining_ms);
+                continue;
+            },
+            else => return e,
+        };
+        if (n == 0) return error.BrokenPipe;
+        sent += n;
+    }
 }
 
 /// Reads the full response until EOF, enforcing `timeout_ms` on *every* read
@@ -86,7 +125,7 @@ pub const Client = struct {
         content_type: []const u8,
         timeout_ms: i32,
     ) !Response {
-        const stream = try self.connectAndSend(method, path, body, false, content_type);
+        const stream = try self.connectAndSend(method, path, body, false, content_type, timeout_ms);
         defer stream.close();
 
         const raw = try readAllWithTimeout(stream, self.allocator, max_response_bytes, timeout_ms);
@@ -106,7 +145,7 @@ pub const Client = struct {
         ctx: anytype,
         comptime on_chunk: fn (@TypeOf(ctx), []const u8) anyerror!void,
     ) !StreamResponse {
-        const stream = try self.connectAndSend(method, path, body, false, "application/json");
+        const stream = try self.connectAndSend(method, path, body, false, "application/json", timeout_ms);
         defer stream.close();
 
         var buf = std.ArrayList(u8).init(self.allocator);
@@ -147,7 +186,7 @@ pub const Client = struct {
         body: ?[]const u8,
         timeout_ms: i32,
     ) !UpgradedConn {
-        const stream = try self.connectAndSend(method, path, body, true, "application/json");
+        const stream = try self.connectAndSend(method, path, body, true, "application/json", timeout_ms);
         errdefer stream.close();
 
         var buf = std.ArrayList(u8).init(self.allocator);
@@ -192,6 +231,7 @@ pub const Client = struct {
         body: ?[]const u8,
         is_upgrade: bool,
         content_type: []const u8,
+        timeout_ms: i32,
     ) !std.net.Stream {
         try validateRequestTarget(path);
 
@@ -218,7 +258,7 @@ pub const Client = struct {
         } else {
             try w.writeAll("Content-Length: 0\r\n\r\n");
         }
-        try stream.writeAll(req.items);
+        try writeAllWithTimeout(stream, req.items, timeout_ms);
         return stream;
     }
 };
@@ -665,4 +705,142 @@ test "streamRequest handles chunked streaming, error bodies, and 101 upgrade" {
 
     thread.join();
     joined = true;
+}
+
+const WriteStallCtx = struct {
+    server: *std.net.Server,
+    done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    bytes_per_tick: usize = 0,
+    tick_ms: u64 = 2,
+    received: usize = 0,
+    expected_body_len: usize = 0,
+    reply_on_done: bool = false,
+};
+
+fn runWriteStallServer(ctx: *WriteStallCtx) void {
+    var accept_fds = [_]std.posix.pollfd{.{
+        .fd = ctx.server.stream.handle,
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    while (!ctx.done.load(.acquire)) {
+        const ready = std.posix.poll(&accept_fds, 5) catch return;
+        if (ready > 0) break;
+    }
+    if (ctx.done.load(.acquire)) return;
+
+    const conn = ctx.server.accept() catch return;
+    defer conn.stream.close();
+
+    if (ctx.bytes_per_tick == 0) {
+        // Accept without ever draining socket buffer so writer hits EAGAIN + POLL.OUT timeout.
+        while (!ctx.done.load(.acquire)) {
+            std.time.sleep(2 * std.time.ns_per_ms);
+        }
+        return;
+    }
+
+    var discard: [65536]u8 = undefined;
+    var read_fds = [_]std.posix.pollfd{.{
+        .fd = conn.stream.handle,
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    var expected_total: ?usize = null;
+    var hdr_buf: [512]u8 = undefined;
+    var hdr_len: usize = 0;
+
+    while (!ctx.done.load(.acquire)) {
+        const ready = std.posix.poll(&read_fds, 5) catch break;
+        if (ready == 0) continue;
+        if ((read_fds[0].revents & std.posix.POLL.IN) != 0) {
+            const want = @min(ctx.bytes_per_tick, discard.len);
+            const n = conn.stream.read(discard[0..want]) catch break;
+            if (n == 0) break;
+            if (expected_total == null) {
+                const take = @min(n, hdr_buf.len - hdr_len);
+                @memcpy(hdr_buf[hdr_len .. hdr_len + take], discard[0..take]);
+                hdr_len += take;
+                if (std.mem.indexOf(u8, hdr_buf[0..hdr_len], "\r\n\r\n")) |idx| {
+                    expected_total = (idx + 4) + ctx.expected_body_len;
+                }
+            }
+            ctx.received += n;
+            if (ctx.reply_on_done) {
+                if (expected_total) |exp| {
+                    if (ctx.received >= exp) break;
+                }
+            }
+            if (ctx.tick_ms > 0) std.time.sleep(ctx.tick_ms * std.time.ns_per_ms);
+        } else if ((read_fds[0].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR)) != 0) {
+            break;
+        }
+    }
+    if (ctx.reply_on_done and !ctx.done.load(.acquire)) {
+        const ok_body = "{\"ok\":true}";
+        const resp = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ ok_body.len, ok_body });
+        conn.stream.writeAll(resp) catch {};
+    }
+}
+
+fn runWriteStallCase(
+    alloc: std.mem.Allocator,
+    sock_tag: []const u8,
+    payload: []const u8,
+    timeout_ms: i32,
+    bytes_per_tick: usize,
+    tick_ms: u64,
+    expect_timeout: bool,
+) !void {
+    const sock_path = try std.fmt.allocPrint(alloc, "/tmp/zp-http-{s}-{d}.sock", .{ sock_tag, std.time.nanoTimestamp() });
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    var ctx = WriteStallCtx{
+        .server = &server,
+        .bytes_per_tick = bytes_per_tick,
+        .tick_ms = tick_ms,
+        .expected_body_len = payload.len,
+        .reply_on_done = !expect_timeout,
+    };
+    const thread = try std.Thread.spawn(.{}, runWriteStallServer, .{&ctx});
+    var joined = false;
+    defer {
+        ctx.done.store(true, .release);
+        if (!joined) thread.join();
+    }
+
+    const client = Client{ .allocator = alloc, .socket_path = sock_path, .timeout_ms = timeout_ms };
+    if (expect_timeout) {
+        try std.testing.expectError(Error.Timeout, client.request("POST", "/v1.40/build", payload));
+        ctx.done.store(true, .release);
+        thread.join();
+        joined = true;
+    } else {
+        const resp = try client.request("POST", "/v1.40/build", payload);
+        defer resp.deinit();
+        thread.join();
+        joined = true;
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        try std.testing.expectEqualStrings("{\"ok\":true}", resp.body);
+        try std.testing.expect(ctx.received > payload.len);
+    }
+}
+
+test "BUG-037 regression: writeAllWithTimeout bounds stalled and slow-draining request writes" {
+    const alloc = std.testing.allocator;
+    const payload = try alloc.alloc(u8, 4 * 1024 * 1024);
+    defer alloc.free(payload);
+    @memset(payload, 'A');
+
+    // 1) Peer accepts and never reads -> connectAndSend returns Error.Timeout.
+    try runWriteStallCase(alloc, "wstall", payload, 25, 0, 2, true);
+    // 2) Slow-draining peer (1 byte / 15ms) still hits the write deadline.
+    try runWriteStallCase(alloc, "wslow", payload, 35, 1, 15, true);
+    // 3) Normal draining peer completes multi-chunk non-blocking write without timeout.
+    try runWriteStallCase(alloc, "wok", payload, 5_000, 65536, 0, false);
 }

@@ -6,6 +6,10 @@ pub const max_response_bytes = 64 * 1024 * 1024;
 /// Upper bound on HTTP response headers before `\r\n\r\n`.
 pub const max_header_bytes = 64 * 1024;
 pub const default_timeout_ms: i32 = 30_000;
+/// Idle poll deadline for upgraded interactive attach/exec sessions (5 min),
+/// bounded well below `blocking_timeout_ms` so silent/dead peer streams
+/// return `Error.Timeout` instead of hanging indefinitely (BUG-032).
+pub const interactive_timeout_ms: i32 = 5 * 60 * 1000;
 /// Long ceiling for endpoints that legitimately stay silent for a long time:
 /// `POST /containers/{id}/wait` answers only when the container exits and
 /// `POST /images/create` streams a pull that can pause for minutes on big
@@ -126,6 +130,7 @@ test "HTTP constants have expected values" {
     try std.testing.expectEqual(@as(usize, 64 * 1024 * 1024), max_response_bytes);
     try std.testing.expectEqual(@as(usize, 64 * 1024), max_header_bytes);
     try std.testing.expectEqual(@as(i32, 30_000), default_timeout_ms);
+    try std.testing.expectEqual(@as(i32, 5 * 60 * 1000), interactive_timeout_ms);
     try std.testing.expectEqual(@as(i32, 12 * 60 * 60 * 1000), blocking_timeout_ms);
 }
 

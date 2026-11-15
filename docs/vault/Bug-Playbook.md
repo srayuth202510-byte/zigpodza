@@ -366,9 +366,9 @@ status: active
 - **Symptom**: `zigpod attach` และ `zigpod exec -it` แฮงก์ไม่จบเมื่อ daemon ยอมรับการ upgrade แล้วไม่ส่งข้อมูลต่อ (หรือ container ถูก kill ขณะ daemon ยังถือ attach socket ไว้) เพราะ `std.posix.poll` คืนค่า `0` เมื่อ timeout แต่ถูกทิ้งด้วย `_ =` ใน [src/podman_api.zig](../../src/podman_api.zig) → ลูปวนต่อไปเรื่อย ๆ โดยไม่เคยคืน `Error.Timeout` (ต่างจากทุก endpoint อื่นที่บังคับ deadline ผ่าน `waitReadable`)
 - **Root Cause**: ผู้เรียก `poll` ไม่ตรวจค่าที่คืนมา ทำให้ timeout กลายเป็น no-op
 - **Fix**:
-  - ตรวจผลลัพธ์ของ `std.posix.poll` และคืน `http.Error.Timeout` เมื่อค่าเป็น `0` (รวมถึงกรณี `POLLERR`/`POLLHUP` ที่ไม่ได้จัดการ)
-  - ใช้ deadline ที่สั้นลงสำหรับ session แบบ interactive แทน `blocking_timeout_ms` (12 ชม.)
-  - เพิ่ม unit test ด้วย mock socket ที่ไม่ส่งข้อมูลหลัง upgrade แล้วยืนยันว่าคืน `Error.Timeout`
+  - ตรวจผลลัพธ์ของ `std.posix.poll` ใน `pumpBidirectional` ของ [src/podman_api.zig](../../src/podman_api.zig) และคืน `http.Error.Timeout` เมื่อค่าเป็น `0` พร้อมจัดการ `POLL.HUP`/`POLL.ERR`/`POLL.NVAL` ครบทั้ง socket และ `stdin_fd`
+  - เพิ่ม `interactive_timeout_ms` (5 นาที) ใน [src/http_types.zig](../../src/http_types.zig) และใช้ผ่าน `interactiveTimeoutMs` ใน `attachContainer`/`startExecInteractive` แทน `blocking_timeout_ms` (12 ชม.) พร้อมเพิ่ม gate ใน [scripts/auto-audit.sh](../../scripts/auto-audit.sh)
+  - เพิ่ม unit test (`BUG-032`) ด้วย mock socket ที่ไม่ส่งข้อมูลหลัง `101 Switching Protocols` และ `POLL.ERR` บน `pumpBidirectional` แล้วยืนยันว่าคืน `Error.Timeout` / `Error.InvalidResponse`
 - **Prevention Rule**: ทุกการเรียก `poll`/`select` ต้องตรวจค่าที่คืนมาเสมอ — `0` หมายถึง timeout และต้องถูกแปลงเป็น error ที่ผู้เรียกจัดการได้ ไม่ใช่ทิ้งค่า
 
 ---
@@ -403,8 +403,8 @@ status: active
 - **Symptom**: ใน `collectEntries` ของ [src/podman_build.zig](../../src/podman_build.zig) ค่า `w.path` ที่ถูก `dupe` แล้วจะ leak เมื่อ `list.append` ล้มเหลว เพราะ `errdefer` มีแต่ `linkname` และ entry ที่ append ไม่สำเร็จไม่ได้อยู่ใน `list` จึงไม่ถูก `errdefer` ของชั้นนอกกวาด
 - **Root Cause**: `alloc.dupe` ถูกเรียก "inline" ใน argument list ของ `list.append(...)` ทำให้ ownership ของ allocation ถูกสร้างขึ้นก่อนที่ append จะคืน error
 - **Fix**:
-  - แยก `const name = try alloc.dupe(u8, w.path); errdefer alloc.free(name);` ออกมา แล้วค่อย `try list.append(.{ .name = name, ... })`
-  - เพิ่ม regression test ที่ใช้ failing allocator เพื่อยืนยันว่าไม่มี allocation ค้าง
+  - แยก `const name = try alloc.dupe(u8, w.path); errdefer alloc.free(name);` ออกมาใน [src/podman_build.zig](../../src/podman_build.zig) ก่อน `try list.append(...)` และแยก helper `realpathOrInvalidHostPath` ให้ propagate `error.OutOfMemory` ไม่กลบเป็น `InvalidHostPath`
+  - เพิ่ม regression test (`BUG-035`) ผ่าน `std.testing.checkAllAllocationFailures` ทั้ง `collectEntries` และ `tarBuildContext` พร้อม static gate ใน [scripts/auto-audit.sh](../../scripts/auto-audit.sh)
 - **Prevention Rule**: ห้ามฝังการจองหน่วยความจำไว้ภายใน argument list ของฟังก์ชันที่อาจคืน error — ต้องจัดการ ownership ด้วย `errdefer` ให้ชัดเจนเสมอ
 
 ---
@@ -426,9 +426,9 @@ status: active
 - **Symptom**: `stream.writeAll(req.items)` ใน [src/http.zig](../../src/http.zig) เขียน request ทั้งก้อน (รวม tar ขนาดใหญ่ของ `podman build`) โดยไม่มี deadline — ถ้า daemon หยุดอ่าน socket การเขียนจะ block ไปตลอด ทั้งที่ฝั่งอ่านของ request เดียวกันมี deadline 12 ชั่วโมง (ความไม่สมมาตรที่ไม่ได้ตั้งใจ)
 - **Root Cause**: `connectAndSend` บังคับ timeout เฉพาะฝั่งอ่าน (`waitReadable`) แต่ไม่มีกลไกเดียวกันสำหรับฝั่งเขียน
 - **Fix**:
-  - ห่อการเขียนด้วย poll-for-writable ที่มีขอบเขตเวลา หรือตั้ง `SO_SNDTIMEO` บน socket ก่อนเขียน
-  - ใช้ timeout ที่เหมาะสมกับขนาด payload และคืน `Error.Timeout` เมื่อหมดเวลา
-  - เพิ่ม unit test: mock socket ที่อ่านช้า/ไม่อ่าน ต้องได้ `Error.Timeout` แทนการค้าง
+  - เพิ่ม `waitWritable` และ `writeAllWithTimeout` (`MSG.DONTWAIT | MSG.NOSIGNAL` + `POLL.OUT` deadline) ใน [src/http.zig](../../src/http.zig) และส่งต่อ `timeout_ms` เข้า `connectAndSend` รวมถึงใช้ `http.writeAllWithTimeout` ใน `pumpBidirectional` ของ [src/podman_api.zig](../../src/podman_api.zig)
+  - ใช้ deadline เดียวกับฝั่งอ่าน (`default_timeout_ms` / `build_timeout_ms` / `interactive_timeout_ms`) และคืน `Error.Timeout` เมื่อหมดเวลา พร้อม gate ใน [scripts/auto-audit.sh](../../scripts/auto-audit.sh)
+  - เพิ่ม unit test (`BUG-037`) ทดสอบทั้ง mock socket ที่ไม่ยอมอ่าน, slow-draining 1 byte/15ms (ต้องได้ `Error.Timeout`), และ multi-chunk happy path
 - **Prevention Rule**: ฝั่งเขียนและฝั่งอ่านของ socket ต้องมี deadline เท่ากัน — ทุก `writeAll` บน socket ต้องมี guard เวลา
 
 ---

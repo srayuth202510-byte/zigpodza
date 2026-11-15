@@ -625,6 +625,41 @@ pub fn execCommandWithIo(
     return result.ExitCode;
 }
 
+fn interactiveTimeoutMs(client: *const http.Client) i32 {
+    return if (client.timeout_ms != http.default_timeout_ms)
+        client.timeout_ms
+    else
+        http.interactive_timeout_ms;
+}
+
+fn runUpgradedSession(
+    client: *const http.Client,
+    logger: *log.Logger,
+    path: []const u8,
+    up: http.UpgradedConn,
+    tty: bool,
+    stdin_fd: ?std.posix.fd_t,
+    writer: anytype,
+    timeout_ms: i32,
+) !void {
+    if (up.status != 101 and (up.status < 200 or up.status >= 300)) {
+        const err_resp = http.Response{
+            .status = up.status,
+            .body = up.error_body,
+            .allocator = client.allocator,
+        };
+        return logApiFailure(logger, "POST", path, err_resp);
+    }
+
+    var term_guard = if (tty and stdin_fd != null)
+        http.RawTermGuard.enter(stdin_fd.?)
+    else
+        http.RawTermGuard{ .fd = -1, .orig = undefined, .active = false };
+    defer term_guard.restore();
+
+    try pumpBidirectional(client.allocator, up.stream, up.initial_data, stdin_fd, writer, tty, timeout_ms);
+}
+
 /// Upgrades `POST /exec/{id}/start` (`101 Switching Protocols`) for interactive/TTY exec.
 pub fn startExecInteractive(
     client: *const http.Client,
@@ -645,26 +680,12 @@ pub fn startExecInteractive(
     }, .{});
     defer client.allocator.free(body);
 
+    const io_timeout_ms = interactiveTimeoutMs(client);
     logger.debug("UPGRADE POST {s} (tty={}, body_len={d})", .{ path, tty, body.len });
-    const up = try client.upgrade("POST", path, body, http.blocking_timeout_ms);
+    const up = try client.upgrade("POST", path, body, io_timeout_ms);
     defer up.deinit();
 
-    if (up.status != 101 and (up.status < 200 or up.status >= 300)) {
-        const err_resp = http.Response{
-            .status = up.status,
-            .body = up.error_body,
-            .allocator = client.allocator,
-        };
-        return logApiFailure(logger, "POST", path, err_resp);
-    }
-
-    var term_guard = if (tty and stdin_fd != null)
-        http.RawTermGuard.enter(stdin_fd.?)
-    else
-        http.RawTermGuard{ .fd = -1, .orig = undefined, .active = false };
-    defer term_guard.restore();
-
-    try pumpBidirectional(client.allocator, up.stream, up.initial_data, stdin_fd, writer, tty);
+    try runUpgradedSession(client, logger, path, up, tty, stdin_fd, writer, io_timeout_ms);
 }
 
 /// Attaches to a running container via `POST /containers/{id}/attach` (`101 Switching Protocols`).
@@ -686,29 +707,18 @@ pub fn attachContainer(
     );
     defer client.allocator.free(path);
 
+    const io_timeout_ms = interactiveTimeoutMs(client);
     logger.debug("UPGRADE POST {s}", .{path});
-    const up = try client.upgrade("POST", path, null, http.blocking_timeout_ms);
+    const up = try client.upgrade("POST", path, null, io_timeout_ms);
     defer up.deinit();
 
-    if (up.status != 101 and (up.status < 200 or up.status >= 300)) {
-        const err_resp = http.Response{
-            .status = up.status,
-            .body = up.error_body,
-            .allocator = client.allocator,
-        };
-        return logApiFailure(logger, "POST", path, err_resp);
-    }
-
-    var term_guard = if (tty and stdin_fd != null)
-        http.RawTermGuard.enter(stdin_fd.?)
-    else
-        http.RawTermGuard{ .fd = -1, .orig = undefined, .active = false };
-    defer term_guard.restore();
-
-    try pumpBidirectional(client.allocator, up.stream, up.initial_data, if (interactive) stdin_fd else null, writer, tty);
+    const active_in = if (interactive) stdin_fd else null;
+    try runUpgradedSession(client, logger, path, up, tty, active_in, writer, io_timeout_ms);
 }
 
-/// Pumps bytes between an upgraded Unix socket `stream` and `stdin_fd` / `writer`.
+/// Pumps bytes between an upgraded Unix socket `stream` and `stdin_fd` / `writer`,
+/// enforcing `timeout_ms` across `poll` and socket writes so silent or broken
+/// peers fail cleanly instead of spinning forever (BUG-032, BUG-037).
 fn pumpBidirectional(
     allocator: std.mem.Allocator,
     stream: std.net.Stream,
@@ -716,6 +726,7 @@ fn pumpBidirectional(
     stdin_fd: ?std.posix.fd_t,
     writer: anytype,
     tty: bool,
+    timeout_ms: i32,
 ) !void {
     const WriterType = @TypeOf(writer);
     var demuxer = LogDemuxer(WriterType){
@@ -747,24 +758,38 @@ fn pumpBidirectional(
             nfds = 2;
         }
 
-        _ = try std.posix.poll(fds[0..nfds], http.blocking_timeout_ms);
+        const ready = try std.posix.poll(fds[0..nfds], timeout_ms);
+        if (ready == 0) return http.Error.Timeout;
 
-        if (nfds == 2 and (fds[1].revents & (std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR)) != 0) {
-            const n = std.posix.read(active_stdin.?, &buf) catch 0;
-            if (n == 0) {
+        var handled = false;
+        if (nfds == 2 and fds[1].revents != 0) {
+            handled = true;
+            if ((fds[1].revents & (std.posix.POLL.ERR | std.posix.POLL.NVAL)) != 0 and
+                (fds[1].revents & std.posix.POLL.IN) == 0)
+            {
                 active_stdin = null;
-            } else {
-                try stream.writeAll(buf[0..n]);
+            } else if ((fds[1].revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) != 0) {
+                const n = std.posix.read(active_stdin.?, &buf) catch 0;
+                if (n == 0) {
+                    active_stdin = null;
+                } else {
+                    try http.writeAllWithTimeout(stream, buf[0..n], timeout_ms);
+                }
             }
         }
 
         if ((fds[0].revents & std.posix.POLL.IN) != 0) {
+            handled = true;
             const n = try stream.read(&buf);
             if (n == 0) break;
             if (tty) try writer.writeAll(buf[0..n]) else try demuxer.push(buf[0..n]);
-        } else if ((fds[0].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR)) != 0) {
+        } else if ((fds[0].revents & std.posix.POLL.HUP) != 0) {
             break;
+        } else if ((fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.NVAL)) != 0) {
+            return http.Error.InvalidResponse;
         }
+
+        if (!handled) return http.Error.Timeout;
     }
     if (!tty) try demuxer.flush();
 }
@@ -1691,5 +1716,127 @@ test "BUG-034: createContainer validates HostConfig.PortBindings fail-closed wit
             .Image = "alpine:3.20",
             .HostConfig = .{ .PortBindings = .{ .ports = &bad_bindings } },
         }, null),
+    );
+}
+
+const SilentUpgradeMode = enum { attach_only, exec_create_then_upgrade };
+
+const SilentUpgradeMockCtx = struct {
+    server: *std.net.Server,
+    done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    mode: SilentUpgradeMode = .attach_only,
+};
+
+fn waitAcceptReady(server: *std.net.Server, done: *const std.atomic.Value(bool)) bool {
+    var accept_fds = [_]std.posix.pollfd{.{
+        .fd = server.stream.handle,
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    while (!done.load(.acquire)) {
+        const ready = std.posix.poll(&accept_fds, 5) catch return false;
+        if (ready > 0) return true;
+    }
+    return false;
+}
+
+fn runSilentUpgradeMockServer(ctx: *SilentUpgradeMockCtx) void {
+    if (ctx.mode == .exec_create_then_upgrade) {
+        if (!waitAcceptReady(ctx.server, &ctx.done)) return;
+        if (ctx.server.accept()) |conn| {
+            defer conn.stream.close();
+            var req_buf: [1024]u8 = undefined;
+            _ = conn.stream.read(&req_buf) catch {};
+            const exec_body = "{\"Id\":\"execsilent1\"}";
+            const resp = std.fmt.comptimePrint(
+                "HTTP/1.1 201 Created\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ exec_body.len, exec_body },
+            );
+            conn.stream.writeAll(resp) catch return;
+        } else |_| return;
+    }
+
+    if (!waitAcceptReady(ctx.server, &ctx.done)) return;
+    const conn = ctx.server.accept() catch return;
+    defer conn.stream.close();
+    var req_buf: [1024]u8 = undefined;
+    _ = conn.stream.read(&req_buf) catch {};
+    conn.stream.writeAll("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n") catch return;
+
+    while (!ctx.done.load(.acquire)) {
+        std.time.sleep(2 * std.time.ns_per_ms);
+    }
+}
+
+fn runSilentUpgradeCase(
+    alloc: std.mem.Allocator,
+    sock_tag: []const u8,
+    mode: SilentUpgradeMode,
+    stdin_fd: ?std.posix.fd_t,
+) !void {
+    const sock_path = try std.fmt.allocPrint(alloc, "/tmp/zp-bug032-{s}-{d}.sock", .{ sock_tag, std.time.nanoTimestamp() });
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    var ctx = SilentUpgradeMockCtx{ .server = &server, .mode = mode };
+    const thread = try std.Thread.spawn(.{}, runSilentUpgradeMockServer, .{&ctx});
+    var joined = false;
+    defer {
+        ctx.done.store(true, .release);
+        if (!joined) thread.join();
+    }
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path, .timeout_ms = 25 };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    const call_res = switch (mode) {
+        .attach_only => attachContainer(&client, &logger, "web", stdin_fd != null, true, stdin_fd, out.writer()),
+        .exec_create_then_upgrade => blk: {
+            _ = execCommandWithIo(&client, &logger, "web", .{
+                .AttachStdin = true,
+                .Tty = true,
+                .Cmd = &.{"sh"},
+            }, stdin_fd, out.writer()) catch |e| break :blk @as(anyerror!void, e);
+            break :blk @as(anyerror!void, {});
+        },
+    };
+    try std.testing.expectError(http.Error.Timeout, call_res);
+
+    ctx.done.store(true, .release);
+    thread.join();
+    joined = true;
+}
+
+test "BUG-032: interactive attach and exec return Error.Timeout on silent upgraded stream" {
+    const alloc = std.testing.allocator;
+    try std.testing.expect(http.interactive_timeout_ms < http.blocking_timeout_ms);
+
+    // 1) attachContainer with null stdin and silent peer after 101 upgrade.
+    try runSilentUpgradeCase(alloc, "attach", .attach_only, null);
+
+    // 2) execCommandWithIo (interactive Tty) with idle open stdin pipe and silent peer.
+    const pipe_fds = try std.posix.pipe();
+    defer {
+        std.posix.close(pipe_fds[0]);
+        std.posix.close(pipe_fds[1]);
+    }
+    try runSilentUpgradeCase(alloc, "exec", .exec_create_then_upgrade, pipe_fds[0]);
+
+    // 3) pumpBidirectional surfaces POLL.ERR cleanly instead of spinning.
+    const err_pipe = try std.posix.pipe();
+    std.posix.close(err_pipe[0]);
+    defer std.posix.close(err_pipe[1]);
+    var sink = std.ArrayList(u8).init(alloc);
+    defer sink.deinit();
+    try std.testing.expectError(
+        http.Error.InvalidResponse,
+        pumpBidirectional(alloc, .{ .handle = err_pipe[1] }, "", null, sink.writer(), true, 25),
     );
 }
