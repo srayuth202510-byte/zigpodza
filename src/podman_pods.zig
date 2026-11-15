@@ -116,15 +116,216 @@ test "pod endpoints reject traversal and invalid identifiers fail-closed" {
     defer sink.deinit();
 
     var e1 = false;
-    createPod(&client, &logger, "../evil", sink.writer()) catch |e| { e1 = e == ApiError.InvalidIdentifier; };
+    createPod(&client, &logger, "../evil", sink.writer()) catch |e| {
+        e1 = e == ApiError.InvalidIdentifier;
+    };
     try std.testing.expect(e1);
     var e2 = false;
-    createPod(&client, &logger, "pod?name", sink.writer()) catch |e| { e2 = e == ApiError.InvalidIdentifier; };
+    createPod(&client, &logger, "pod?name", sink.writer()) catch |e| {
+        e2 = e == ApiError.InvalidIdentifier;
+    };
     try std.testing.expect(e2);
     var e3 = false;
-    stopPod(&client, &logger, "a/../b", sink.writer()) catch |e| { e3 = e == ApiError.InvalidIdentifier; };
+    stopPod(&client, &logger, "a/../b", sink.writer()) catch |e| {
+        e3 = e == ApiError.InvalidIdentifier;
+    };
     try std.testing.expect(e3);
     var e4 = false;
-    rmPod(&client, &logger, "", false, sink.writer()) catch |e| { e4 = e == ApiError.InvalidIdentifier; };
+    rmPod(&client, &logger, "", false, sink.writer()) catch |e| {
+        e4 = e == ApiError.InvalidIdentifier;
+    };
     try std.testing.expect(e4);
+}
+
+test "pod lifecycle over mock Unix socket prints ids and rows" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-pods-life-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const create_json = "{\"Id\":\"abcdef1234567890ff\",\"Warnings\":[]}";
+    const create_resp = std.fmt.comptimePrint(
+        "HTTP/1.1 201 Created\r\nContent-Length: {d}\r\n\r\n{s}",
+        .{ create_json.len, create_json },
+    );
+    const list_json =
+        \\[{"Id":"abcdef1234567890","Name":"webpod","Status":"Running","Created":"1 minute ago"}]
+    ;
+    const list_resp = std.fmt.comptimePrint(
+        "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}",
+        .{ list_json.len, list_json },
+    );
+    const ok_resp = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n";
+
+    const replies = [_]ScriptedReply{
+        .{
+            .expected_prefix = "POST /v1.40/libpod/pods/create HTTP/1.1\r\n",
+            .expected_substring = "\"name\":\"webpod\"",
+            .raw_response = create_resp,
+        },
+        .{
+            .expected_prefix = "GET /v1.40/libpod/pods/json HTTP/1.1\r\n",
+            .raw_response = list_resp,
+        },
+        .{
+            .expected_prefix = "POST /v1.40/libpod/pods/webpod/stop HTTP/1.1\r\n",
+            .raw_response = ok_resp,
+        },
+        .{
+            .expected_prefix = "DELETE /v1.40/libpod/pods/webpod?force=true HTTP/1.1\r\n",
+            .raw_response = ok_resp,
+        },
+        .{
+            .expected_prefix = "DELETE /v1.40/libpod/pods/webpod HTTP/1.1\r\n",
+            .raw_response = ok_resp,
+        },
+    };
+
+    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    try createPod(&client, &logger, "webpod", out.writer());
+    try listPods(&client, &logger, out.writer());
+    try stopPod(&client, &logger, "webpod", out.writer());
+    try rmPod(&client, &logger, "webpod", true, out.writer());
+    try rmPod(&client, &logger, "webpod", false, out.writer());
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "abcdef123456") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "webpod") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "Running") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "1 minute ago") != null);
+}
+
+test "pod endpoints surface daemon errors and malformed payloads fail-closed" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-pods-err-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const boom_json = "{\"message\":\"boom\"}";
+    const replies = [_]ScriptedReply{
+        .{
+            .expected_prefix = "POST /v1.40/libpod/pods/create HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint(
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ boom_json.len, boom_json },
+            ),
+        },
+        .{
+            .expected_prefix = "GET /v1.40/libpod/pods/json HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nnotjson",
+        },
+    };
+
+    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    var sink = std.ArrayList(u8).init(alloc);
+    defer sink.deinit();
+
+    var got_api_err = false;
+    createPod(&client, &logger, "webpod", sink.writer()) catch |e| {
+        got_api_err = e == ApiError.PodmanApiError;
+    };
+    try std.testing.expect(got_api_err);
+
+    var got_parse_err = false;
+    listPods(&client, &logger, sink.writer()) catch {
+        got_parse_err = true;
+    };
+    try std.testing.expect(got_parse_err);
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
+    // listPods prints the table header before parsing; malformed JSON must
+    // never emit a data row.
+    try std.testing.expect(std.mem.startsWith(u8, sink.items, "POD ID"));
+    try std.testing.expect(std.mem.indexOf(u8, sink.items, "abcdef123456") == null);
+}
+
+test "createPod accepts 128-char identifier and rejects over-limit name" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-pods-bnd-{d}.sock",
+        .{std.time.nanoTimestamp()},
+    );
+    defer alloc.free(sock_path);
+    std.fs.deleteFileAbsolute(sock_path) catch {};
+    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+
+    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
+    defer server.deinit();
+
+    const create_json = "{\"Id\":\"beef0000dead1111\"}";
+    const replies = [_]ScriptedReply{.{
+        .expected_prefix = "POST /v1.40/libpod/pods/create HTTP/1.1\r\n",
+        .raw_response = std.fmt.comptimePrint(
+            "HTTP/1.1 201 Created\r\nContent-Length: {d}\r\n\r\n{s}",
+            .{ create_json.len, create_json },
+        ),
+    }};
+
+    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path };
+    var logger = log.Logger{ .echo_stderr = false };
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8).init(alloc);
+    defer out.deinit();
+
+    const max_name = "p" ** 128;
+    try createPod(&client, &logger, max_name, out.writer());
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(@as(usize, 1), ctx.matched);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "beef0000dead") != null);
+
+    const over_name = "p" ** 129;
+    var rejected = false;
+    createPod(&client, &logger, over_name, out.writer()) catch |e| {
+        rejected = e == ApiError.InvalidIdentifier;
+    };
+    try std.testing.expect(rejected);
+    try std.testing.expectEqual(@as(usize, 1), ctx.matched);
 }
