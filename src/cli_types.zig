@@ -39,7 +39,16 @@ pub const usage =
     \\      --init                     Run an init process inside the container
     \\      --health-cmd CMD           Command to run to check container health
     \\      --health-interval DUR      Time between running the health check (e.g., 30s, 500ms)
+    \\      --dns IP                   DNS server for the container (repeatable, IP literal)
+    \\      --add-host HOST:IP         Add an /etc/hosts entry (repeatable)
+    \\      --stop-timeout SECS        Seconds to wait before killing on stop (0-3600)
+    \\      --platform OS/ARCH[/VAR]   Select the image platform (e.g., linux/arm64)
+    \\      --pull always|missing|never  Pull the image before creating the container
     \\  compose up|down|ps [-f FILE] [-d] [--json]  Manage multi-container stacks from compose.yaml
+    \\  compose start|stop|restart|pull [-t SECS] [SERVICE...]  Act on all or selected services
+    \\  compose logs [-f] [-t] [--tail N] [SERVICE...]  Show service logs (-f needs exactly one SERVICE)
+    \\  compose exec [-i] [-t] SERVICE CMD...  Run a command in a service container
+    \\  compose config                 Validate compose.yaml and print the resolved services
     \\  ps [-a] [-q] [--filter KEY=VALUE] [--json]  List containers (-a: include stopped, -q: IDs only)
     \\  images [-a] [-q] [--json]      List local images (-a: include intermediate, -q: IDs only)
     \\  pull IMAGE                     Pull an image from a registry
@@ -147,9 +156,27 @@ pub const UlimitSpec = struct {
     hard: i64,
 };
 
+pub const PullPolicy = enum { always, missing, never };
+
+pub const max_dns_servers = 8;
+pub const max_extra_hosts = 32;
+
 pub const RunOpts = struct {
     /// `create`: build the container but do not start it.
     create_only: bool = false,
+    /// `--dns IP` (repeatable).
+    dns_buf: [max_dns_servers][]const u8 = undefined,
+    dns_len: usize = 0,
+    /// `--add-host HOST:IP` (repeatable).
+    host_buf: [max_extra_hosts][]const u8 = undefined,
+    host_len: usize = 0,
+    stop_timeout: ?u32 = null,
+    /// `--platform os/arch[/variant]`.
+    platform: ?[]const u8 = null,
+    /// `--pull`: null keeps the previous behaviour (no implicit pull).
+    pull: ?PullPolicy = null,
+
+
     image: []const u8,
     cmd: []const []const u8 = &.{},
     env: []const []const u8 = &.{},
@@ -182,6 +209,13 @@ pub const RunOpts = struct {
     nano_cpus: ?i64 = null,
     health_cmd: ?[]const u8 = null,
     health_interval_ns: ?i64 = null,
+
+    pub fn dns(self: *const RunOpts) []const []const u8 {
+        return self.dns_buf[0..self.dns_len];
+    }
+    pub fn extraHosts(self: *const RunOpts) []const []const u8 {
+        return self.host_buf[0..self.host_len];
+    }
 };
 
 pub const RmOpts = struct {
@@ -438,6 +472,13 @@ pub const ComposeAction = enum {
     up,
     down,
     ps,
+    start,
+    stop,
+    restart,
+    logs,
+    exec,
+    pull,
+    config,
 };
 
 pub const ComposeOpts = struct {
@@ -447,6 +488,19 @@ pub const ComposeOpts = struct {
     json: bool = false,
     profile: Profile = .default,
     policy_path: ?[]const u8 = null,
+    /// Service names (start/stop/restart/logs/pull) or `[SERVICE]` for exec.
+    /// Slices point into argv; empty means "all services".
+    services: []const []const u8 = &.{},
+    /// `exec`: the command to run inside the service container.
+    cmd: []const []const u8 = &.{},
+    interactive: bool = false,
+    tty: bool = false,
+    /// `stop`/`restart -t SECS`.
+    timeout_secs: ?u32 = null,
+    /// `logs -f` (only with exactly one service).
+    follow: bool = false,
+    timestamps: bool = false,
+    tail: ?u32 = null,
 };
 
 pub const Command = union(enum) {

@@ -35,7 +35,7 @@ const bash_template =
     \\            COMPREPLY=( $(compgen -W "create ps stop rm" -- "${{cur}}") )
     \\            ;;
     \\        compose)
-    \\            COMPREPLY=( $(compgen -W "up down ps" -- "${{cur}}") )
+    \\            COMPREPLY=( $(compgen -W "up down ps start stop restart logs exec pull config" -- "${{cur}}") )
     \\            ;;
     \\        policy)
     \\            COMPREPLY=( $(compgen -W "show check" -- "${{cur}}") )
@@ -47,7 +47,7 @@ const bash_template =
     \\            COMPREPLY=( $(compgen -W "-t --tag -f --file --build-arg --target --no-cache" -- "${{cur}}") )
     \\            ;;
     \\        run)
-    \\            COMPREPLY=( $(compgen -W "-d --detach --rm --name -e --env --env-file -v --volume -p --publish -l --label --network -w --workdir -u --user --cap-drop --cap-add -m --memory --cpus --pids-limit --read-only --no-new-privileges --entrypoint --hostname --restart --shm-size --ulimit --init --health-cmd --health-interval --profile --policy -i --interactive -t --tty" -- "${{cur}}") )
+    \\            COMPREPLY=( $(compgen -W "-d --detach --rm --name -e --env --env-file -v --volume -p --publish -l --label --network -w --workdir -u --user --cap-drop --cap-add -m --memory --cpus --pids-limit --read-only --no-new-privileges --entrypoint --hostname --restart --shm-size --ulimit --init --health-cmd --health-interval --dns --add-host --stop-timeout --platform --pull --profile --policy -i --interactive -t --tty" -- "${{cur}}") )
     \\            ;;
     \\        *)
     \\            COMPREPLY=()
@@ -131,7 +131,7 @@ const zsh_script =
     \\            _values 'action' create ps stop rm
     \\            ;;
     \\        compose)
-    \\            _values 'action' up down ps
+    \\            _values 'action' up down ps start stop restart logs exec pull config
     \\            ;;
     \\        policy)
     \\            _values 'action' show check
@@ -155,7 +155,7 @@ const fish_template =
     \\complete -c zigpod -n "__fish_seen_subcommand_from volume" -a "ls create rm inspect prune"
     \\complete -c zigpod -n "__fish_seen_subcommand_from network" -a "ls inspect create rm prune"
     \\complete -c zigpod -n "__fish_seen_subcommand_from pod" -a "create ps stop rm"
-    \\complete -c zigpod -n "__fish_seen_subcommand_from compose" -a "up down ps"
+    \\complete -c zigpod -n "__fish_seen_subcommand_from compose" -a "up down ps start stop restart logs exec pull config"
     \\complete -c zigpod -n "__fish_seen_subcommand_from policy" -a "show check"
     \\complete -c zigpod -n "__fish_seen_subcommand_from system" -a "ping df prune"
     \\

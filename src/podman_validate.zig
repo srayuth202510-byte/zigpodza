@@ -368,6 +368,38 @@ pub fn validateHostname(h: []const u8) ApiError!void {
     }
 }
 
+/// `--dns`: must be an IPv4/IPv6 literal (no hostnames, ports, or scopes).
+pub fn validateDnsServer(ip: []const u8) ApiError!void {
+    if (ip.len == 0 or ip.len > 45) return ApiError.InvalidDns;
+    _ = std.Io.net.IpAddress.parse(ip, 0) catch return ApiError.InvalidDns;
+}
+
+/// `--add-host`: `HOSTNAME:IP` where HOSTNAME passes the hostname rules and IP
+/// is an IPv4/IPv6 literal (IPv6 keeps its own colons after the first one).
+pub fn validateExtraHost(entry: []const u8) ApiError!void {
+    if (entry.len == 0 or entry.len > 128) return ApiError.InvalidExtraHost;
+    const colon = std.mem.indexOfScalar(u8, entry, ':') orelse return ApiError.InvalidExtraHost;
+    validateHostname(entry[0..colon]) catch return ApiError.InvalidExtraHost;
+    const ip = entry[colon + 1 ..];
+    if (ip.len == 0) return ApiError.InvalidExtraHost;
+    _ = std.Io.net.IpAddress.parse(ip, 0) catch return ApiError.InvalidExtraHost;
+}
+
+/// `--platform`: `os/arch[/variant]`, each part `[a-z0-9_]{1,32}`.
+pub fn validatePlatform(p: []const u8) ApiError!void {
+    if (p.len == 0 or p.len > 100) return ApiError.InvalidPlatform;
+    var parts: usize = 0;
+    var it = std.mem.splitScalar(u8, p, '/');
+    while (it.next()) |part| {
+        parts += 1;
+        if (part.len == 0 or part.len > 32) return ApiError.InvalidPlatform;
+        for (part) |c| {
+            if (!(std.ascii.isLower(c) or std.ascii.isDigit(c) or c == '_')) return ApiError.InvalidPlatform;
+        }
+    }
+    if (parts < 2 or parts > 3) return ApiError.InvalidPlatform;
+}
+
 pub fn validateRestartPolicy(rp: RestartPolicy) ApiError!void {
     if (std.mem.eql(u8, rp.Name, "on-failure")) {
         if (rp.MaximumRetryCount > 10_000) return ApiError.InvalidRestartPolicy;

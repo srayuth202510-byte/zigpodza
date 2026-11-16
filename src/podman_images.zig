@@ -104,6 +104,22 @@ pub fn listImagesWithOptions(client: *const http.Client, logger: *log.Logger, op
     logger.info("listed {d} image(s)", .{parsed.value.len});
 }
 
+/// `GET /images/{ref}/json` -> true on 200, false on 404 (used by `run --pull missing`).
+pub fn imageExists(client: *const http.Client, logger: *log.Logger, ref: []const u8) !bool {
+    try validateResourceRef(ref);
+    var path: std.ArrayList(u8) = .empty;
+    defer path.deinit(client.allocator);
+    try path.appendSlice(client.allocator, api_prefix ++ "/images/");
+    try path.appendSlice(client.allocator, ref);
+    try path.appendSlice(client.allocator, "/json");
+    logger.debug("GET {s}", .{path.items});
+    const resp = try client.request("GET", path.items, null);
+    defer resp.deinit();
+    if (resp.ok()) return true;
+    if (resp.status == 404) return false;
+    return logApiFailure(logger, "GET", path.items, resp);
+}
+
 pub fn pullImage(client: *const http.Client, logger: *log.Logger, image: []const u8, writer: anytype) !void {
     try validateResourceRef(image);
     var path_buf: std.ArrayList(u8) = .empty;

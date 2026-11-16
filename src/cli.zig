@@ -228,61 +228,97 @@ fn parseAudit(args: []const []const u8) ParseError!Command {
     return .{ .audit = opts };
 }
 
+fn parseComposeAction(name: []const u8) ?ComposeAction {
+    return std.meta.stringToEnum(ComposeAction, name);
+}
+
+/// Parses `compose [-f FILE] ACTION [FLAGS...] [SERVICE...|SERVICE CMD...]`.
+/// Flags must come before the first service name; for `exec` everything after
+/// the service name is the command (like docker).
 fn parseCompose(args: []const []const u8) ParseError!Command {
+    var opts = ComposeOpts{ .action = .ps };
     var action: ?ComposeAction = null;
-    var file: ?[]const u8 = null;
-    var detach = false;
-    var json = false;
-    var profile: Profile = .default;
-    var policy_path: ?[]const u8 = null;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const a = args[i];
-        if (eql(a, "-f") or eql(a, "--file")) {
-            file = try parseEnvFilePath(try takeValue(args, &i));
+        if (action == .logs and (eql(a, "-f") or eql(a, "--follow"))) {
+            // After `logs`, `-f` is --follow (docker compose semantics); `--file` still works.
+            opts.follow = true;
+        } else if (eql(a, "-f") or eql(a, "--file")) {
+            opts.file = try parseEnvFilePath(try takeValue(args, &i));
         } else if (std.mem.startsWith(u8, a, "--file=")) {
-            file = try parseEnvFilePath(a["--file=".len..]);
+            opts.file = try parseEnvFilePath(a["--file=".len..]);
         } else if (eql(a, "-d") or eql(a, "--detach")) {
-            detach = true;
+            opts.detach = true;
         } else if (eql(a, "--json")) {
-            json = true;
+            opts.json = true;
         } else if (eql(a, "--profile")) {
-            profile = try parseProfile(try takeValue(args, &i));
+            opts.profile = try parseProfile(try takeValue(args, &i));
         } else if (std.mem.startsWith(u8, a, "--profile=")) {
-            profile = try parseProfile(a["--profile=".len..]);
+            opts.profile = try parseProfile(a["--profile=".len..]);
         } else if (eql(a, "--policy")) {
-            policy_path = try parsePolicyPath(try takeValue(args, &i));
+            opts.policy_path = try parsePolicyPath(try takeValue(args, &i));
         } else if (std.mem.startsWith(u8, a, "--policy=")) {
-            policy_path = try parsePolicyPath(a["--policy=".len..]);
+            opts.policy_path = try parsePolicyPath(a["--policy=".len..]);
+        } else if (action != null and (eql(a, "-t") or eql(a, "--time") or eql(a, "--timestamps") or eql(a, "--tty"))) {
+            // `-t` means --time for stop/restart, --timestamps for logs, --tty for exec.
+            switch (action.?) {
+                .stop, .restart => {
+                    if (eql(a, "--timestamps") or eql(a, "--tty")) return error.UnknownFlag;
+                    opts.timeout_secs = try parseTimeoutSecs(try takeValue(args, &i));
+                },
+                .logs => {
+                    if (eql(a, "--time") or eql(a, "--tty")) return error.UnknownFlag;
+                    opts.timestamps = true;
+                },
+                .exec => {
+                    if (eql(a, "--time") or eql(a, "--timestamps")) return error.UnknownFlag;
+                    opts.tty = true;
+                },
+                else => return error.UnknownFlag,
+            }
+        } else if (action == .logs and (eql(a, "--tail") or eql(a, "-n"))) {
+            opts.tail = try parseTail(try takeValue(args, &i));
+        } else if (action == .logs and std.mem.startsWith(u8, a, "--tail=")) {
+            opts.tail = try parseTail(a["--tail=".len..]);
+        } else if (action == .exec and (eql(a, "-i") or eql(a, "--interactive"))) {
+            opts.interactive = true;
+        } else if (action == .exec and (eql(a, "-it") or eql(a, "-ti"))) {
+            opts.interactive = true;
+            opts.tty = true;
         } else if (isFlag(a)) {
             return error.UnknownFlag;
         } else if (action == null) {
-            if (eql(a, "up")) {
-                action = .up;
-            } else if (eql(a, "down")) {
-                action = .down;
-            } else if (eql(a, "ps")) {
-                action = .ps;
-            } else {
-                return error.InvalidValue;
-            }
+            action = parseComposeAction(a) orelse return error.InvalidValue;
         } else {
-            return error.TooManyArguments;
+            // First positional after the action: the rest are services / command.
+            const rest = args[i..];
+            switch (action.?) {
+                .exec => {
+                    opts.services = rest[0..1];
+                    opts.cmd = rest[1..];
+                },
+                .start, .stop, .restart, .logs, .pull => {
+                    for (rest) |r| {
+                        if (isFlag(r)) return error.UnknownFlag;
+                    }
+                    opts.services = rest;
+                },
+                else => return error.TooManyArguments,
+            }
+            break;
         }
     }
 
     const act = action orelse return error.MissingArgument;
-    if (act != .up and (detach or profile != .default or policy_path != null)) return error.UnknownFlag;
-    if (act != .ps and json) return error.UnknownFlag;
-    return .{ .compose = .{
-        .action = act,
-        .file = file,
-        .detach = detach,
-        .json = json,
-        .profile = profile,
-        .policy_path = policy_path,
-    } };
+    opts.action = act;
+    if (act != .up and (opts.detach or opts.profile != .default or opts.policy_path != null)) return error.UnknownFlag;
+    if (act != .ps and opts.json) return error.UnknownFlag;
+    if (act == .exec and (opts.services.len != 1 or opts.cmd.len == 0)) return error.MissingArgument;
+    // Following several log streams would need multiplexing; keep -f to one service.
+    if (opts.follow and opts.services.len != 1) return error.InvalidValue;
+    return .{ .compose = opts };
 }
 
 fn parseBuild(args: []const []const u8) ParseError!Command {
@@ -663,6 +699,31 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
             opts.hostname = try parseHostname(try takeValue(args, &i));
         } else if (std.mem.startsWith(u8, a, "--hostname=")) {
             opts.hostname = try parseHostname(a["--hostname=".len..]);
+        } else if (eql(a, "--dns") or std.mem.startsWith(u8, a, "--dns=")) {
+            const v = if (eql(a, "--dns")) try takeValue(args, &i) else a["--dns=".len..];
+            _ = std.Io.net.IpAddress.parse(v, 0) catch return error.InvalidValue;
+            if (opts.dns_len >= opts.dns_buf.len) return error.TooManyArguments;
+            opts.dns_buf[opts.dns_len] = v;
+            opts.dns_len += 1;
+        } else if (eql(a, "--add-host") or std.mem.startsWith(u8, a, "--add-host=")) {
+            const v = if (eql(a, "--add-host")) try takeValue(args, &i) else a["--add-host=".len..];
+            const colon = std.mem.indexOfScalar(u8, v, ':') orelse return error.InvalidValue;
+            _ = try parseHostname(v[0..colon]);
+            _ = std.Io.net.IpAddress.parse(v[colon + 1 ..], 0) catch return error.InvalidValue;
+            if (opts.host_len >= opts.host_buf.len) return error.TooManyArguments;
+            opts.host_buf[opts.host_len] = v;
+            opts.host_len += 1;
+        } else if (eql(a, "--stop-timeout")) {
+            opts.stop_timeout = try parseTimeoutSecs(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--stop-timeout=")) {
+            opts.stop_timeout = try parseTimeoutSecs(a["--stop-timeout=".len..]);
+        } else if (eql(a, "--platform")) {
+            opts.platform = try nonEmpty(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--platform=")) {
+            opts.platform = try nonEmpty(a["--platform=".len..]);
+        } else if (eql(a, "--pull") or std.mem.startsWith(u8, a, "--pull=")) {
+            const v = if (eql(a, "--pull")) try takeValue(args, &i) else a["--pull=".len..];
+            opts.pull = std.meta.stringToEnum(types.PullPolicy, v) orelse return error.InvalidValue;
         } else if (eql(a, "--restart")) {
             opts.restart_policy = try parseRestartPolicy(try takeValue(args, &i));
         } else if (std.mem.startsWith(u8, a, "--restart=")) {
@@ -1536,6 +1597,73 @@ test "parse build -f/--build-arg/--target/--no-cache" {
         many[k + 1] = "A=1";
     }
     try std.testing.expectError(error.TooManyArguments, testParse(&many));
+}
+
+test "parse compose start/stop/restart/logs/exec/pull/config" {
+    const st = (try testParse(&.{ "compose", "-f", "/srv/c.yaml", "stop", "-t", "3", "api", "db" })).command.compose;
+    try std.testing.expectEqual(ComposeAction.stop, st.action);
+    try std.testing.expectEqual(@as(?u32, 3), st.timeout_secs);
+    try std.testing.expectEqual(@as(usize, 2), st.services.len);
+    try std.testing.expectEqualStrings("db", st.services[1]);
+
+    const all = (try testParse(&.{ "compose", "restart" })).command.compose;
+    try std.testing.expectEqual(@as(usize, 0), all.services.len);
+
+    const lg = (try testParse(&.{ "compose", "logs", "-f", "-t", "--tail", "5", "api" })).command.compose;
+    try std.testing.expect(lg.follow and lg.timestamps);
+    try std.testing.expectEqual(@as(?u32, 5), lg.tail);
+    try std.testing.expectError(error.InvalidValue, testParse(&.{ "compose", "logs", "-f" }));
+    try std.testing.expectError(error.InvalidValue, testParse(&.{ "compose", "logs", "-f", "a", "b" }));
+
+    const ex = (try testParse(&.{ "compose", "exec", "-it", "api", "sh", "-c", "echo -t" })).command.compose;
+    try std.testing.expect(ex.interactive and ex.tty);
+    try std.testing.expectEqualStrings("api", ex.services[0]);
+    try std.testing.expectEqual(@as(usize, 3), ex.cmd.len);
+    try std.testing.expectEqualStrings("echo -t", ex.cmd[2]);
+    try std.testing.expectError(error.MissingArgument, testParse(&.{ "compose", "exec", "api" }));
+    try std.testing.expectError(error.MissingArgument, testParse(&.{ "compose", "exec" }));
+
+    try std.testing.expectEqual(ComposeAction.config, (try testParse(&.{ "compose", "config" })).command.compose.action);
+    try std.testing.expectEqual(ComposeAction.pull, (try testParse(&.{ "compose", "pull", "db" })).command.compose.action);
+
+    // Flags are action-specific and must precede service names.
+    try std.testing.expectError(error.TooManyArguments, testParse(&.{ "compose", "config", "api" }));
+    try std.testing.expectError(error.UnknownFlag, testParse(&.{ "compose", "start", "-t", "3" }));
+    try std.testing.expectError(error.UnknownFlag, testParse(&.{ "compose", "logs", "--time", "3" }));
+    try std.testing.expectError(error.UnknownFlag, testParse(&.{ "compose", "stop", "api", "-t", "3" }));
+    try std.testing.expectError(error.UnknownFlag, testParse(&.{ "compose", "pull", "-d" }));
+    try std.testing.expectError(error.InvalidValue, testParse(&.{ "compose", "build" }));
+    try std.testing.expectError(error.InvalidValue, testParse(&.{ "compose", "stop", "-t", "9999" }));
+}
+
+test "parse run --dns/--add-host/--stop-timeout/--platform/--pull" {
+    const alloc = std.testing.allocator;
+    var p = try parse(alloc, &.{
+        "run",          "--dns",       "1.1.1.1",      "--dns=2606:4700:4700::1111", "--add-host",
+        "db.local:10.0.0.5", "--add-host=v6:::1",     "--stop-timeout", "15",
+        "--platform",   "linux/arm64", "--pull=always", "alpine:3.20",
+    });
+    defer p.deinit(alloc);
+    const r = p.command.run;
+    try std.testing.expectEqual(@as(usize, 2), r.dns().len);
+    try std.testing.expectEqualStrings("2606:4700:4700::1111", r.dns()[1]);
+    try std.testing.expectEqual(@as(usize, 2), r.extraHosts().len);
+    try std.testing.expectEqualStrings("v6:::1", r.extraHosts()[1]);
+    try std.testing.expectEqual(@as(?u32, 15), r.stop_timeout);
+    try std.testing.expectEqualStrings("linux/arm64", r.platform.?);
+    try std.testing.expectEqual(types.PullPolicy.always, r.pull.?);
+
+    const bad = [_][]const []const u8{
+        &.{ "run", "--dns", "dns.google", "alpine" },
+        &.{ "run", "--dns", "1.1.1.1:53", "alpine" },
+        &.{ "run", "--add-host", "noip", "alpine" },
+        &.{ "run", "--add-host", "bad_host:1.2.3.4", "alpine" },
+        &.{ "run", "--add-host", "h:not-an-ip", "alpine" },
+        &.{ "run", "--stop-timeout", "3601", "alpine" },
+        &.{ "run", "--pull", "sometimes", "alpine" },
+    };
+    for (bad) |args| try std.testing.expectError(error.InvalidValue, parse(alloc, args));
+    try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "run", "--platform=", "alpine" }));
 }
 
 test "parse errors" {

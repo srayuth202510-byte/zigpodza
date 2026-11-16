@@ -289,7 +289,7 @@ fn dispatch(
             .to_container => try transfer.cpToContainer(client, logger, opts.container, opts.host_path, opts.container_path, stdout),
             .from_container => try transfer.cpFromContainer(client, logger, opts.container, opts.container_path, opts.host_path, stdout),
         },
-        .compose => |opts| try compose.executeCompose(client, logger, opts, stdout),
+        .compose => |opts| return try compose.executeCompose(client, logger, opts, stdout),
         .system => |s| switch (s.action) {
             .ping => try pod.systemPing(client, logger, stdout),
             .df => try pod.systemDf(client, logger, stdout),
@@ -476,6 +476,8 @@ fn dispatch(
                 r.network != null or
                 r.cap_drop.len > 0 or
                 r.cap_add.len > 0 or
+                r.dns_len > 0 or
+                r.host_len > 0 or
                 tmpfs_bounds != null;
             const sec_opts: []const []const u8 = &.{"no-new-privileges"};
             const host_cfg: ?pod.HostConfig = if (has_host_cfg) .{
@@ -494,6 +496,8 @@ fn dispatch(
                 .CapDrop = if (r.cap_drop.len > 0) r.cap_drop else null,
                 .CapAdd = if (r.cap_add.len > 0) r.cap_add else null,
                 .Tmpfs = tmpfs_bounds,
+                .Dns = if (r.dns_len > 0) r.dns() else null,
+                .ExtraHosts = if (r.host_len > 0) r.extraHosts() else null,
             } else null;
 
             const req = pod.ContainerCreateRequest{
@@ -513,9 +517,30 @@ fn dispatch(
                 .AttachStderr = !r.detach and (r.interactive or r.tty),
                 .Tty = r.tty,
                 .Mounts = if (mount_buf.items.len > 0) mount_buf.items else null,
+                .StopTimeout = if (r.stop_timeout) |t| @as(i64, t) else null,
                 .HostConfig = host_cfg,
             };
-            const id = try pod.createContainer(client, logger, req, r.name);
+
+            // `--pull`: progress goes to stderr so `run -d` / `create` still print only the ID.
+            if (r.pull) |pp| {
+                const need_pull = switch (pp) {
+                    .always => true,
+                    .missing => !(try pod.imageExists(client, logger, r.image)),
+                    .never => false,
+                };
+                if (pp == .never and !(try pod.imageExists(client, logger, r.image))) {
+                    logger.err("image {s} not present locally and --pull=never", .{r.image});
+                    return pod.ApiError.NotFound;
+                }
+                if (need_pull) {
+                    var err_buf: [256]u8 = undefined;
+                    var stderr_w: std.Io.File.Writer = .init(std.Io.File.stderr(), io, &err_buf);
+                    try pod.pullImage(client, logger, r.image, &stderr_w.interface);
+                    stderr_w.interface.flush() catch {};
+                }
+            }
+
+            const id = try pod.createContainerOnPlatform(client, logger, req, r.name, r.platform);
             defer client.allocator.free(id);
             if (r.create_only) {
                 try stdout.print("{s}\n", .{id});
@@ -665,7 +690,19 @@ fn reportFailure(logger: *log.Logger, cmd: cli.Command, socket_path: []const u8,
         ),
         pod.ApiError.InvalidTimeout => logger.deny(
             "api.restartContainer",
-            "Rejected invalid container restart timeout (must be <= 3600 seconds).",
+            "Rejected invalid container stop/restart timeout (must be <= 3600 seconds).",
+        ),
+        pod.ApiError.InvalidDns => logger.deny(
+            "api.validateDnsServer",
+            "Rejected --dns value (must be an IPv4/IPv6 literal).",
+        ),
+        pod.ApiError.InvalidExtraHost => logger.deny(
+            "api.validateExtraHost",
+            "Rejected --add-host entry (must be HOSTNAME:IP).",
+        ),
+        pod.ApiError.InvalidPlatform => logger.deny(
+            "api.validatePlatform",
+            "Rejected --platform value (must be os/arch[/variant]).",
         ),
         pod.ApiError.InvalidFilter => logger.deny(
             "api.validateContainerFilter",
@@ -686,6 +723,10 @@ fn reportFailure(logger: *log.Logger, cmd: cli.Command, socket_path: []const u8,
         pod.ApiError.InvalidFormat => logger.deny(
             "api.validateFormat",
             "Rejected unsupported inspect --format template (only {{.A.B}} and {{json .A.B}}).",
+        ),
+        compose.ComposeError.UnknownService => logger.deny(
+            "compose.selectServices",
+            "Rejected compose command: service name not defined in compose.yaml.",
         ),
         compose.ComposeError.CyclicDependency,
         compose.ComposeError.UnknownDependency,

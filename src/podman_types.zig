@@ -28,6 +28,9 @@ pub const ApiError = error{
     InvalidBuildArg,
     InvalidDockerfilePath,
     InvalidBuildTarget,
+    InvalidDns,
+    InvalidExtraHost,
+    InvalidPlatform,
     PolicyViolation,
     InvalidPolicyFile,
     BuildFailed,
@@ -80,6 +83,10 @@ pub const HostConfig = struct {
     CapDrop: ?[]const []const u8 = null,
     CapAdd: ?[]const []const u8 = null,
     Tmpfs: ?TmpfsBounds = null,
+    /// `--dns`: IP literals only.
+    Dns: ?[]const []const u8 = null,
+    /// `--add-host`: `host:ip` entries for /etc/hosts.
+    ExtraHosts: ?[]const []const u8 = null,
 };
 
 /// A bind mount or named-volume mount, serialized into the container-create
@@ -222,6 +229,8 @@ pub const ContainerCreateRequest = struct {
     OpenStdin: bool = false,
     Tty: bool = false,
     Mounts: ?[]const Mount = null,
+    /// `--stop-timeout` seconds (0..3600).
+    StopTimeout: ?i64 = null,
     HostConfig: ?HostConfig = null,
     NetworkingConfig: ?NetworkingConfig = null,
 };

@@ -299,6 +299,22 @@ else
     fail "Build option validation/telemetry or build-arg redaction missing (see BUG-024, BUG-041)."
 fi
 
+# 8t. run --dns/--add-host/--platform: dedicated errors, API-layer re-validation, deny telemetry (BUG-016 / BUG-041)
+if has_match 'InvalidDns' "src/podman_types.zig" && has_match 'InvalidExtraHost' "src/podman_types.zig" && has_match 'InvalidPlatform' "src/podman_types.zig" \
+    && has_match 'validateDnsServer\(d\)' "src/podman_api.zig" && has_match 'validateExtraHost\(h\)' "src/podman_api.zig" && has_match 'validatePlatform\(p\)' "src/podman_api.zig" \
+    && has_match 'api\.validateDnsServer' "src/main.zig" && has_match 'api\.validateExtraHost' "src/main.zig" && has_match 'api\.validatePlatform' "src/main.zig"; then
+    pass "run --dns/--add-host/--platform are re-validated in createContainer with dedicated deny telemetry (BUG-016/BUG-041)."
+else
+    fail "Missing --dns/--add-host/--platform API re-validation or deny rule (see BUG-016, BUG-041)."
+fi
+
+# 8u. compose service selection fails closed and compose config redacts env values (BUG-024 / BUG-027)
+if has_match 'ComposeError\.UnknownService' "src/compose.zig" && has_match 'UnknownService' "src/main.zig" && has_match '=<redacted>' "src/compose.zig"; then
+    pass "compose subcommands reject unknown services and compose config redacts environment values (BUG-024/BUG-027)."
+else
+    fail "compose UnknownService handling or config env redaction missing (see BUG-024, BUG-027)."
+fi
+
 # 9. Run security-check.sh (includes zig build test & ELF hardening when zig is installed)
 SEC_OUT=""
 if SEC_OUT="$("$ROOT_DIR/scripts/security-check.sh" 2>&1)"; then

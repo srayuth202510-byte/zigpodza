@@ -67,6 +67,9 @@ pub const validateSignal = validate.validateSignal;
 pub const validateNanoCpus = validate.validateNanoCpus;
 pub const validateHostname = validate.validateHostname;
 pub const validateRestartPolicy = validate.validateRestartPolicy;
+pub const validateDnsServer = validate.validateDnsServer;
+pub const validateExtraHost = validate.validateExtraHost;
+pub const validatePlatform = validate.validatePlatform;
 pub const validateLabel = validate.validateLabel;
 pub const validateNetworkDriver = validate.validateNetworkDriver;
 pub const validateCpContainerPath = validate.validateCpContainerPath;
@@ -92,6 +95,7 @@ pub const removeImage = images.removeImage;
 pub const listImages = images.listImages;
 pub const listImagesJson = images.listImagesJson;
 pub const listImagesWithOptions = images.listImagesWithOptions;
+pub const imageExists = images.imageExists;
 pub const ImageListOptions = images.ImageListOptions;
 pub const pullImage = images.pullImage;
 pub const tagImage = images.tagImage;
@@ -132,8 +136,24 @@ pub fn createContainer(
     cfg: ContainerCreateRequest,
     name: ?[]const u8,
 ) ![]u8 {
+    return createContainerOnPlatform(client, logger, cfg, name, null);
+}
+
+/// Like `createContainer`, optionally selecting the image platform
+/// (`POST /containers/create?platform=os/arch`).
+pub fn createContainerOnPlatform(
+    client: *const http.Client,
+    logger: *log.Logger,
+    cfg: ContainerCreateRequest,
+    name: ?[]const u8,
+    platform: ?[]const u8,
+) ![]u8 {
     const io = client.io;
     if (name) |n| try validateIdentifier(n);
+    if (platform) |p| try validatePlatform(p);
+    if (cfg.StopTimeout) |t| {
+        if (t < 0 or t > 3600) return ApiError.InvalidTimeout;
+    }
     // Defense in depth: validate image reference before touching the socket (BUG-043).
     try validateResourceRef(cfg.Image);
     // Defense in depth: never serialize an unsafe mount even if a caller
@@ -161,6 +181,8 @@ pub fn createContainer(
         if (hc.NetworkMode) |m| try validateNetworkMode(m);
         if (hc.CapDrop) |caps| for (caps) |c| try validateCapability(c);
         if (hc.CapAdd) |caps| for (caps) |c| try validateCapability(c);
+        if (hc.Dns) |servers| for (servers) |d| try validateDnsServer(d);
+        if (hc.ExtraHosts) |hosts| for (hosts) |h| try validateExtraHost(h);
     }
     if (cfg.NetworkingConfig) |nc| {
         if (nc.EndpointsConfig.networks.len == 0) return ApiError.InvalidNetwork;
@@ -175,9 +197,17 @@ pub fn createContainer(
     var path_buf: std.ArrayList(u8) = .empty;
     defer path_buf.deinit(client.allocator);
     try path_buf.appendSlice(client.allocator, api_prefix ++ "/containers/create");
+    var sep: u8 = '?';
     if (name) |n| {
-        try path_buf.appendSlice(client.allocator, "?name=");
+        try path_buf.append(client.allocator, sep);
+        try path_buf.appendSlice(client.allocator, "name=");
         try appendQueryEncoded(client.allocator, &path_buf, n);
+        sep = '&';
+    }
+    if (platform) |p| {
+        try path_buf.append(client.allocator, sep);
+        try path_buf.appendSlice(client.allocator, "platform=");
+        try appendQueryEncoded(client.allocator, &path_buf, p);
     }
 
     const req_body = try std.json.Stringify.valueAlloc(client.allocator, cfg, .{
@@ -1668,6 +1698,73 @@ test "restart, pause, unpause, rename, and removeImage endpoints + validation" {
     try renameContainer(&client, &logger, "web", "web2");
     try removeImage(&client, &logger, "alpine:3.20", true, &out.writer);
     try std.testing.expectEqualStrings("Removed alpine:3.20\n", out.written());
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
+}
+
+test "run option validators: dns, extra hosts, platform" {
+    try validateDnsServer("1.1.1.1");
+    try validateDnsServer("::1");
+    for ([_][]const u8{ "", "dns.google", "1.1.1.1:53", "1.1.1", "[::1]" }) |bad| {
+        try std.testing.expectError(ApiError.InvalidDns, validateDnsServer(bad));
+    }
+    try validateExtraHost("db.local:10.0.0.5");
+    try validateExtraHost("v6:fe80::1");
+    for ([_][]const u8{ "", "noip", ":1.2.3.4", "h:", "bad_host:1.2.3.4", "h:1.2.3.4\nx" }) |bad| {
+        try std.testing.expectError(ApiError.InvalidExtraHost, validateExtraHost(bad));
+    }
+    try validatePlatform("linux/amd64");
+    try validatePlatform("linux/arm64/v8");
+    for ([_][]const u8{ "", "linux", "linux/", "/amd64", "Linux/amd64", "linux/amd64/v8/x", "linux/amd64?x=1" }) |bad| {
+        try std.testing.expectError(ApiError.InvalidPlatform, validatePlatform(bad));
+    }
+}
+
+test "createContainerOnPlatform sends platform, Dns, ExtraHosts, StopTimeout and re-validates" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-create-plat-{d}.sock",
+        .{std.Io.Clock.awake.now(std.testing.io).nanoseconds},
+    );
+    defer alloc.free(sock_path);
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
+
+    const created = "{\"Id\":\"abc1234567890def\"}";
+    const replies = [_]ScriptedReply{.{
+        .expected_prefix = "POST /v1.40/containers/create?name=web&platform=linux%2Farm64 HTTP/1.1\r\n",
+        .expected_substring = "\"StopTimeout\":15,\"HostConfig\":{\"AutoRemove\":false,\"ReadonlyRootfs\":false,\"Dns\":[\"1.1.1.1\"],\"ExtraHosts\":[\"db:10.0.0.5\"]}",
+        .raw_response = std.fmt.comptimePrint("HTTP/1.1 201 Created\r\nContent-Length: {d}\r\n\r\n{s}", .{ created.len, created }),
+    }};
+
+    var ctx = MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path, .io = std.testing.io };
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
+    defer logger.deinit();
+
+    // Hand-built unsafe values must be rejected by the API layer (defense in depth).
+    try std.testing.expectError(ApiError.InvalidDns, createContainer(&client, &logger, .{ .Image = "alpine:3.20", .HostConfig = .{ .Dns = &.{"evil.example"} } }, null));
+    try std.testing.expectError(ApiError.InvalidExtraHost, createContainer(&client, &logger, .{ .Image = "alpine:3.20", .HostConfig = .{ .ExtraHosts = &.{"x"} } }, null));
+    try std.testing.expectError(ApiError.InvalidTimeout, createContainer(&client, &logger, .{ .Image = "alpine:3.20", .StopTimeout = -1 }, null));
+    try std.testing.expectError(ApiError.InvalidPlatform, createContainerOnPlatform(&client, &logger, .{ .Image = "alpine:3.20" }, null, "linux/amd64&x=1"));
+
+    const id = try createContainerOnPlatform(&client, &logger, .{
+        .Image = "alpine:3.20",
+        .StopTimeout = 15,
+        .HostConfig = .{ .Dns = &.{"1.1.1.1"}, .ExtraHosts = &.{"db:10.0.0.5"} },
+    }, "web", "linux/arm64");
+    defer alloc.free(id);
+    try std.testing.expectEqualStrings("abc1234567890def", id);
 
     thread.join();
     joined = true;

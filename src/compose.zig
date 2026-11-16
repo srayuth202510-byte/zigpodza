@@ -21,6 +21,7 @@ pub const ComposeError = error{
     UnknownDependency,
     CyclicDependency,
     TooManyServices,
+    UnknownService,
 };
 
 pub const ComposeNetwork = struct {
@@ -913,7 +914,7 @@ pub fn executeCompose(
     logger: *log.Logger,
     opts: cli.ComposeOpts,
     stdout: anytype,
-) !void {
+) !u8 {
     const io = client.io;
     const alloc = client.allocator;
     var cf = try loadComposeFile(io, alloc, opts.file);
@@ -1139,7 +1140,141 @@ pub fn executeCompose(
         .ps => {
             try listProjectContainers(client, logger, cf.project, opts.json, stdout);
         },
+        .start, .stop, .restart => {
+            const selected = try selectServices(alloc, cf.services, opts.services);
+            defer alloc.free(selected);
+            // start/restart follow dependency order; stop goes in reverse.
+            var n: usize = 0;
+            while (n < order.len) : (n += 1) {
+                const idx = if (opts.action == .stop) order[order.len - 1 - n] else order[n];
+                if (!selected[idx]) continue;
+                const cname = try cf.services[idx].resolvedContainerName(alloc, cf.project);
+                defer alloc.free(cname);
+                switch (opts.action) {
+                    .start => try pod.startContainer(client, logger, cname),
+                    .stop => try pod.stopContainer(client, logger, cname, opts.timeout_secs),
+                    .restart => try pod.restartContainer(client, logger, cname, opts.timeout_secs),
+                    else => unreachable,
+                }
+                try stdout.print("{s} {s}\n", .{ cname, switch (opts.action) {
+                    .start => "started",
+                    .stop => "stopped",
+                    else => "restarted",
+                } });
+            }
+        },
+        .pull => {
+            const selected = try selectServices(alloc, cf.services, opts.services);
+            defer alloc.free(selected);
+            for (order) |idx| {
+                if (!selected[idx]) continue;
+                try pod.pullImage(client, logger, cf.services[idx].image, stdout);
+            }
+        },
+        .logs => {
+            const selected = try selectServices(alloc, cf.services, opts.services);
+            defer alloc.free(selected);
+            const single = opts.services.len == 1;
+            for (order) |idx| {
+                if (!selected[idx]) continue;
+                const cname = try cf.services[idx].resolvedContainerName(alloc, cf.project);
+                defer alloc.free(cname);
+                if (!single) try stdout.print("==> {s} <==\n", .{cf.services[idx].name});
+                try pod.fetchLogsWithOptions(client, logger, cname, .{
+                    .follow = opts.follow and single,
+                    .timestamps = opts.timestamps,
+                    .tail = opts.tail,
+                }, stdout);
+            }
+        },
+        .exec => {
+            const selected = try selectServices(alloc, cf.services, opts.services);
+            defer alloc.free(selected);
+            const idx = std.mem.indexOfScalar(bool, selected, true).?;
+            const cname = try cf.services[idx].resolvedContainerName(alloc, cf.project);
+            defer alloc.free(cname);
+            const stdin_fd: ?std.posix.fd_t = if (opts.interactive or opts.tty) std.Io.File.stdin().handle else null;
+            const code = try pod.execCommandWithIo(client, logger, cname, .{
+                .AttachStdin = opts.interactive,
+                .Tty = opts.tty,
+                .Cmd = opts.cmd,
+            }, stdin_fd, stdout);
+            return if (code > 0 and code <= 255) @intCast(code) else if (code == 0) 0 else 1;
+        },
+        .config => try printComposeConfig(alloc, cf, order, stdout),
     }
+    return 0;
+}
+
+/// Marks the services named in `names` (all when empty). Unknown names fail
+/// closed instead of being silently ignored.
+fn selectServices(alloc: std.mem.Allocator, services: []const ComposeService, names: []const []const u8) ![]bool {
+    const selected = try alloc.alloc(bool, services.len);
+    errdefer alloc.free(selected);
+    @memset(selected, names.len == 0);
+    for (names) |want| {
+        const idx = for (services, 0..) |svc, k| {
+            if (std.mem.eql(u8, svc.name, want)) break k;
+        } else return ComposeError.UnknownService;
+        selected[idx] = true;
+    }
+    return selected;
+}
+
+/// Prints the validated, normalized view of the compose file (`compose config`).
+fn printComposeConfig(alloc: std.mem.Allocator, cf: ComposeFile, order: []const usize, w: anytype) !void {
+    try w.print("name: {s}\n", .{cf.project});
+    if (cf.networks.len > 0) {
+        try w.writeAll("networks:\n");
+        for (cf.networks) |n| {
+            try w.print("  {s}:\n    driver: {s}\n", .{ n.name, n.driver });
+            if (n.internal) try w.writeAll("    internal: true\n");
+        }
+    }
+    try w.writeAll("services:\n");
+    for (order) |idx| {
+        const svc = cf.services[idx];
+        const cname = try svc.resolvedContainerName(alloc, cf.project);
+        defer alloc.free(cname);
+        try w.print("  {s}:\n    image: {s}\n    container_name: {s}\n", .{ svc.name, svc.image, cname });
+        try printList(w, "depends_on", svc.depends_on);
+        try printList(w, "networks", svc.networks);
+        if (svc.network_mode) |m| try w.print("    network_mode: {s}\n", .{m});
+        if (svc.ports.len > 0) {
+            try w.writeAll("    ports:\n");
+            for (svc.ports) |p| {
+                try w.writeAll("      - \"");
+                if (p.host_ip) |ip| try w.print("{s}:", .{ip});
+                if (p.host_port) |hp| try w.print("{d}:", .{hp});
+                try w.print("{d}/{s}\"\n", .{ p.container_port, p.proto });
+            }
+        }
+        if (svc.volumes.len > 0) {
+            try w.writeAll("    volumes:\n");
+            for (svc.volumes) |v| {
+                try w.print("      - {s}:{s}:{s}\n", .{ v.source, v.destination, if (v.readonly) "ro" else "rw" });
+            }
+        }
+        // Environment *values* may be secrets (BUG-024): print keys only.
+        if (svc.env.len > 0) {
+            try w.writeAll("    environment:\n");
+            for (svc.env) |e| {
+                const key = e[0 .. std.mem.indexOfScalar(u8, e, '=') orelse e.len];
+                try w.print("      - {s}=<redacted>\n", .{key});
+            }
+        }
+        try printList(w, "cap_drop", svc.cap_drop);
+        try printList(w, "cap_add", svc.cap_add);
+        if (svc.read_only) try w.writeAll("    read_only: true\n");
+        if (svc.mem_limit) |m| try w.print("    mem_limit: {d}\n", .{m});
+        if (svc.pids_limit) |p| try w.print("    pids_limit: {d}\n", .{p});
+    }
+}
+
+fn printList(w: anytype, label: []const u8, items: []const []const u8) !void {
+    if (items.len == 0) return;
+    try w.print("    {s}:\n", .{label});
+    for (items) |it| try w.print("      - {s}\n", .{it});
 }
 
 // ---------------------------------------------------------------- tests
@@ -1380,9 +1515,9 @@ test "executeCompose up, ps, down, and sandbox pre-flight denial over mock socke
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
-    try executeCompose(&client, &logger, .{ .action = .up, .file = compose_path }, &out.writer);
-    try executeCompose(&client, &logger, .{ .action = .ps, .file = compose_path }, &out.writer);
-    try executeCompose(&client, &logger, .{ .action = .down, .file = compose_path }, &out.writer);
+    _ = try executeCompose(&client, &logger, .{ .action = .up, .file = compose_path }, &out.writer);
+    _ = try executeCompose(&client, &logger, .{ .action = .ps, .file = compose_path }, &out.writer);
+    _ = try executeCompose(&client, &logger, .{ .action = .down, .file = compose_path }, &out.writer);
 
     thread.join();
     joined = true;
@@ -1392,6 +1527,106 @@ test "executeCompose up, ps, down, and sandbox pre-flight denial over mock socke
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "postgres:16-alpine") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "demo_api_1 removed") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "demo_db_1 absent") != null);
+}
+
+test "executeCompose start/stop/restart/logs/config/pull and unknown services" {
+    const th = @import("podman_test_helpers.zig");
+    const alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "compose.yaml",
+        .data =
+        \\name: demo
+        \\services:
+        \\  api:
+        \\    image: alpine:3.20
+        \\    depends_on: [db]
+        \\    ports: ["127.0.0.1:8080:80"]
+        \\    environment:
+        \\      API_TOKEN: hunter2
+        \\  db:
+        \\    image: postgres:16-alpine
+        \\    container_name: pgmain
+        \\
+        ,
+    });
+    const compose_path = try tmp.dir.realPathFileAlloc(std.testing.io, "compose.yaml", alloc);
+    defer alloc.free(compose_path);
+
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
+    defer logger.deinit();
+
+    // `config` and unknown services never touch the daemon.
+    {
+        const unused = http.Client{ .allocator = alloc, .socket_path = "/tmp/zp-compose-unused2.sock", .io = std.testing.io };
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        try std.testing.expectEqual(@as(u8, 0), try executeCompose(&unused, &logger, .{ .action = .config, .file = compose_path }, &out.writer));
+        const cfg = out.written();
+        try std.testing.expect(std.mem.indexOf(u8, cfg, "  db:\n    image: postgres:16-alpine\n    container_name: pgmain\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, cfg, "container_name: demo_api_1") != null);
+        try std.testing.expect(std.mem.indexOf(u8, cfg, "\"127.0.0.1:8080:80/tcp\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, cfg, "API_TOKEN=<redacted>") != null);
+        try std.testing.expect(std.mem.indexOf(u8, cfg, "hunter2") == null);
+        // db (dependency) is printed before api.
+        try std.testing.expect(std.mem.indexOf(u8, cfg, "  db:").? < std.mem.indexOf(u8, cfg, "  api:").?);
+
+        try std.testing.expectError(ComposeError.UnknownService, executeCompose(&unused, &logger, .{
+            .action = .stop,
+            .file = compose_path,
+            .services = &.{"nope"},
+        }, &out.writer));
+    }
+
+    const sock_path = try std.fmt.allocPrint(alloc, "/tmp/zp-compose-ops-{d}.sock", .{std.Io.Clock.awake.now(std.testing.io).nanoseconds});
+    defer alloc.free(sock_path);
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
+
+    const ok204 = "HTTP/1.1 204 No Content\r\n\r\n";
+    const frame = "\x01\x00\x00\x00\x00\x00\x00\x03ok\n";
+    const log_resp = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ frame.len, frame });
+    const replies = [_]th.ScriptedReply{
+        // stop (all): reverse dependency order -> api first, then db.
+        .{ .expected_prefix = "POST /v1.40/containers/demo_api_1/stop?t=2 HTTP/1.1\r\n", .raw_response = ok204 },
+        .{ .expected_prefix = "POST /v1.40/containers/pgmain/stop?t=2 HTTP/1.1\r\n", .raw_response = ok204 },
+        // start (all): dependency order -> db first.
+        .{ .expected_prefix = "POST /v1.40/containers/pgmain/start HTTP/1.1\r\n", .raw_response = ok204 },
+        .{ .expected_prefix = "POST /v1.40/containers/demo_api_1/start HTTP/1.1\r\n", .raw_response = ok204 },
+        // restart only api.
+        .{ .expected_prefix = "POST /v1.40/containers/demo_api_1/restart HTTP/1.1\r\n", .raw_response = ok204 },
+        // logs for both services with headers.
+        .{ .expected_prefix = "GET /v1.40/containers/pgmain/logs?stdout=1&stderr=1&tail=1 HTTP/1.1\r\n", .raw_response = log_resp },
+        .{ .expected_prefix = "GET /v1.40/containers/demo_api_1/logs?stdout=1&stderr=1&tail=1 HTTP/1.1\r\n", .raw_response = log_resp },
+    };
+
+    var ctx = th.MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, th.runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path, .io = std.testing.io };
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+
+    _ = try executeCompose(&client, &logger, .{ .action = .stop, .file = compose_path, .timeout_secs = 2 }, &out.writer);
+    _ = try executeCompose(&client, &logger, .{ .action = .start, .file = compose_path }, &out.writer);
+    _ = try executeCompose(&client, &logger, .{ .action = .restart, .file = compose_path, .services = &.{"api"} }, &out.writer);
+    _ = try executeCompose(&client, &logger, .{ .action = .logs, .file = compose_path, .tail = 1 }, &out.writer);
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
+    try std.testing.expectEqualStrings(
+        "demo_api_1 stopped\npgmain stopped\npgmain started\ndemo_api_1 started\ndemo_api_1 restarted\n" ++
+            "==> db <==\nok\n==> api <==\nok\n",
+        out.written(),
+    );
 }
 
 test "BUG-027: scalar list values parsed and long-syntax or unknown keys rejected" {
@@ -1637,7 +1872,7 @@ test "BUG-028: compose service networks attach container, label network, and enf
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
-    try executeCompose(&client, &logger, .{ .action = .up, .file = compose_path }, &out.writer);
+    _ = try executeCompose(&client, &logger, .{ .action = .up, .file = compose_path }, &out.writer);
     thread.join();
     joined = true;
     try std.testing.expectEqual(replies.len, ctx.matched);
