@@ -156,10 +156,10 @@ else
 fi
 
 # 8c. Forbid piping compose output directly to grep -q & enforce Makefile subshell grouping (BUG-039)
-if has_match 'compose .+\|[[:space:]]*grep -q' "scripts/smoke.sh" || has_match 'compose .+\|[[:space:]]*grep -q' "scripts/podman-e2e.sh" || ! has_match 'scripts/find-zig\.sh' "Makefile"; then
-    fail "Found unsafe direct compose pipe to grep -q in E2E scripts or ungrouped Makefile fallback (see BUG-039)."
+if has_match 'compose .+\|[[:space:]]*grep -q' "scripts/smoke.sh" || has_match 'compose .+\|[[:space:]]*grep -q' "scripts/podman-e2e.sh" || has_match '"\$BIN".+\|[[:space:]]*grep -q' "scripts/podman-e2e.sh" || ! has_match 'scripts/find-zig\.sh' "Makefile"; then
+    fail "Found unsafe direct CLI pipe to grep -q in E2E scripts or ungrouped Makefile fallback (see BUG-039)."
 else
-    pass "No unsafe direct compose pipe to grep -q and Makefile ZIG lookup goes through scripts/find-zig.sh (BUG-039)."
+    pass "No unsafe direct CLI pipe to grep -q and Makefile ZIG lookup goes through scripts/find-zig.sh (BUG-039)."
 fi
 
 # 8d. Forbid silent error swallowing in hardened compose/transfer test modules (BUG-040)

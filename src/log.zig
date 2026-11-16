@@ -455,6 +455,10 @@ fn openAppend(io: Io, dir: Io.Dir, name: []const u8, readable: bool) ?Io.File {
         .APPEND = true,
         .CLOEXEC = true,
         .NOFOLLOW = true,
+        // A FIFO planted as a log name must fail fast (ENXIO) instead of
+        // blocking open() until a reader appears (BUG-048). Regular files
+        // ignore O_NONBLOCK.
+        .NONBLOCK = true,
     }, 0o640) catch |e| {
         std.debug.print("zigpod: warning: cannot open log file '{s}': {s}\n", .{ name, @errorName(e) });
         return null;
@@ -815,6 +819,31 @@ test "BUG-031: Logger.init blocks symlinks and enforces mode 0640 on existing lo
     const err_stat = try tmp.dir.statFile(tio, "error.log", .{});
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o640), sys_stat.permissions.toMode() & 0o777);
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o640), err_stat.permissions.toMode() & 0o777);
+}
+
+test "BUG-048: Logger.init does not block on a FIFO planted as a log file" {
+    const alloc = std.testing.allocator;
+    const tio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dir_path = try tmp.dir.realPathFileAlloc(tio, ".", alloc);
+    defer alloc.free(dir_path);
+
+    for ([_][:0]const u8{ "system.log", "error.log", "audit.log" }) |name| {
+        const rc = std.os.linux.mknodat(tmp.dir.handle, name.ptr, std.os.linux.S.IFIFO | 0o600, 0);
+        try std.testing.expectEqual(std.os.linux.E.SUCCESS, std.os.linux.errno(rc));
+    }
+
+    // Without O_NONBLOCK the write-only opens of system.log/error.log hang forever.
+    var logger = Logger.init(tio, dir_path, false);
+    logger.echo_stderr = false;
+    logger.err("probe event", .{});
+    logger.deinit();
+
+    try std.testing.expect(logger.system_file == null);
+    try std.testing.expect(logger.error_file == null);
+    try std.testing.expect(logger.audit_file == null);
 }
 
 test "BUG-030: Logger.log repairs partial tail under lock without re-init" {

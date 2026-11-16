@@ -110,15 +110,18 @@ PING_OUT=$("$BIN" --socket "$SOCK" system ping)
 printf '%s\n' "$PING_OUT" | grep -q "OK"
 "$BIN" --socket "$SOCK" version >/dev/null
 
-if ! "$BIN" --socket "$SOCK" images --json | grep -q "$TEST_IMG"; then
+IMAGES_JSON=$("$BIN" --socket "$SOCK" images --json)
+if ! printf '%s\n' "$IMAGES_JSON" | grep -q "$TEST_IMG"; then
     echo "[INFO] pulling $TEST_IMG..."
     "$BIN" --socket "$SOCK" pull "$TEST_IMG" >/dev/null
 fi
 
 # 1. Network create -> ls -> inspect -> rm lifecycle
 "$BIN" --socket "$SOCK" network create --driver bridge --internal "$NET_NAME" >/dev/null
-"$BIN" --socket "$SOCK" network ls | grep -q "$NET_NAME"
-"$BIN" --socket "$SOCK" network inspect "$NET_NAME" | grep -q "$NET_NAME"
+NET_LS_OUT=$("$BIN" --socket "$SOCK" network ls)
+printf '%s\n' "$NET_LS_OUT" | grep -q "$NET_NAME"
+NET_INSPECT_OUT=$("$BIN" --socket "$SOCK" network inspect "$NET_NAME")
+printf '%s\n' "$NET_INSPECT_OUT" | grep -q "$NET_NAME"
 "$BIN" --socket "$SOCK" network rm -f "$NET_NAME" >/dev/null
 
 # 2. Hardened container run (-d) with --cpus, --env-file, -l, --hostname, --restart
@@ -151,7 +154,8 @@ grep -q "zigpod-cp-payload" "$TMP_DIR/out/downloaded.txt"
 
 # 4. attach & logs & cleanup
 echo "zigpod_live_ok" >/dev/null
-"$BIN" --socket "$SOCK" logs "$CTR_NAME" | grep -q "zigpod_live_ok"
+LOGS_OUT=$("$BIN" --socket "$SOCK" logs "$CTR_NAME")
+printf '%s\n' "$LOGS_OUT" | grep -q "zigpod_live_ok"
 printf 'exit\n' | "$BIN" --socket "$SOCK" attach "$CTR_NAME" >/dev/null 2>&1 || true
 "$BIN" --socket "$SOCK" stop "$CTR_NAME" >/dev/null
 "$BIN" --socket "$SOCK" rm -f "$CTR_NAME" >/dev/null

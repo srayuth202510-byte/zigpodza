@@ -450,7 +450,7 @@ $(cat "$TMP_SCAN_RAW")"
 ${PROMPT_BODY}" | timeout "$LLM_TIMEOUT" ollama run "balor:$PERSONA" 2>/dev/null || true)"
                 if [[ -n "${LLM_OUT//[[:space:]]/}" ]]; then
                     mkdir -p "$BALOR_DATA/llm/logs"
-                    LLM_REPORT_PATH="$BALOR_DATA/llm/logs/analysis_zigpod_$(date +%Y%m%d_%H%M%S).txt"
+                    LLM_REPORT_PATH="$BALOR_DATA/llm/logs/analysis_zigpod_$(LC_ALL=C date +%Y%m%d_%H%M%S).txt"
                     {
                         echo "ZigPod Incident & Threat Report"
                         echo "date: $(date)"
