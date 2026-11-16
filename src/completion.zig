@@ -43,6 +43,9 @@ const bash_template =
     \\        system)
     \\            COMPREPLY=( $(compgen -W "ping df prune" -- "${{cur}}") )
     \\            ;;
+    \\        build)
+    \\            COMPREPLY=( $(compgen -W "-t --tag -f --file --build-arg --target --no-cache" -- "${{cur}}") )
+    \\            ;;
     \\        run)
     \\            COMPREPLY=( $(compgen -W "-d --detach --rm --name -e --env --env-file -v --volume -p --publish -l --label --network -w --workdir -u --user --cap-drop --cap-add -m --memory --cpus --pids-limit --read-only --no-new-privileges --entrypoint --hostname --restart --shm-size --ulimit --init --health-cmd --health-interval --profile --policy -i --interactive -t --tty" -- "${{cur}}") )
     \\            ;;

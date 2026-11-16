@@ -23,6 +23,8 @@ pub const ExecOpts = types.ExecOpts;
 pub const StatsOpts = types.StatsOpts;
 pub const PsOpts = types.PsOpts;
 pub const max_ps_filters = types.max_ps_filters;
+pub const max_build_args = types.max_build_args;
+const BuildOpts = types.BuildOpts;
 pub const ImagesOpts = types.ImagesOpts;
 pub const InspectOpts = types.InspectOpts;
 pub const AuditOpts = types.AuditOpts;
@@ -284,6 +286,7 @@ fn parseCompose(args: []const []const u8) ParseError!Command {
 }
 
 fn parseBuild(args: []const []const u8) ParseError!Command {
+    var opts = BuildOpts{ .tag = "", .ctx = "" };
     var tag: ?[]const u8 = null;
     var ctx: ?[]const u8 = null;
     var i: usize = 0;
@@ -299,6 +302,20 @@ fn parseBuild(args: []const []const u8) ParseError!Command {
             const v = a["-t=".len..];
             if (v.len == 0) return error.MissingValue;
             tag = v;
+        } else if (eql(a, "-f") or eql(a, "--file")) {
+            opts.dockerfile = try nonEmpty(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--file=")) {
+            opts.dockerfile = try nonEmpty(a["--file=".len..]);
+        } else if (eql(a, "--target")) {
+            opts.target = try nonEmpty(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--target=")) {
+            opts.target = try nonEmpty(a["--target=".len..]);
+        } else if (eql(a, "--no-cache")) {
+            opts.no_cache = true;
+        } else if (eql(a, "--build-arg")) {
+            try addBuildArg(&opts, try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--build-arg=")) {
+            try addBuildArg(&opts, a["--build-arg=".len..]);
         } else if (isFlag(a)) {
             return error.UnknownFlag;
         } else if (ctx == null) {
@@ -307,9 +324,24 @@ fn parseBuild(args: []const []const u8) ParseError!Command {
             return error.TooManyArguments;
         }
     }
-    if (tag == null) return error.MissingValue;
-    if (ctx == null) return error.MissingArgument;
-    return .{ .build = .{ .tag = tag.?, .ctx = ctx.? } };
+    opts.tag = tag orelse return error.MissingValue;
+    opts.ctx = ctx orelse return error.MissingArgument;
+    return .{ .build = opts };
+}
+
+fn nonEmpty(v: []const u8) ParseError![]const u8 {
+    if (v.len == 0) return error.MissingValue;
+    return v;
+}
+
+/// `--build-arg KEY=VALUE`; the bare `KEY` form (inherit from env) is not
+/// supported so host environment values never leak implicitly.
+fn addBuildArg(opts: *BuildOpts, raw: []const u8) ParseError!void {
+    const eq = std.mem.indexOfScalar(u8, raw, '=') orelse return error.InvalidValue;
+    if (eq == 0) return error.InvalidValue;
+    if (opts.build_arg_len >= opts.build_arg_buf.len) return error.TooManyArguments;
+    opts.build_arg_buf[opts.build_arg_len] = raw;
+    opts.build_arg_len += 1;
 }
 
 fn parsePodCmd(args: []const []const u8) ParseError!Command {
@@ -1468,6 +1500,42 @@ test "parse ps --filter/-q, images -a/-q, inspect --format" {
     try std.testing.expectError(error.InvalidValue, testParse(&.{ "inspect", "--json", "--format", "{{.Id}}", "web" }));
     try std.testing.expectError(error.InvalidValue, testParse(&.{ "inspect", "--format", "", "web" }));
     try std.testing.expectError(error.MissingValue, testParse(&.{ "inspect", "web", "--format" }));
+}
+
+test "parse build -f/--build-arg/--target/--no-cache" {
+    const b = (try testParse(&.{
+        "build",       "-t",     "app:1",       "-f",          "docker/Dockerfile.prod",
+        "--build-arg", "V=1",    "--build-arg=URL=http://x/?a=b", "--target",    "final",
+        "--no-cache",  ".",
+    })).command.build;
+    try std.testing.expectEqualStrings("app:1", b.tag);
+    try std.testing.expectEqualStrings(".", b.ctx);
+    try std.testing.expectEqualStrings("docker/Dockerfile.prod", b.dockerfile.?);
+    try std.testing.expectEqualStrings("final", b.target.?);
+    try std.testing.expect(b.no_cache);
+    try std.testing.expectEqual(@as(usize, 2), b.buildArgs().len);
+    try std.testing.expectEqualStrings("URL=http://x/?a=b", b.buildArgs()[1]);
+
+    const plain = (try testParse(&.{ "build", "-t", "app:1", "." })).command.build;
+    try std.testing.expect(plain.dockerfile == null and plain.target == null and !plain.no_cache);
+    try std.testing.expectEqual(@as(usize, 0), plain.buildArgs().len);
+
+    try std.testing.expectError(error.InvalidValue, testParse(&.{ "build", "-t", "a:1", "--build-arg", "NOEQ", "." }));
+    try std.testing.expectError(error.InvalidValue, testParse(&.{ "build", "-t", "a:1", "--build-arg", "=v", "." }));
+    try std.testing.expectError(error.MissingValue, testParse(&.{ "build", "-t", "a:1", "--file=", "." }));
+    try std.testing.expectError(error.MissingValue, testParse(&.{ "build", "-t", "a:1", ".", "--target" }));
+    try std.testing.expectError(error.UnknownFlag, testParse(&.{ "build", "-t", "a:1", "--pull", "." }));
+
+    var many: [3 + 2 * 33][]const u8 = undefined;
+    many[0] = "build";
+    many[1] = "-t";
+    many[2] = "a:1";
+    var k: usize = 3;
+    while (k < many.len) : (k += 2) {
+        many[k] = "--build-arg";
+        many[k + 1] = "A=1";
+    }
+    try std.testing.expectError(error.TooManyArguments, testParse(&many));
 }
 
 test "parse errors" {

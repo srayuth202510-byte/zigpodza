@@ -248,11 +248,138 @@ pub fn tarDirectoryWithPrefix(
 
 /// Builds an image from a build-context directory (`POST /build` with a tar
 /// stream). Streams build output lines to `writer` and prints the final image ID.
+pub const BuildArg = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
+pub const BuildOptions = struct {
+    /// Dockerfile path relative to the build context (default: Dockerfile/Containerfile).
+    dockerfile: ?[]const u8 = null,
+    target: ?[]const u8 = null,
+    no_cache: bool = false,
+    build_args: []const BuildArg = &.{},
+};
+
+pub const max_build_args = 32;
+
+/// `-f` must name a file *inside* the context: relative, no `..`/empty
+/// segments, no control characters. The daemon only sees the context tarball,
+/// so this also keeps the request honest about what it can read.
+pub fn validateDockerfilePath(p: []const u8) ApiError!void {
+    if (p.len == 0 or p.len > 1024) return ApiError.InvalidDockerfilePath;
+    if (p[0] == '/') return ApiError.InvalidDockerfilePath;
+    for (p) |c| {
+        if (c < 0x20 or c == 0x7f or c == '\\') return ApiError.InvalidDockerfilePath;
+    }
+    var it = std.mem.splitScalar(u8, p, '/');
+    while (it.next()) |seg| {
+        if (seg.len == 0 or std.mem.eql(u8, seg, "..")) return ApiError.InvalidDockerfilePath;
+    }
+}
+
+/// Stage names: `[A-Za-z0-9][A-Za-z0-9_.-]{0,127}`.
+pub fn validateBuildTarget(t: []const u8) ApiError!void {
+    if (t.len == 0 or t.len > 128) return ApiError.InvalidBuildTarget;
+    if (!std.ascii.isAlphanumeric(t[0])) return ApiError.InvalidBuildTarget;
+    for (t) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '.' and c != '-') return ApiError.InvalidBuildTarget;
+    }
+}
+
+/// Keys: `[A-Za-z_][A-Za-z0-9_]{0,127}`; values: at most 4096 bytes, no control
+/// characters other than tab.
+pub fn validateBuildArg(a: BuildArg) ApiError!void {
+    if (a.key.len == 0 or a.key.len > 128) return ApiError.InvalidBuildArg;
+    if (!std.ascii.isAlphabetic(a.key[0]) and a.key[0] != '_') return ApiError.InvalidBuildArg;
+    for (a.key) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '_') return ApiError.InvalidBuildArg;
+    }
+    if (a.value.len > 4096) return ApiError.InvalidBuildArg;
+    for (a.value) |c| {
+        if ((c < 0x20 and c != '\t') or c == 0x7f) return ApiError.InvalidBuildArg;
+    }
+}
+
+/// Splits a raw CLI `KEY=VALUE` into a `BuildArg` (value may contain `=`).
+pub fn parseBuildArg(raw: []const u8) ApiError!BuildArg {
+    const eq = std.mem.indexOfScalar(u8, raw, '=') orelse return ApiError.InvalidBuildArg;
+    const arg = BuildArg{ .key = raw[0..eq], .value = raw[eq + 1 ..] };
+    try validateBuildArg(arg);
+    return arg;
+}
+
+/// Builds `/build?t=..&q=1[&dockerfile=..][&target=..][&nocache=1][&buildargs=..]`.
+/// Every value is percent-encoded. Returns the full path; `log_path` receives
+/// the same path with build-arg *values* omitted (BUG-024: they may be secrets).
+fn buildRequestPath(
+    allocator: std.mem.Allocator,
+    tag: []const u8,
+    opts: BuildOptions,
+    log_path: *std.ArrayList(u8),
+) ![]u8 {
+    if (opts.dockerfile) |f| try validateDockerfilePath(f);
+    if (opts.target) |t| try validateBuildTarget(t);
+    if (opts.build_args.len > max_build_args) return ApiError.InvalidBuildArg;
+    for (opts.build_args) |a| try validateBuildArg(a);
+
+    var path: std.ArrayList(u8) = .empty;
+    errdefer path.deinit(allocator);
+    try path.appendSlice(allocator, api_prefix ++ "/build?t=");
+    try appendQueryEncoded(allocator, &path, tag);
+    try path.appendSlice(allocator, "&q=1");
+    if (opts.dockerfile) |f| {
+        try path.appendSlice(allocator, "&dockerfile=");
+        try appendQueryEncoded(allocator, &path, f);
+    }
+    if (opts.target) |t| {
+        try path.appendSlice(allocator, "&target=");
+        try appendQueryEncoded(allocator, &path, t);
+    }
+    if (opts.no_cache) try path.appendSlice(allocator, "&nocache=1");
+
+    try log_path.appendSlice(allocator, path.items);
+
+    if (opts.build_args.len > 0) {
+        var json: std.ArrayList(u8) = .empty;
+        defer json.deinit(allocator);
+        try json.append(allocator, '{');
+        try log_path.appendSlice(allocator, "&buildargs=<redacted:");
+        for (opts.build_args, 0..) |a, idx| {
+            if (idx > 0) {
+                try json.append(allocator, ',');
+                try log_path.append(allocator, ',');
+            }
+            try json.print(allocator, "\"{s}\":", .{a.key});
+            const quoted = try std.json.Stringify.valueAlloc(allocator, a.value, .{});
+            defer allocator.free(quoted);
+            try json.appendSlice(allocator, quoted);
+            try log_path.appendSlice(allocator, a.key);
+        }
+        try json.append(allocator, '}');
+        try log_path.append(allocator, '>');
+        try path.appendSlice(allocator, "&buildargs=");
+        try appendQueryEncoded(allocator, &path, json.items);
+    }
+    return path.toOwnedSlice(allocator);
+}
+
 pub fn buildImage(
     client: *const http.Client,
     logger: *log.Logger,
     tag: []const u8,
     ctx_dir: []const u8,
+    writer: anytype,
+) !void {
+    return buildImageWithOptions(client, logger, tag, ctx_dir, .{}, writer);
+}
+
+pub fn buildImageWithOptions(
+    client: *const http.Client,
+    logger: *log.Logger,
+    tag: []const u8,
+    ctx_dir: []const u8,
+    opts: BuildOptions,
     writer: anytype,
 ) !void {
     const io = client.io;
@@ -261,6 +388,13 @@ pub fn buildImage(
     if (std.mem.startsWith(u8, ctx_dir, "/")) {
         try validateHostPath(io, ctx_dir, false);
     }
+
+    // Validate every option and assemble the request path before touching the
+    // filesystem or the socket (fail-closed pre-flight).
+    var log_path: std.ArrayList(u8) = .empty;
+    defer log_path.deinit(client.allocator);
+    const req_path = try buildRequestPath(client.allocator, tag, opts, &log_path);
+    defer client.allocator.free(req_path);
 
     // Fail-closed: refuse to build without a Dockerfile/Containerfile in the context.
     var dir = std.Io.Dir.cwd().openDir(io, ctx_dir, .{}) catch {
@@ -271,25 +405,25 @@ pub fn buildImage(
     const real_ctx = try realpathOrInvalidHostPath(io, client.allocator, dir);
     defer client.allocator.free(real_ctx);
     try validateHostPath(io, real_ctx, false);
-    const has_dockerfile = dir.access(io, "Dockerfile", .{}) catch null;
-    const has_containerfile = dir.access(io, "Containerfile", .{}) catch null;
-    if (has_dockerfile == null and has_containerfile == null) return ApiError.MissingDockerfile;
+    if (opts.dockerfile) |f| {
+        // Must be a regular file inside the context; a symlink could point anywhere.
+        const st = dir.statFile(io, f, .{ .follow_symlinks = false }) catch return ApiError.MissingDockerfile;
+        if (st.kind != .file) return ApiError.InvalidDockerfilePath;
+    } else {
+        const has_dockerfile = dir.access(io, "Dockerfile", .{}) catch null;
+        const has_containerfile = dir.access(io, "Containerfile", .{}) catch null;
+        if (has_dockerfile == null and has_containerfile == null) return ApiError.MissingDockerfile;
+    }
 
     var tar_buf: std.ArrayList(u8) = .empty;
     defer tar_buf.deinit(client.allocator);
     try tarBuildContext(io, client.allocator, ctx_dir, &tar_buf);
 
-    var path_buf: std.ArrayList(u8) = .empty;
-    defer path_buf.deinit(client.allocator);
-    try path_buf.appendSlice(client.allocator, api_prefix ++ "/build?t=");
-    try appendQueryEncoded(client.allocator, &path_buf, tag);
-    try path_buf.appendSlice(client.allocator, "&q=1");
-
-    logger.debug("POST {s} (context {d} bytes)", .{ path_buf.items, tar_buf.items.len });
-    const resp = try client.requestWithContentType("POST", path_buf.items, tar_buf.items, "application/x-tar", build_timeout_ms);
+    logger.debug("POST {s} (context {d} bytes)", .{ log_path.items, tar_buf.items.len });
+    const resp = try client.requestWithContentType("POST", req_path, tar_buf.items, "application/x-tar", build_timeout_ms);
     defer resp.deinit();
 
-    if (!resp.ok()) return logApiFailure(logger, "POST", path_buf.items, resp);
+    if (!resp.ok()) return logApiFailure(logger, "POST", log_path.items, resp);
 
     var image_id: ?[]u8 = null;
     defer if (image_id) |id| client.allocator.free(id);
@@ -466,6 +600,154 @@ test "buildImage over mock Unix socket streams output and reports image id" {
 
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "STEP 1/2: FROM alpine:3.20") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "=> image sha256:beefcafe1234") != null);
+}
+
+test "build option validators are fail-closed" {
+    try validateDockerfilePath("Dockerfile");
+    try validateDockerfilePath("docker/Dockerfile.prod");
+    for ([_][]const u8{ "", "/etc/passwd", "../Dockerfile", "a/../../b", "a//b", "a/", "a\\b", "a\nb" }) |bad| {
+        try std.testing.expectError(ApiError.InvalidDockerfilePath, validateDockerfilePath(bad));
+    }
+
+    try validateBuildTarget("builder");
+    try validateBuildTarget("stage-1.final_x");
+    for ([_][]const u8{ "", "-x", ".x", "a b", "a/b", "a?b" }) |bad| {
+        try std.testing.expectError(ApiError.InvalidBuildTarget, validateBuildTarget(bad));
+    }
+
+    try validateBuildArg(.{ .key = "VERSION", .value = "1.2=3" });
+    try validateBuildArg(.{ .key = "_X1", .value = "" });
+    try validateBuildArg(.{ .key = "TABS", .value = "a\tb" });
+    for ([_]BuildArg{
+        .{ .key = "", .value = "x" },
+        .{ .key = "1X", .value = "x" },
+        .{ .key = "A-B", .value = "x" },
+        .{ .key = "A", .value = "x\ny" },
+        .{ .key = "A", .value = "x\x7f" },
+    }) |bad| {
+        try std.testing.expectError(ApiError.InvalidBuildArg, validateBuildArg(bad));
+    }
+    const parsed = try parseBuildArg("URL=http://x/?a=b");
+    try std.testing.expectEqualStrings("URL", parsed.key);
+    try std.testing.expectEqualStrings("http://x/?a=b", parsed.value);
+    try std.testing.expectError(ApiError.InvalidBuildArg, parseBuildArg("NOEQ"));
+}
+
+test "buildRequestPath encodes options and redacts build-arg values in the log path" {
+    const alloc = std.testing.allocator;
+
+    var log_plain: std.ArrayList(u8) = .empty;
+    defer log_plain.deinit(alloc);
+    const plain = try buildRequestPath(alloc, "local/demo:1.0", .{}, &log_plain);
+    defer alloc.free(plain);
+    try std.testing.expectEqualStrings("/v1.40/build?t=local%2Fdemo%3A1.0&q=1", plain);
+    try std.testing.expectEqualStrings(plain, log_plain.items);
+
+    var log_path: std.ArrayList(u8) = .empty;
+    defer log_path.deinit(alloc);
+    const full = try buildRequestPath(alloc, "app:1", .{
+        .dockerfile = "docker/Dockerfile.prod",
+        .target = "final",
+        .no_cache = true,
+        .build_args = &.{
+            .{ .key = "TOKEN", .value = "s3cr3t&t=evil" },
+            .{ .key = "V", .value = "1" },
+        },
+    }, &log_path);
+    defer alloc.free(full);
+    try std.testing.expectEqualStrings(
+        "/v1.40/build?t=app%3A1&q=1&dockerfile=docker%2FDockerfile.prod&target=final&nocache=1" ++
+            "&buildargs=%7B%22TOKEN%22%3A%22s3cr3t%26t%3Devil%22%2C%22V%22%3A%221%22%7D",
+        full,
+    );
+    try std.testing.expectEqualStrings(
+        "/v1.40/build?t=app%3A1&q=1&dockerfile=docker%2FDockerfile.prod&target=final&nocache=1&buildargs=<redacted:TOKEN,V>",
+        log_path.items,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, log_path.items, "s3cr3t") == null);
+
+    var sink: std.ArrayList(u8) = .empty;
+    defer sink.deinit(alloc);
+    try std.testing.expectError(ApiError.InvalidDockerfilePath, buildRequestPath(alloc, "a:1", .{ .dockerfile = "../x" }, &sink));
+    try std.testing.expectError(ApiError.InvalidBuildTarget, buildRequestPath(alloc, "a:1", .{ .target = "a b" }, &sink));
+    try std.testing.expectError(ApiError.InvalidBuildArg, buildRequestPath(alloc, "a:1", .{ .build_args = &.{.{ .key = "A B", .value = "" }} }, &sink));
+
+    try std.testing.checkAllAllocationFailures(alloc, struct {
+        fn run(a: std.mem.Allocator) !void {
+            var lp: std.ArrayList(u8) = .empty;
+            defer lp.deinit(a);
+            const p = try buildRequestPath(a, "app:1", .{
+                .dockerfile = "Dockerfile",
+                .target = "t",
+                .build_args = &.{ .{ .key = "A", .value = "1" }, .{ .key = "B", .value = "2" } },
+            }, &lp);
+            a.free(p);
+        }
+    }.run, .{});
+}
+
+test "buildImageWithOptions sends options and enforces -f inside the context" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-build-opts-{d}.sock",
+        .{std.Io.Clock.awake.now(std.testing.io).nanoseconds},
+    );
+    defer alloc.free(sock_path);
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
+
+    const build_out = "{\"aux\":{\"ID\":\"sha256:0123abcd\"}}\n";
+    const replies = [_]ScriptedReply{
+        .{
+            .expected_prefix = "POST /v1.40/build?t=app%3A1&q=1&dockerfile=docker%2FDockerfile.prod&target=final&nocache=1&buildargs=%7B%22V%22%3A%221%22%7D HTTP/1.1\r\n",
+            .expected_substring = "Content-Type: application/x-tar",
+            .raw_response = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ build_out.len, build_out }),
+        },
+    };
+
+    var ctx = MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // No default Dockerfile: -f must make the build valid on its own.
+    try tmp.dir.createDirPath(std.testing.io, "docker");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "docker/Dockerfile.prod", .data = "FROM alpine:3.20 AS final\n" });
+    // In-context relative symlink: allowed in the tarball, but not as the -f target.
+    try tmp.dir.symLink(std.testing.io, "docker/Dockerfile.prod", "Linked.dockerfile", .{});
+    try tmp.dir.createDirPath(std.testing.io, "adir");
+    const dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(dir_path);
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path, .io = std.testing.io };
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
+    defer logger.deinit();
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+
+    // Rejected before any socket traffic.
+    try std.testing.expectError(ApiError.InvalidDockerfilePath, buildImageWithOptions(&client, &logger, "app:1", dir_path, .{ .dockerfile = "Linked.dockerfile" }, &out.writer));
+    try std.testing.expectError(ApiError.InvalidDockerfilePath, buildImageWithOptions(&client, &logger, "app:1", dir_path, .{ .dockerfile = "adir" }, &out.writer));
+    try std.testing.expectError(ApiError.MissingDockerfile, buildImageWithOptions(&client, &logger, "app:1", dir_path, .{ .dockerfile = "nope" }, &out.writer));
+    try std.testing.expectError(ApiError.MissingDockerfile, buildImage(&client, &logger, "app:1", dir_path, &out.writer));
+
+    try buildImageWithOptions(&client, &logger, "app:1", dir_path, .{
+        .dockerfile = "docker/Dockerfile.prod",
+        .target = "final",
+        .no_cache = true,
+        .build_args = &.{.{ .key = "V", .value = "1" }},
+    }, &out.writer);
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "=> image sha256:0123abcd") != null);
 }
 
 test "buildImage fail-closed: bad tag, missing context, and missing Dockerfile" {

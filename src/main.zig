@@ -258,7 +258,17 @@ fn dispatch(
             .rm => try pod.removeVolume(client, logger, v.name.?, v.force),
             .inspect => try pod.inspectVolume(client, logger, v.name.?, stdout),
         },
-        .build => |b| try build_mod.buildImage(client, logger, b.tag, b.ctx, stdout),
+        .build => |b| {
+            var arg_buf: [cli.max_build_args]build_mod.BuildArg = undefined;
+            const raw_args = b.buildArgs();
+            for (raw_args, 0..) |raw, idx| arg_buf[idx] = try build_mod.parseBuildArg(raw);
+            try build_mod.buildImageWithOptions(client, logger, b.tag, b.ctx, .{
+                .dockerfile = b.dockerfile,
+                .target = b.target,
+                .no_cache = b.no_cache,
+                .build_args = arg_buf[0..raw_args.len],
+            }, stdout);
+        },
         .pod => |p| switch (p.action) {
             .create => try pods.createPod(client, logger, p.arg.?, stdout),
             .ps => try pods.listPods(client, logger, stdout),
@@ -660,6 +670,18 @@ fn reportFailure(logger: *log.Logger, cmd: cli.Command, socket_path: []const u8,
         pod.ApiError.InvalidFilter => logger.deny(
             "api.validateContainerFilter",
             "Rejected invalid ps --filter (unknown key or unsafe value).",
+        ),
+        pod.ApiError.InvalidBuildArg => logger.deny(
+            "build.validateBuildArg",
+            "Rejected invalid --build-arg (KEY must match [A-Za-z_][A-Za-z0-9_]*, VALUE has no control characters).",
+        ),
+        pod.ApiError.InvalidDockerfilePath => logger.deny(
+            "build.validateDockerfilePath",
+            "Rejected -f Dockerfile path (must be a relative regular file inside the build context, no '..').",
+        ),
+        pod.ApiError.InvalidBuildTarget => logger.deny(
+            "build.validateBuildTarget",
+            "Rejected invalid --target stage name.",
         ),
         pod.ApiError.InvalidFormat => logger.deny(
             "api.validateFormat",

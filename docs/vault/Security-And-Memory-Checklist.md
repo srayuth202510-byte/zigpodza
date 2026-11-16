@@ -67,6 +67,7 @@ status: active
 - [ ] `restartContainer` เมื่อ `timeout_secs > 3600` ต้องคืน `ApiError.InvalidTimeout` และ map เป็น `"api.restartContainer"` deny telemetry (ห้าม alias เป็น `InvalidIdentifier`) (BUG-045)
 - [ ] `ps --filter` ต้องผ่าน allow-list ของ key ทั้งชั้น CLI และ API (`validateContainerFilter` → `ApiError.InvalidFilter` → deny rule `"api.validateContainerFilter"`) และค่า filter ต้องถูก JSON-escape แล้ว percent-encode ทั้งก้อนก่อนต่อเข้า query (BUG-005, BUG-041)
 - [ ] `inspect --format` รองรับเฉพาะ `{{.A.B}}` และ `{{json .A.B}}`; template อื่นต้องคืน `ApiError.InvalidFormat` (deny rule `"api.validateFormat"`) ก่อนส่ง request ใด ๆ (BUG-041)
+- [ ] `build` options (`validateDockerfilePath`, `validateBuildTarget`, `validateBuildArg` ใน `src/podman_build.zig`): `-f` ต้องเป็น path สัมพัทธ์ภายใน build context (ไม่มี `..`/segment ว่าง/absolute) และต้องเป็น regular file ที่ไม่ใช่ symlink (`ApiError.InvalidDockerfilePath`), `--target` ผ่าน allow-list ชื่อ stage (`InvalidBuildTarget`), `--build-arg` ต้องเป็น `KEY=VALUE` เท่านั้น (ไม่รับรูป `KEY` ที่ดึงจาก env) และค่า build-arg ห้ามถูก log — log path ต้องแสดงเป็น `<redacted:KEYS>` (BUG-024, BUG-041)
 
 ## 3. Logging, Tamper Evidence & Operations
 

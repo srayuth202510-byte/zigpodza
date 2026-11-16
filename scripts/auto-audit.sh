@@ -290,6 +290,15 @@ else
     fail "Missing InvalidFilter/InvalidFormat variant or deny rule (see BUG-041)."
 fi
 
+# 8s. Build options: dedicated error variants, deny rules, and redacted build-arg logging (BUG-024 / BUG-041)
+if has_match 'InvalidBuildArg' "src/podman_types.zig" && has_match 'InvalidDockerfilePath' "src/podman_types.zig" && has_match 'InvalidBuildTarget' "src/podman_types.zig" \
+    && has_match 'build\.validateBuildArg' "src/main.zig" && has_match 'build\.validateDockerfilePath' "src/main.zig" && has_match 'build\.validateBuildTarget' "src/main.zig" \
+    && has_match 'redacted:' "src/podman_build.zig" && ! has_match 'logger\.[a-z]+\("POST \{s\}.*req_path' "src/podman_build.zig"; then
+    pass "Build options use dedicated error variants/deny telemetry and never log build-arg values (BUG-024/BUG-041)."
+else
+    fail "Build option validation/telemetry or build-arg redaction missing (see BUG-024, BUG-041)."
+fi
+
 # 9. Run security-check.sh (includes zig build test & ELF hardening when zig is installed)
 SEC_OUT=""
 if SEC_OUT="$("$ROOT_DIR/scripts/security-check.sh" 2>&1)"; then

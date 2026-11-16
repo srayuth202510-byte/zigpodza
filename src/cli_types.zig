@@ -84,7 +84,8 @@ pub const usage =
     \\  export -o FILE CONTAINER       Stream a container rootfs tarball to a host file
     \\  import FILE REPO[:TAG]         Upload a local rootfs tarball as a new image
     \\  policy show|check [--json] [FILE]  Inspect or validate a zigpod-policy.json file
-    \\  build -t TAG DIR               Build an image from a build-context directory
+    \\  build -t TAG [-f FILE] [--build-arg K=V] [--target STAGE] [--no-cache] DIR
+    \\                                 Build an image (-f is relative to DIR)
     \\  pod create NAME|pod ps|pod stop ID|pod rm [-f] ID  Manage pods
     \\  completion bash|zsh|fish       Generate shell tab-completion script
     \\  audit [--json] [FILE]          Verify SHA-256 hash chain of audit.log (--json: structured output)
@@ -259,9 +260,23 @@ pub const DemoOpts = struct {
     json: bool = false,
 };
 
+pub const max_build_args = 32;
+
 pub const BuildOpts = struct {
     tag: []const u8,
     ctx: []const u8,
+    /// `-f`: Dockerfile path relative to the build context.
+    dockerfile: ?[]const u8 = null,
+    /// `--target`: multi-stage build stage name.
+    target: ?[]const u8 = null,
+    no_cache: bool = false,
+    /// Raw `KEY=VALUE` strings from `--build-arg` (validated again in the API layer).
+    build_arg_buf: [max_build_args][]const u8 = undefined,
+    build_arg_len: usize = 0,
+
+    pub fn buildArgs(self: *const BuildOpts) []const []const u8 {
+        return self.build_arg_buf[0..self.build_arg_len];
+    }
 };
 
 pub const PodAction = enum { create, ps, stop, rm };
