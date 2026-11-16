@@ -67,6 +67,8 @@ pub const usage =
     \\  network ls|inspect|create|rm ...         Manage container networks
     \\  attach [-i] [-t] CONTAINER               Attach to a running container
     \\  cp SRC DST                               Copy files between container (CTR:PATH) and host path
+    \\  create [OPTIONS] IMAGE [CMD...]  Create a container without starting it (same options as run)
+    \\  container|image|volume|network prune [-f]  Remove unused containers/images/volumes/networks
     \\  system ping|df|prune [-f]      Check daemon health, disk usage, or prune unused resources
     \\  port CONTAINER [PORT[/PROTO]]  List port mappings for a container
     \\  wait CONTAINER                 Block until a container stops and print its exit code
@@ -144,6 +146,8 @@ pub const UlimitSpec = struct {
 };
 
 pub const RunOpts = struct {
+    /// `create`: build the container but do not start it.
+    create_only: bool = false,
     image: []const u8,
     cmd: []const []const u8 = &.{},
     env: []const []const u8 = &.{},
@@ -312,6 +316,8 @@ pub const NetworkOpts = struct {
     force: bool = false,
 };
 
+pub const PruneKind = enum { container, image, volume, network };
+
 pub const SystemAction = enum {
     ping,
     df,
@@ -426,6 +432,7 @@ pub const Command = union(enum) {
     kill: KillOpts,
     rm: RmOpts,
     logs: LogsOpts,
+    prune: PruneKind,
     top: []const u8,
     inspect: InspectOpts,
     exec: ExecOpts,

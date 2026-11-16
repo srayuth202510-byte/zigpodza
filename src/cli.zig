@@ -30,6 +30,7 @@ pub const RestartOpts = types.RestartOpts;
 pub const RenameOpts = types.RenameOpts;
 pub const RmiOpts = types.RmiOpts;
 pub const VolumeAction = types.VolumeAction;
+const PruneKind = types.PruneKind;
 pub const VolumeOpts = types.VolumeOpts;
 pub const NetworkAction = types.NetworkAction;
 pub const NetworkOpts = types.NetworkOpts;
@@ -106,6 +107,16 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
     const rest = args[i + 1 ..];
     const command: Command = if (eql(name, "run"))
         .{ .run = try parseRun(allocator, rest) }
+    else if (eql(name, "create"))
+        .{ .run = blk: {
+            var o = try parseRun(allocator, rest);
+            o.create_only = true;
+            break :blk o;
+        } }
+    else if (eql(name, "container"))
+        try parsePruneGroup(.container, rest)
+    else if (eql(name, "image"))
+        try parsePruneGroup(.image, rest)
     else if (eql(name, "ps"))
         try parsePs(rest)
     else if (eql(name, "images"))
@@ -713,10 +724,23 @@ fn parseKill(args: []const []const u8) ParseError!Command {
 }
 
 /// Parses `volume ls|create|rm|inspect [-f|--force] [NAME]`.
+/// Parses `container|image|volume|network prune [-f]`. `-f` is accepted for
+/// Docker compatibility (prune never prompts).
+fn parsePruneGroup(kind: PruneKind, args: []const []const u8) ParseError!Command {
+    if (args.len == 0) return error.MissingArgument;
+    if (!eql(args[0], "prune")) return if (isFlag(args[0])) error.UnknownFlag else error.UnknownCommand;
+    for (args[1..]) |a| {
+        if (eql(a, "-f") or eql(a, "--force")) continue;
+        return if (isFlag(a)) error.UnknownFlag else error.TooManyArguments;
+    }
+    return .{ .prune = kind };
+}
+
 fn parseVolume(args: []const []const u8) ParseError!Command {
     if (args.len == 0) return error.MissingArgument;
     const sub = args[0];
     const rest = args[1..];
+    if (eql(sub, "prune")) return parsePruneGroup(.volume, args);
     if (eql(sub, "ls") or eql(sub, "list")) {
         if (rest.len > 0) return if (isFlag(rest[0])) error.UnknownFlag else error.TooManyArguments;
         return .{ .volume = .{ .action = .ls } };
@@ -799,6 +823,7 @@ fn parseNetwork(args: []const []const u8) ParseError!Command {
     if (args.len == 0) return error.MissingArgument;
     const sub = args[0];
     const rest = args[1..];
+    if (eql(sub, "prune")) return parsePruneGroup(.network, args);
     if (eql(sub, "ls") or eql(sub, "list")) {
         if (rest.len > 0) return if (isFlag(rest[0])) error.UnknownFlag else error.TooManyArguments;
         return .{ .network = .{ .action = .ls } };
@@ -1342,6 +1367,27 @@ test "parse stop -t and logs --tail/--since/--timestamps" {
     try std.testing.expectError(error.InvalidValue, testParse(&.{ "logs", "--tail", "-1", "web" }));
     try std.testing.expectError(error.InvalidValue, testParse(&.{ "logs", "--since", "10m", "web" }));
     try std.testing.expectError(error.MissingValue, testParse(&.{ "logs", "--tail" }));
+}
+
+test "parse create and prune groups" {
+    const alloc = std.testing.allocator;
+    var c = try parse(alloc, &.{ "create", "--name", "web", "alpine:3.20", "sleep", "9" });
+    defer c.deinit(alloc);
+    try std.testing.expect(c.command.run.create_only);
+    try std.testing.expectEqualStrings("alpine:3.20", c.command.run.image);
+    var r = try parse(alloc, &.{ "run", "alpine:3.20" });
+    defer r.deinit(alloc);
+    try std.testing.expect(!r.command.run.create_only);
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{"create"}));
+
+    try std.testing.expectEqual(PruneKind.container, (try testParse(&.{ "container", "prune" })).command.prune);
+    try std.testing.expectEqual(PruneKind.image, (try testParse(&.{ "image", "prune", "-f" })).command.prune);
+    try std.testing.expectEqual(PruneKind.volume, (try testParse(&.{ "volume", "prune", "--force" })).command.prune);
+    try std.testing.expectEqual(PruneKind.network, (try testParse(&.{ "network", "prune" })).command.prune);
+    try std.testing.expectError(error.MissingArgument, testParse(&.{"container"}));
+    try std.testing.expectError(error.UnknownCommand, testParse(&.{ "image", "ls" }));
+    try std.testing.expectError(error.UnknownFlag, testParse(&.{ "image", "prune", "-a" }));
+    try std.testing.expectError(error.TooManyArguments, testParse(&.{ "volume", "prune", "x" }));
 }
 
 test "parse errors" {

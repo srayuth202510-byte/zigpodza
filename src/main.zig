@@ -272,6 +272,12 @@ fn dispatch(
             .df => try pod.systemDf(client, logger, stdout),
             .prune => try pod.systemPrune(client, logger, stdout),
         },
+        .prune => |kind| try pod.pruneResource(client, logger, switch (kind) {
+            .container => .container,
+            .image => .image,
+            .volume => .volume,
+            .network => .network,
+        }, stdout),
         .port => |opts| try pod.portContainer(client, logger, opts.container, opts.private_port, stdout),
         .wait => |container| {
             const code = try pod.waitContainer(client, logger, container);
@@ -432,7 +438,7 @@ fn dispatch(
             } else null;
 
             // Defer removal until after fetchLogs when attached so output is not lost.
-            const auto_remove = r.detach and r.remove;
+            const auto_remove = (r.detach or r.create_only) and r.remove;
             const has_host_cfg = auto_remove or
                 r.read_only or
                 r.init or
@@ -488,6 +494,10 @@ fn dispatch(
             };
             const id = try pod.createContainer(client, logger, req, r.name);
             defer client.allocator.free(id);
+            if (r.create_only) {
+                try stdout.print("{s}\n", .{id});
+                return 0;
+            }
             pod.startContainer(client, logger, id) catch |e| {
                 // BUG-012: never leave behind a container we just created.
                 pod.removeContainer(client, logger, id, true) catch {};

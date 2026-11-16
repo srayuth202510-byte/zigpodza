@@ -394,6 +394,75 @@ pub fn systemPrune(client: *const http.Client, logger: *log.Logger, writer: anyt
     });
 }
 
+pub const PruneTarget = enum { container, image, volume, network };
+
+/// Prunes one resource class (`POST /{containers,images,volumes,networks}/prune`)
+/// and prints what was removed plus reclaimed space.
+pub fn pruneResource(client: *const http.Client, logger: *log.Logger, target: PruneTarget, writer: anytype) !void {
+    const path = switch (target) {
+        .container => api_prefix ++ "/containers/prune",
+        .image => api_prefix ++ "/images/prune",
+        .volume => api_prefix ++ "/volumes/prune",
+        .network => api_prefix ++ "/networks/prune",
+    };
+    logger.debug("POST {s}", .{path});
+    const resp = try client.request("POST", path, null);
+    defer resp.deinit();
+    if (!resp.ok()) return logApiFailure(logger, "POST", path, resp);
+
+    var count: usize = 0;
+    var reclaimed: u64 = 0;
+    switch (target) {
+        .container => {
+            const p = try std.json.parseFromSlice(ContainerPruneResponse, client.allocator, resp.body, .{ .ignore_unknown_fields = true });
+            defer p.deinit();
+            reclaimed = p.value.SpaceReclaimed;
+            if (p.value.ContainersDeleted) |ids| {
+                count = ids.len;
+                if (ids.len > 0) try writer.writeAll("Deleted Containers:\n");
+                for (ids) |id| try writer.print("  {s}\n", .{utils.shortId(id)});
+            }
+        },
+        .image => {
+            const p = try std.json.parseFromSlice(ImagePruneResponse, client.allocator, resp.body, .{ .ignore_unknown_fields = true });
+            defer p.deinit();
+            reclaimed = p.value.SpaceReclaimed;
+            if (p.value.ImagesDeleted) |items| {
+                count = items.len;
+                if (items.len > 0) try writer.writeAll("Deleted Images:\n");
+                for (items) |it| {
+                    if (it.Deleted orelse it.Untagged) |ref| try writer.print("  {s}\n", .{ref});
+                }
+            }
+        },
+        .volume => {
+            const p = try std.json.parseFromSlice(types.VolumePruneResponse, client.allocator, resp.body, .{ .ignore_unknown_fields = true });
+            defer p.deinit();
+            reclaimed = p.value.SpaceReclaimed;
+            if (p.value.VolumesDeleted) |names| {
+                count = names.len;
+                if (names.len > 0) try writer.writeAll("Deleted Volumes:\n");
+                for (names) |n| try writer.print("  {s}\n", .{n});
+            }
+        },
+        .network => {
+            const p = try std.json.parseFromSlice(types.NetworkPruneResponse, client.allocator, resp.body, .{ .ignore_unknown_fields = true });
+            defer p.deinit();
+            if (p.value.NetworksDeleted) |names| {
+                count = names.len;
+                if (names.len > 0) try writer.writeAll("Deleted Networks:\n");
+                for (names) |n| try writer.print("  {s}\n", .{n});
+            }
+        },
+    }
+
+    if (target != .network) {
+        var size_buf: [32]u8 = undefined;
+        try writer.print("Total reclaimed space: {s}\n", .{formatSizeU64(&size_buf, reclaimed)});
+    }
+    logger.info("pruned {d} {s}(s) (reclaimed={d} bytes)", .{ count, @tagName(target), reclaimed });
+}
+
 pub fn showVersion(client: *const http.Client, logger: *log.Logger, client_version: []const u8, writer: anytype) !void {
     const path = api_prefix ++ "/version";
 
@@ -876,6 +945,61 @@ test "inspect falls back from container to image over mock Unix socket" {
     try std.testing.expectEqual(@as(usize, 2), ctx.matched);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "sha256:deadbeef") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "alpine:3.20") != null);
+}
+
+test "pruneResource handles each resource class" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-prune-{d}.sock",
+        .{std.Io.Clock.awake.now(std.testing.io).nanoseconds},
+    );
+    defer alloc.free(sock_path);
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
+
+    const c_json = "{\"ContainersDeleted\":[\"deadbeef12345678\"],\"SpaceReclaimed\":2048}";
+    const i_json = "{\"ImagesDeleted\":[{\"Deleted\":\"sha256:2222\"}],\"SpaceReclaimed\":0}";
+    const v_json = "{\"VolumesDeleted\":[\"data1\"],\"SpaceReclaimed\":4096}";
+    const n_json = "{\"NetworksDeleted\":[\"net1\",\"net2\"]}";
+    const hdr = "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}";
+    const replies = [_]ScriptedReply{
+        .{ .expected_prefix = "POST /v1.40/containers/prune HTTP/1.1\r\n", .raw_response = std.fmt.comptimePrint(hdr, .{ c_json.len, c_json }) },
+        .{ .expected_prefix = "POST /v1.40/images/prune HTTP/1.1\r\n", .raw_response = std.fmt.comptimePrint(hdr, .{ i_json.len, i_json }) },
+        .{ .expected_prefix = "POST /v1.40/volumes/prune HTTP/1.1\r\n", .raw_response = std.fmt.comptimePrint(hdr, .{ v_json.len, v_json }) },
+        .{ .expected_prefix = "POST /v1.40/networks/prune HTTP/1.1\r\n", .raw_response = std.fmt.comptimePrint(hdr, .{ n_json.len, n_json }) },
+        .{ .expected_prefix = "POST /v1.40/volumes/prune HTTP/1.1\r\n", .raw_response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 17\r\n\r\n{\"message\":\"bad\"}" },
+    };
+
+    var ctx = MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path, .io = std.testing.io };
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
+    defer logger.deinit();
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+
+    try pruneResource(&client, &logger, .container, &out.writer);
+    try pruneResource(&client, &logger, .image, &out.writer);
+    try pruneResource(&client, &logger, .volume, &out.writer);
+    try pruneResource(&client, &logger, .network, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "Deleted Containers:\n  deadbeef1234") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "  sha256:2222\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "Deleted Volumes:\n  data1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "Deleted Networks:\n  net1\n  net2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "Total reclaimed space: ") != null);
+
+    try std.testing.expect(std.meta.isError(pruneResource(&client, &logger, .volume, &out.writer)));
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
 }
 
 test "systemPing, systemDf, and systemPrune endpoints" {

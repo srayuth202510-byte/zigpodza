@@ -481,6 +481,17 @@ pub const ImagePruneResponse = struct {
     SpaceReclaimed: u64 = 0,
 };
 
+/// Response from `POST /volumes/prune`.
+pub const VolumePruneResponse = struct {
+    VolumesDeleted: ?[]const []const u8 = null,
+    SpaceReclaimed: u64 = 0,
+};
+
+/// Response from `POST /networks/prune`.
+pub const NetworkPruneResponse = struct {
+    NetworksDeleted: ?[]const []const u8 = null,
+};
+
 /// Normalized JSON telemetry entry emitted by `zigpod stats --json`.
 pub const StatsJsonEntry = struct {
     id: []const u8,

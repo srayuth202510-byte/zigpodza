@@ -4,7 +4,7 @@ const cli_types = @import("cli_types.zig");
 
 pub const Shell = cli_types.Shell;
 
-const subcommands = "run ps images pull rmi tag history commit build start stop restart pause unpause rename kill rm logs top exec attach inspect stats volume network cp pod compose system port wait diff events policy completion audit demo search save load export import version help";
+const subcommands = "run ps images pull rmi tag history commit build start stop restart pause unpause rename kill rm logs top exec attach inspect stats create container image volume network cp pod compose system port wait diff events policy completion audit demo search save load export import version help";
 
 const bash_template =
     \\# bash completion for zigpod
@@ -19,11 +19,14 @@ const bash_template =
     \\        completion)
     \\            COMPREPLY=( $(compgen -W "bash zsh fish" -- "${{cur}}") )
     \\            ;;
+    \\        container|image)
+    \\            COMPREPLY=( $(compgen -W "prune" -- "${{cur}}") )
+    \\            ;;
     \\        volume)
-    \\            COMPREPLY=( $(compgen -W "ls create rm inspect" -- "${{cur}}") )
+    \\            COMPREPLY=( $(compgen -W "ls create rm inspect prune" -- "${{cur}}") )
     \\            ;;
     \\        network)
-    \\            COMPREPLY=( $(compgen -W "ls inspect create rm" -- "${{cur}}") )
+    \\            COMPREPLY=( $(compgen -W "ls inspect create rm prune" -- "${{cur}}") )
     \\            ;;
     \\        attach)
     \\            COMPREPLY=( $(compgen -W "-i --interactive -t --tty" -- "${{cur}}") )
@@ -82,6 +85,9 @@ const zsh_script =
     \\        'attach:Attach to a running container'
     \\        'inspect:Inspect a container or image'
     \\        'stats:Display container resource usage'
+    \\        'create:Create a container without starting it'
+    \\        'container:Manage containers (prune)'
+    \\        'image:Manage images (prune)'
     \\        'volume:Manage named volumes'
     \\        'network:Manage networks'
     \\        'cp:Copy files between container and host'
@@ -113,10 +119,10 @@ const zsh_script =
     \\            _values 'shell' bash zsh fish
     \\            ;;
     \\        volume)
-    \\            _values 'action' ls create rm inspect
+    \\            _values 'action' ls create rm inspect prune
     \\            ;;
     \\        network)
-    \\            _values 'action' ls inspect create rm
+    \\            _values 'action' ls inspect create rm prune
     \\            ;;
     \\        pod)
     \\            _values 'action' create ps stop rm
@@ -143,8 +149,8 @@ const fish_template =
     \\    complete -c zigpod -n "__fish_use_subcommand" -a "$cmd"
     \\end
     \\complete -c zigpod -n "__fish_seen_subcommand_from completion" -a "bash zsh fish"
-    \\complete -c zigpod -n "__fish_seen_subcommand_from volume" -a "ls create rm inspect"
-    \\complete -c zigpod -n "__fish_seen_subcommand_from network" -a "ls inspect create rm"
+    \\complete -c zigpod -n "__fish_seen_subcommand_from volume" -a "ls create rm inspect prune"
+    \\complete -c zigpod -n "__fish_seen_subcommand_from network" -a "ls inspect create rm prune"
     \\complete -c zigpod -n "__fish_seen_subcommand_from pod" -a "create ps stop rm"
     \\complete -c zigpod -n "__fish_seen_subcommand_from compose" -a "up down ps"
     \\complete -c zigpod -n "__fish_seen_subcommand_from policy" -a "show check"
@@ -220,7 +226,7 @@ test "zsh script registers all subcommands and per-command actions" {
     const s = out.written();
 
     try std.testing.expect(std.mem.indexOf(u8, s, "#compdef zigpod") != null);
-    for ([_][]const u8{ "run", "ps", "images", "pull", "rmi", "tag", "history", "commit", "build", "start", "stop", "restart", "pause", "unpause", "rename", "kill", "rm", "logs", "top", "exec", "attach", "inspect", "stats", "volume", "network", "cp", "pod", "system", "port", "wait", "diff", "events", "policy", "completion", "audit", "demo", "version", "help" }) |cmd| {
+    for ([_][]const u8{ "run", "ps", "images", "pull", "rmi", "tag", "history", "commit", "build", "start", "stop", "restart", "pause", "unpause", "rename", "kill", "rm", "logs", "create", "container", "image", "top", "exec", "attach", "inspect", "stats", "volume", "network", "cp", "pod", "system", "port", "wait", "diff", "events", "policy", "completion", "audit", "demo", "version", "help" }) |cmd| {
         var line_buf: std.Io.Writer.Allocating = .init(alloc);
         defer line_buf.deinit();
         try line_buf.writer.print("'{s}:", .{cmd});
