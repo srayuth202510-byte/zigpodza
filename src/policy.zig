@@ -2,6 +2,8 @@
 const std = @import("std");
 const cli = @import("cli.zig");
 const types = @import("podman_types.zig");
+const log = @import("log.zig");
+const utils = @import("utils.zig");
 
 pub const ApiError = types.ApiError;
 
@@ -104,6 +106,10 @@ pub fn loadPolicyFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8
     const raw = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024 + 1)) catch return ApiError.InvalidPolicyFile;
     defer allocator.free(raw);
 
+    return parsePolicyJson(allocator, raw);
+}
+
+fn parsePolicyJson(allocator: std.mem.Allocator, raw: []const u8) !std.json.Parsed(Policy) {
     const parsed = std.json.parseFromSlice(Policy, allocator, raw, .{
         .ignore_unknown_fields = true,
         .allocate = .alloc_always,
@@ -112,6 +118,24 @@ pub fn loadPolicyFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8
 
     try validatePolicySchema(parsed.value);
     return parsed;
+}
+
+/// Loads an implicitly discovered policy file (`./zigpod-policy.json`). Like
+/// `zigpod.toml` (BUG-033) it must be a regular file (no symlink) owned by the
+/// current user and not group/world-writable, otherwise a planted file in the
+/// working directory could silently raise the sandbox ceilings.
+pub fn loadImplicitPolicyFile(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, sub_path: []const u8) !std.json.Parsed(Policy) {
+    const file = dir.openFile(io, sub_path, .{ .follow_symlinks = false }) catch return ApiError.InvalidPolicyFile;
+    defer file.close(io);
+
+    const st = log.statxFd(file.handle) orelse return ApiError.InvalidPolicyFile;
+    if (!std.posix.S.ISREG(st.mode)) return ApiError.InvalidPolicyFile;
+    if (st.uid != std.os.linux.getuid()) return ApiError.InvalidPolicyFile;
+    if ((st.mode & 0o022) != 0) return ApiError.InvalidPolicyFile;
+
+    const raw = utils.readFileToEndAlloc(io, file, allocator, 1024 * 1024) catch return ApiError.InvalidPolicyFile;
+    defer allocator.free(raw);
+    return parsePolicyJson(allocator, raw);
 }
 
 pub fn validatePolicySchema(pol: Policy) ApiError!void {
@@ -353,6 +377,38 @@ test "showPolicy and checkPolicyFile render and validate policy JSON without lea
     try checkPolicyFile(std.testing.io, alloc, "zigpod-policy.json", true, &out.writer);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"valid\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"profile\":\"sandbox\"") != null);
+}
+
+test "loadImplicitPolicyFile rejects world/group-writable and symlinked policies (BUG-033)" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const body =
+        \\{"max_memory_bytes":134217728,"max_pids_limit":32,"allowed_networks":["none"]}
+    ;
+    const f = try tmp.dir.createFile(io, "zigpod-policy.json", .{});
+    try f.writeStreamingAll(io, body);
+    try f.setPermissions(io, .fromMode(0o666));
+    f.close(io);
+    try std.testing.expectError(ApiError.InvalidPolicyFile, loadImplicitPolicyFile(io, alloc, tmp.dir, "zigpod-policy.json"));
+
+    const g = try tmp.dir.openFile(io, "zigpod-policy.json", .{});
+    try g.setPermissions(io, .fromMode(0o660));
+    g.close(io);
+    try std.testing.expectError(ApiError.InvalidPolicyFile, loadImplicitPolicyFile(io, alloc, tmp.dir, "zigpod-policy.json"));
+
+    const ok = try tmp.dir.openFile(io, "zigpod-policy.json", .{});
+    try ok.setPermissions(io, .fromMode(0o600));
+    ok.close(io);
+    const parsed = try loadImplicitPolicyFile(io, alloc, tmp.dir, "zigpod-policy.json");
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(i64, 134_217_728), parsed.value.max_memory_bytes);
+
+    try tmp.dir.symLink(io, "zigpod-policy.json", "link-policy.json", .{});
+    try std.testing.expectError(ApiError.InvalidPolicyFile, loadImplicitPolicyFile(io, alloc, tmp.dir, "link-policy.json"));
+    try std.testing.expectError(ApiError.InvalidPolicyFile, loadImplicitPolicyFile(io, alloc, tmp.dir, "missing.json"));
 }
 
 test "loadPolicyFile parses valid zigpod-policy.json and rejects malformed files" {

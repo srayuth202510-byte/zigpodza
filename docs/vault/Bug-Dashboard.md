@@ -19,9 +19,9 @@ status: active
 
 | Metric | Value |
 | :--- | :--- |
-| Tracked Bug Patterns | **46** (46 Guarded) |
+| Tracked Bug Patterns | **49** (49 Guarded) |
 | Zig Source Modules | **25** |
-| Unit & Integration Tests | **251** |
+| Unit & Integration Tests | **253** |
 | Static Security & Memory Gates | **7/9 PASS** |
 
 ## Guard Coverage Map
@@ -145,6 +145,13 @@ flowchart LR
     BUG046["BUG-046"] --> SEC["[[Security-And-Memory-Checklist]]"]
     BUG046 --> src_podman_build_zig["src/podman_build.zig"]
     BUG046 --> src_compose_zig["src/compose.zig"]
+    BUG047["BUG-047"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG047 --> src_policy_zig["src/policy.zig"]
+    BUG047 --> src_main_zig["src/main.zig"]
+    BUG048["BUG-048"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG048 --> src_log_zig["src/log.zig"]
+    BUG049["BUG-049"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG049 --> scripts_podman_e2e_sh["scripts/podman-e2e.sh"]
 ```
 
 ## Bug Pattern Registry
@@ -197,6 +204,9 @@ flowchart LR
 | [BUG-044](../../docs/vault/Bug-Playbook.md#L499) | Double Free on OOM in Compose Slice Builders (`appendDupPort`, `appendDupVolume`, `appendDupLabel`) | `#memory-leak` `#bug-pattern` | [compose.zig](../../src/compose.zig) | **Guarded** |
 | [BUG-045](../../docs/vault/Bug-Playbook.md#L508) | Container Restart Timeout Error Aliasing (`InvalidIdentifier`) Corrupting Audit Telemetry | `#bug-pattern` `#security-gate` | [podman_types.zig](../../src/podman_types.zig), [podman_api.zig](../../src/podman_api.zig), [main.zig](../../src/main.zig) | **Guarded** |
 | [BUG-046](../../docs/vault/Bug-Playbook.md#L515) | Zig 0.17 Migration Hazards — Sentinel Free Mismatch & Off-by-One Read Limits | `#bug-pattern` `#memory-safety` | [podman_build.zig](../../src/podman_build.zig), [compose.zig](../../src/compose.zig), [podman_transfer.zig](../../src/podman_transfer.zig), [podman_validate.zig](../../src/podman_validate.zig), [utils.zig](../../src/utils.zig), [policy.zig](../../src/policy.zig), [log.zig](../../src/log.zig) | **Guarded** |
+| [BUG-047](../../docs/vault/Bug-Playbook.md#L522) | Implicit `./zigpod-policy.json` Loaded Without Ownership/Permission Check | `#bug-pattern` `#security-gate` | [policy.zig](../../src/policy.zig), [main.zig](../../src/main.zig) | **Guarded** |
+| [BUG-048](../../docs/vault/Bug-Playbook.md#L529) | FIFO Planted as `system.log` / `error.log` Hangs the CLI in `open()` | `#bug-pattern` `#security-gate` | [log.zig](../../src/log.zig) | **Guarded** |
+| [BUG-049](../../docs/vault/Bug-Playbook.md#L536) | E2E Script Pipes Multi-Line CLI Output Straight Into `grep -q` | `#bug-pattern` `#reliability` | [podman-e2e.sh](../../scripts/podman-e2e.sh) | **Guarded** |
 
 ## Module Test & Allocator Coverage
 
@@ -213,7 +223,7 @@ flowchart LR
 | [http_parser.zig](../../src/http_parser.zig) | 303 | 2 | 10 | `std.testing.allocator` |
 | [http_socket.zig](../../src/http_socket.zig) | 157 | 14 | 0 | `MISSING` |
 | [http_types.zig](../../src/http_types.zig) | 284 | 22 | 11 | `std.testing.allocator` |
-| [log.zig](../../src/log.zig) | 903 | 22 | 12 | `std.testing.allocator` |
+| [log.zig](../../src/log.zig) | 932 | 22 | 13 | `std.testing.allocator` |
 | [main.zig](../../src/main.zig) | 1149 | 2 | 4 | `missing gpa check` |
 | [podman_api.zig](../../src/podman_api.zig) | 2066 | 122 | 19 | `std.testing.allocator` |
 | [podman_build.zig](../../src/podman_build.zig) | 614 | 8 | 6 | `std.testing.allocator` |
@@ -225,7 +235,7 @@ flowchart LR
 | [podman_transfer.zig](../../src/podman_transfer.zig) | 1584 | 9 | 10 | `std.testing.allocator` |
 | [podman_types.zig](../../src/podman_types.zig) | 1078 | 72 | 35 | `std.testing.allocator` |
 | [podman_validate.zig](../../src/podman_validate.zig) | 1007 | 49 | 17 | `std.testing.allocator` |
-| [policy.zig](../../src/policy.zig) | 389 | 18 | 5 | `std.testing.allocator` |
+| [policy.zig](../../src/policy.zig) | 445 | 19 | 6 | `std.testing.allocator` |
 | [utils.zig](../../src/utils.zig) | 120 | 13 | 2 | `stack-only (no heap)` |
 
 ## Static Security & Memory Gates
@@ -565,3 +575,24 @@ flowchart LR
 - **Root Cause**: `std.Io.Dir.realPathFileAlloc` คืน `[:0]u8` (จองเพิ่ม 1 ไบต์สำหรับ sentinel) แต่ถูก coerce เป็น `[]u8` ผ่าน return type แล้ว free ด้วยความยาวที่ไม่รวม sentinel; และ `readFileAlloc(..., .limited(n))` (unbuffered reader) ถือว่า "อ่านครบ n ไบต์" = เกิน limit ต่างจาก `readToEndAlloc(max)` ของ 0.13
 - **Fix**: เพิ่ม `utils.realpathAlloc` (คืน `[]u8` ความยาวตรง) ใช้ใน `src/podman_build.zig`, `src/compose.zig`, `src/podman_transfer.zig`, `src/podman_validate.zig`; ใช้ `.limited(N + 1)` และ `utils.readFileToEndAlloc` ใน `src/utils.zig`, `src/policy.zig`, `src/log.zig`
 - **Prevention**: ห้ามคืน/เก็บผลจาก `realPathFileAlloc` เป็น `[]u8`; การอ่านไฟล์แบบจำกัดขนาดต้องคง semantics "ไม่เกิน N ไบต์" (`.limited(N + 1)`) — ดู `.agents/rules/zig-0.17-gotchas.md` ข้อ 6
+
+### BUG-047 — Implicit `./zigpod-policy.json` Loaded Without Ownership/Permission Check
+- **Source**: [docs/vault/Bug-Playbook.md:522](../../docs/vault/Bug-Playbook.md#L522) · **Status**: `Guarded`
+- **Symptom**: `zigpod run --profile sandbox` (ไม่มี `--policy`) อ่าน `./zigpod-policy.json` จาก CWD โดยอัตโนมัติ ไฟล์ที่ผู้อื่นวางไว้ (world/group-writable, symlink, หรือเจ้าของอื่น) เช่นในไดเรกทอรีของ repo ที่เพิ่ง clone จึงยกเพดาน sandbox (memory, network, mounts) ได้เงียบ ๆ ต่างจาก `zigpod.toml` ที่ถูกตรวจตั้งแต่ BUG-033
+- **Root Cause**: การค้นพบ policy แบบ implicit ใช้ `loadPolicyFile` ตัวเดียวกับ `--policy FILE` ซึ่งไม่ตรวจ symlink, owner และ mode
+- **Fix**: เพิ่ม `policy.loadImplicitPolicyFile` ใน `src/policy.zig` (เปิดด้วย `follow_symlinks=false`, ต้องเป็น regular file, uid ตรงกับผู้ใช้, ไม่มี bit `0o022`) และเรียกใช้ใน `src/main.zig` เฉพาะเส้นทาง implicit; ความล้มเหลวคืน `ApiError.InvalidPolicyFile` ซึ่ง `reportFailure` บันทึกเป็น DENY อยู่แล้ว
+- **Prevention**: ไฟล์ที่ถูกค้นพบอัตโนมัติจาก CWD และมีผลต่อ security guardrail ต้องผ่านการตรวจ ownership + permission + no-symlink เสมอ (ใช้หลักเดียวกับ BUG-033); `--policy FILE` ที่ผู้ใช้ระบุเองคงพฤติกรรมเดิม
+
+### BUG-048 — FIFO Planted as `system.log` / `error.log` Hangs the CLI in `open()`
+- **Source**: [docs/vault/Bug-Playbook.md:529](../../docs/vault/Bug-Playbook.md#L529) · **Status**: `Guarded`
+- **Symptom**: ถ้ามี named pipe ชื่อ `system.log` หรือ `error.log` อยู่ในโฟลเดอร์ log (ค่า default คือ CWD) ทุกคำสั่งของ zigpod ค้างตลอดไปตั้งแต่ `Logger.init` (DoS) — `audit.log` ไม่ค้างเพราะเปิดแบบ `O_RDWR`
+- **Root Cause**: `openAppend` ใน `src/log.zig` เปิดด้วย `O_WRONLY` ซึ่งบล็อกจนกว่าจะมี reader มาเปิดอีกฝั่งของ FIFO; การตรวจชนิดไฟล์ (`S_IFREG`) ทำหลัง `open()` จึงไม่ทัน
+- **Fix**: เพิ่ม `.NONBLOCK = true` ใน flags ของ `openat` (FIFO ที่ไม่มี reader คืน `ENXIO` ทันที ส่วน regular file ไม่ได้รับผลกระทบ) และเพิ่มเทส `BUG-048` ที่วาง FIFO ทั้งสามชื่อแล้วต้องไม่ค้าง
+- **Prevention**: การเปิดไฟล์ที่ path ซึ่งผู้อื่นควบคุมได้ต้องไม่บล็อกก่อนตรวจชนิดไฟล์ — ใช้ `O_NONBLOCK` + `O_NOFOLLOW` แล้วค่อย `fstat` ตรวจ `S_IFREG`/owner
+
+### BUG-049 — E2E Script Pipes Multi-Line CLI Output Straight Into `grep -q`
+- **Source**: [docs/vault/Bug-Playbook.md:536](../../docs/vault/Bug-Playbook.md#L536) · **Status**: `Guarded`
+- **Symptom**: `scripts/podman-e2e.sh` ยังมี `zigpod ... | grep -q` ตรง ๆ (`images --json`, `network ls`, `network inspect`, `logs`) ซึ่งเสี่ยง `BrokenPipe` เมื่อ `grep -q` ออกก่อนที่ CLI จะเขียนจบ (เหตุเดียวกับ BUG-039) และ `balor-security-audit.sh` ใช้ `date` ตาม locale (ปีพุทธศักราชใน `th_TH`) ตั้งชื่อไฟล์รายงาน (เหตุเดียวกับ BUG-011)
+- **Root Cause**: gate ของ `auto-audit.sh` ตรวจเฉพาะ pattern `compose ... | grep -q` จึงไม่จับ CLI คำสั่งอื่น และไม่มีการตรวจ `date` ที่ไม่ pin locale
+- **Fix**: capture output ลงตัวแปรก่อนแล้ว `printf | grep -q`; ใช้ `LC_ALL=C date`; ขยาย gate BUG-039 ให้ครอบคลุม `"$BIN" ... | grep -q` ทั้งไฟล์ E2E
+- **Prevention**: gate ต้องตรวจ "รูปแบบของข้อผิดพลาด" ไม่ใช่เฉพาะคำสั่งที่เคยทำให้พัง

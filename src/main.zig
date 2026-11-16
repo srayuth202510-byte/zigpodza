@@ -348,7 +348,7 @@ fn dispatch(
                 } else blk: {
                     // Use ./zigpod-policy.json when present; otherwise use built-in fail-closed defaults.
                     if (std.Io.Dir.cwd().access(io, "zigpod-policy.json", .{})) |_| {
-                        loaded_pol = try policy.loadPolicyFile(io, client.allocator, "zigpod-policy.json");
+                        loaded_pol = try policy.loadImplicitPolicyFile(io, client.allocator, std.Io.Dir.cwd(), "zigpod-policy.json");
                         break :blk loaded_pol.?.value;
                     } else |_| {
                         break :blk policy.default_sandbox_policy;
