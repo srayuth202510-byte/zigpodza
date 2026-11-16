@@ -19,9 +19,9 @@ status: active
 
 | Metric | Value |
 | :--- | :--- |
-| Tracked Bug Patterns | **49** (49 Guarded) |
-| Zig Source Modules | **25** |
-| Unit & Integration Tests | **268** |
+| Tracked Bug Patterns | **50** (50 Guarded) |
+| Zig Source Modules | **26** |
+| Unit & Integration Tests | **284** |
 | Static Security & Memory Gates | **7/9 PASS** |
 
 ## Guard Coverage Map
@@ -152,6 +152,8 @@ flowchart LR
     BUG048 --> src_log_zig["src/log.zig"]
     BUG049["BUG-049"] --> SEC["[[Security-And-Memory-Checklist]]"]
     BUG049 --> scripts_podman_e2e_sh["scripts/podman-e2e.sh"]
+    BUG050["BUG-050"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG050 --> src_podman_api_zig["src/podman_api.zig"]
 ```
 
 ## Bug Pattern Registry
@@ -207,15 +209,16 @@ flowchart LR
 | [BUG-047](../../docs/vault/Bug-Playbook.md#L522) | Implicit `./zigpod-policy.json` Loaded Without Ownership/Permission Check | `#bug-pattern` `#security-gate` | [policy.zig](../../src/policy.zig), [main.zig](../../src/main.zig) | **Guarded** |
 | [BUG-048](../../docs/vault/Bug-Playbook.md#L529) | FIFO Planted as `system.log` / `error.log` Hangs the CLI in `open()` | `#bug-pattern` `#security-gate` | [log.zig](../../src/log.zig) | **Guarded** |
 | [BUG-049](../../docs/vault/Bug-Playbook.md#L536) | E2E Script Pipes Multi-Line CLI Output Straight Into `grep -q` | `#bug-pattern` `#reliability` | [podman-e2e.sh](../../scripts/podman-e2e.sh) | **Guarded** |
+| [BUG-050](../../docs/vault/Bug-Playbook.md#L543) | Podman Compat `update` Silently Ignores `NanoCpus` | `#bug-pattern` `#api-contract` | [podman_api.zig](../../src/podman_api.zig) | **Guarded** |
 
 ## Module Test & Allocator Coverage
 
 | Module | Lines | Public Decls | Unit Tests | Memory Gate |
 | :--- | ---: | ---: | ---: | :--- |
-| [cli.zig](../../src/cli.zig) | 2433 | 51 | 34 | `std.testing.allocator` |
+| [cli.zig](../../src/cli.zig) | 2675 | 51 | 37 | `std.testing.allocator` |
 | [cli_specs.zig](../../src/cli_specs.zig) | 730 | 28 | 17 | `std.testing.allocator` |
-| [cli_types.zig](../../src/cli_types.zig) | 818 | 68 | 12 | `std.testing.allocator` |
-| [completion.zig](../../src/completion.zig) | 279 | 2 | 5 | `std.testing.allocator` |
+| [cli_types.zig](../../src/cli_types.zig) | 861 | 72 | 12 | `std.testing.allocator` |
+| [completion.zig](../../src/completion.zig) | 295 | 2 | 5 | `std.testing.allocator` |
 | [compose.zig](../../src/compose.zig) | 2087 | 14 | 10 | `std.testing.allocator` |
 | [config.zig](../../src/config.zig) | 352 | 9 | 6 | `std.testing.allocator` |
 | [demo.zig](../../src/demo.zig) | 495 | 6 | 2 | `std.testing.allocator` |
@@ -224,16 +227,17 @@ flowchart LR
 | [http_socket.zig](../../src/http_socket.zig) | 157 | 14 | 0 | `MISSING` |
 | [http_types.zig](../../src/http_types.zig) | 284 | 22 | 11 | `std.testing.allocator` |
 | [log.zig](../../src/log.zig) | 932 | 22 | 13 | `std.testing.allocator` |
-| [main.zig](../../src/main.zig) | 1240 | 2 | 5 | `missing gpa check` |
-| [podman_api.zig](../../src/podman_api.zig) | 2318 | 135 | 23 | `std.testing.allocator` |
+| [main.zig](../../src/main.zig) | 1316 | 2 | 5 | `missing gpa check` |
+| [podman_api.zig](../../src/podman_api.zig) | 2474 | 145 | 25 | `std.testing.allocator` |
 | [podman_build.zig](../../src/podman_build.zig) | 896 | 16 | 9 | `std.testing.allocator` |
-| [podman_images.zig](../../src/podman_images.zig) | 697 | 10 | 7 | `std.testing.allocator` |
+| [podman_images.zig](../../src/podman_images.zig) | 819 | 11 | 8 | `std.testing.allocator` |
 | [podman_logs.zig](../../src/podman_logs.zig) | 841 | 10 | 8 | `std.testing.allocator` |
 | [podman_pods.zig](../../src/podman_pods.zig) | 337 | 4 | 4 | `std.testing.allocator` |
-| [podman_system.zig](../../src/podman_system.zig) | 1512 | 20 | 9 | `std.testing.allocator` |
+| [podman_registry.zig](../../src/podman_registry.zig) | 742 | 12 | 9 | `std.testing.allocator` |
+| [podman_system.zig](../../src/podman_system.zig) | 1665 | 21 | 10 | `std.testing.allocator` |
 | [podman_test_helpers.zig](../../src/podman_test_helpers.zig) | 365 | 4 | 7 | `std.testing.allocator` |
 | [podman_transfer.zig](../../src/podman_transfer.zig) | 1584 | 9 | 10 | `std.testing.allocator` |
-| [podman_types.zig](../../src/podman_types.zig) | 1092 | 72 | 35 | `std.testing.allocator` |
+| [podman_types.zig](../../src/podman_types.zig) | 1097 | 72 | 35 | `std.testing.allocator` |
 | [podman_validate.zig](../../src/podman_validate.zig) | 1039 | 52 | 17 | `std.testing.allocator` |
 | [policy.zig](../../src/policy.zig) | 445 | 19 | 6 | `std.testing.allocator` |
 | [utils.zig](../../src/utils.zig) | 120 | 13 | 2 | `stack-only (no heap)` |
@@ -596,3 +600,10 @@ flowchart LR
 - **Root Cause**: gate ของ `auto-audit.sh` ตรวจเฉพาะ pattern `compose ... | grep -q` จึงไม่จับ CLI คำสั่งอื่น และไม่มีการตรวจ `date` ที่ไม่ pin locale
 - **Fix**: capture output ลงตัวแปรก่อนแล้ว `printf | grep -q`; ใช้ `LC_ALL=C date`; ขยาย gate BUG-039 ให้ครอบคลุม `"$BIN" ... | grep -q` ทั้งไฟล์ E2E
 - **Prevention**: gate ต้องตรวจ "รูปแบบของข้อผิดพลาด" ไม่ใช่เฉพาะคำสั่งที่เคยทำให้พัง
+
+### BUG-050 — Podman Compat `update` Silently Ignores `NanoCpus`
+- **Source**: [docs/vault/Bug-Playbook.md:543](../../docs/vault/Bug-Playbook.md#L543) · **Status**: `Guarded`
+- **Symptom**: `zigpod update --cpus 0.5 CTR` ตอบ HTTP 200 และ exit 0 แต่ `HostConfig.NanoCpus`/`CpuQuota` ยังเป็น 0 และ `cpu.max` ของ cgroup ยังเป็น `max` (ตรวจกับ Podman 6.2.0 จริง) ผู้ใช้จึงเชื่อว่าจำกัด CPU แล้วทั้งที่ไม่มีผล
+- **Root Cause**: handler `POST /containers/{id}/update` แบบ Docker-compat ของ Podman อ่าน `CpuQuota`/`CpuPeriod` แต่ไม่แปลง `NanoCpus` และไม่คืน error สำหรับ field ที่ไม่รองรับ
+- **Fix**: `updateContainer` ใน `src/podman_api.zig` ส่ง `--cpus` เป็น `CpuPeriod=100000` + `CpuQuota=nano*period/1e9` (`cpuQuotaFor`) และ `validateUpdate` ปฏิเสธ quota < 1 ms (`InvalidCpuLimit`); mock test ตรวจ body ว่าไม่มี `NanoCpus`
+- **Prevention**: endpoint ที่ "สำเร็จ" ได้โดยไม่เปลี่ยนสถานะ ต้องตรวจผลจริงกับ daemon (inspect + cgroup) อย่างน้อยหนึ่งครั้งก่อน merge และ field ที่ daemon เมินเงียบต้องถูกแปลงหรือปฏิเสธ ห้ามส่งต่อเฉย ๆ

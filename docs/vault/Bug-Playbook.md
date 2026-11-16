@@ -539,3 +539,10 @@ status: active
 - **Root Cause**: gate ของ `auto-audit.sh` ตรวจเฉพาะ pattern `compose ... | grep -q` จึงไม่จับ CLI คำสั่งอื่น และไม่มีการตรวจ `date` ที่ไม่ pin locale
 - **Fix**: capture output ลงตัวแปรก่อนแล้ว `printf | grep -q`; ใช้ `LC_ALL=C date`; ขยาย gate BUG-039 ให้ครอบคลุม `"$BIN" ... | grep -q` ทั้งไฟล์ E2E
 - **Prevention Rule**: gate ต้องตรวจ "รูปแบบของข้อผิดพลาด" ไม่ใช่เฉพาะคำสั่งที่เคยทำให้พัง
+
+## BUG-050: Podman Compat `update` Silently Ignores `NanoCpus` `#bug-pattern` `#api-contract`
+
+- **Symptom**: `zigpod update --cpus 0.5 CTR` ตอบ HTTP 200 และ exit 0 แต่ `HostConfig.NanoCpus`/`CpuQuota` ยังเป็น 0 และ `cpu.max` ของ cgroup ยังเป็น `max` (ตรวจกับ Podman 6.2.0 จริง) ผู้ใช้จึงเชื่อว่าจำกัด CPU แล้วทั้งที่ไม่มีผล
+- **Root Cause**: handler `POST /containers/{id}/update` แบบ Docker-compat ของ Podman อ่าน `CpuQuota`/`CpuPeriod` แต่ไม่แปลง `NanoCpus` และไม่คืน error สำหรับ field ที่ไม่รองรับ
+- **Fix**: `updateContainer` ใน [src/podman_api.zig](../../src/podman_api.zig) ส่ง `--cpus` เป็น `CpuPeriod=100000` + `CpuQuota=nano*period/1e9` (`cpuQuotaFor`) และ `validateUpdate` ปฏิเสธ quota < 1 ms (`InvalidCpuLimit`); mock test ตรวจ body ว่าไม่มี `NanoCpus`
+- **Prevention Rule**: endpoint ที่ "สำเร็จ" ได้โดยไม่เปลี่ยนสถานะ ต้องตรวจผลจริงกับ daemon (inspect + cgroup) อย่างน้อยหนึ่งครั้งก่อน merge และ field ที่ daemon เมินเงียบต้องถูกแปลงหรือปฏิเสธ ห้ามส่งต่อเฉย ๆ

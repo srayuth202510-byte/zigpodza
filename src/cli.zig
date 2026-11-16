@@ -106,9 +106,50 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
     }
     if (i >= args.len) return .{ .global = global, .command = .help };
 
-    const name = args[i];
-    const rest = args[i + 1 ..];
-    const command: Command = if (eql(name, "run"))
+    const command = try parseCommand(allocator, args[i], args[i + 1 ..]);
+    return .{ .global = global, .command = command };
+}
+
+/// Docker-style `container SUB` aliases mapped to top-level commands.
+const container_group = [_][2][]const u8{
+    .{ "ls", "ps" },         .{ "list", "ps" },       .{ "ps", "ps" },
+    .{ "create", "create" }, .{ "run", "run" },       .{ "start", "start" },
+    .{ "stop", "stop" },     .{ "restart", "restart" }, .{ "pause", "pause" },
+    .{ "unpause", "unpause" }, .{ "rename", "rename" }, .{ "kill", "kill" },
+    .{ "rm", "rm" },         .{ "logs", "logs" },     .{ "top", "top" },
+    .{ "inspect", "inspect" }, .{ "exec", "exec" },   .{ "attach", "attach" },
+    .{ "cp", "cp" },         .{ "stats", "stats" },   .{ "port", "port" },
+    .{ "wait", "wait" },     .{ "diff", "diff" },     .{ "commit", "commit" },
+    .{ "export", "export" }, .{ "update", "update" },
+};
+
+/// Docker-style `image SUB` aliases mapped to top-level commands.
+const image_group = [_][2][]const u8{
+    .{ "ls", "images" },   .{ "list", "images" },   .{ "rm", "rmi" },
+    .{ "pull", "pull" },   .{ "push", "push" },     .{ "tag", "tag" },
+    .{ "inspect", "inspect" }, .{ "history", "history" }, .{ "save", "save" },
+    .{ "load", "load" },   .{ "import", "import" }, .{ "build", "build" },
+};
+
+fn lookupGroup(table: []const [2][]const u8, sub: []const u8) ?[]const u8 {
+    for (table) |entry| {
+        if (eql(entry[0], sub)) return entry[1];
+    }
+    return null;
+}
+
+/// `container|image prune` keeps its dedicated parser; every other
+/// subcommand is an alias for a top-level command (never another group).
+fn parseGroup(allocator: std.mem.Allocator, kind: PruneKind, table: []const [2][]const u8, args: []const []const u8) ParseError!Command {
+    if (args.len == 0) return error.MissingArgument;
+    if (eql(args[0], "prune")) return parsePruneGroup(kind, args);
+    if (isFlag(args[0])) return error.UnknownFlag;
+    const target = lookupGroup(table, args[0]) orelse return error.UnknownCommand;
+    return parseCommand(allocator, target, args[1..]);
+}
+
+fn parseCommand(allocator: std.mem.Allocator, name: []const u8, rest: []const []const u8) ParseError!Command {
+    return if (eql(name, "run"))
         .{ .run = try parseRun(allocator, rest) }
     else if (eql(name, "create"))
         .{ .run = blk: {
@@ -117,15 +158,25 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
             break :blk o;
         } }
     else if (eql(name, "container"))
-        try parsePruneGroup(.container, rest)
+        try parseGroup(allocator, .container, &container_group, rest)
     else if (eql(name, "image"))
-        try parsePruneGroup(.image, rest)
+        try parseGroup(allocator, .image, &image_group, rest)
     else if (eql(name, "ps"))
         try parsePs(rest)
     else if (eql(name, "images"))
         try parseImages(rest)
     else if (eql(name, "pull"))
         .{ .pull = try single(rest) }
+    else if (eql(name, "push"))
+        .{ .push = try single(rest) }
+    else if (eql(name, "login"))
+        try parseLogin(rest)
+    else if (eql(name, "logout"))
+        try parseLogout(rest)
+    else if (eql(name, "info"))
+        try parseInfo(rest)
+    else if (eql(name, "update"))
+        try parseUpdate(rest)
     else if (eql(name, "rmi"))
         try parseRmi(rest)
     else if (eql(name, "start"))
@@ -207,9 +258,109 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
     else if (eql(name, "help"))
         .help
     else
-        return error.UnknownCommand;
+        error.UnknownCommand;
+}
 
-    return .{ .global = global, .command = command };
+/// Parses `info [--json|--format TEMPLATE]` (also `system info`).
+fn parseInfo(args: []const []const u8) ParseError!Command {
+    var opts = types.InfoOpts{};
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (eql(a, "--json")) {
+            opts.json = true;
+        } else if (eql(a, "-f") or eql(a, "--format")) {
+            opts.format = try nonEmpty(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--format=")) {
+            opts.format = try nonEmpty(a["--format=".len..]);
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else return error.TooManyArguments;
+    }
+    if (opts.json and opts.format != null) return error.InvalidValue;
+    return .{ .info = opts };
+}
+
+/// Parses `update [--memory M] [--cpus N] [--pids-limit N] [--restart P] CONTAINER`.
+fn parseUpdate(args: []const []const u8) ParseError!Command {
+    var opts = types.UpdateOpts{ .container = "" };
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (eql(a, "-m") or eql(a, "--memory")) {
+            opts.memory = try parseMemoryBytes(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--memory=")) {
+            opts.memory = try parseMemoryBytes(a["--memory=".len..]);
+        } else if (eql(a, "--cpus")) {
+            opts.nano_cpus = try parseCpuNanos(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--cpus=")) {
+            opts.nano_cpus = try parseCpuNanos(a["--cpus=".len..]);
+        } else if (eql(a, "--pids-limit")) {
+            opts.pids_limit = try parsePidsLimit(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--pids-limit=")) {
+            opts.pids_limit = try parsePidsLimit(a["--pids-limit=".len..]);
+        } else if (eql(a, "--restart")) {
+            opts.restart_policy = try parseRestartPolicy(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--restart=")) {
+            opts.restart_policy = try parseRestartPolicy(a["--restart=".len..]);
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else if (opts.container.len == 0) {
+            opts.container = a;
+        } else return error.TooManyArguments;
+    }
+    if (opts.container.len == 0) return error.MissingArgument;
+    if (opts.memory == null and opts.nano_cpus == null and opts.pids_limit == null and opts.restart_policy == null) {
+        return error.MissingArgument;
+    }
+    return .{ .update = opts };
+}
+
+/// Parses `login -u USER [--password-stdin] REGISTRY`. `-p/--password` is
+/// rejected: a password on argv is visible to every local user via /proc.
+fn parseLogin(args: []const []const u8) ParseError!Command {
+    var registry: ?[]const u8 = null;
+    var username: ?[]const u8 = null;
+    var password_stdin = false;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (eql(a, "-u") or eql(a, "--username")) {
+            username = try nonEmpty(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--username=")) {
+            username = try nonEmpty(a["--username=".len..]);
+        } else if (eql(a, "--password-stdin")) {
+            password_stdin = true;
+        } else if (eql(a, "-p") or eql(a, "--password") or std.mem.startsWith(u8, a, "--password=")) {
+            return error.InvalidValue;
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else if (registry == null) {
+            registry = a;
+        } else return error.TooManyArguments;
+    }
+    return .{ .login = .{
+        .registry = registry orelse return error.MissingArgument,
+        .username = username orelse return error.MissingArgument,
+        .password_stdin = password_stdin,
+    } };
+}
+
+/// Parses `logout REGISTRY` or `logout -a|--all`.
+fn parseLogout(args: []const []const u8) ParseError!Command {
+    var opts = types.LogoutOpts{};
+    for (args) |a| {
+        if (eql(a, "-a") or eql(a, "--all")) {
+            opts.all = true;
+        } else if (isFlag(a)) {
+            return error.UnknownFlag;
+        } else if (opts.registry == null) {
+            opts.registry = a;
+        } else return error.TooManyArguments;
+    }
+    if (opts.all and opts.registry != null) return error.TooManyArguments;
+    if (!opts.all and opts.registry == null) return error.MissingArgument;
+    return .{ .logout = opts };
 }
 
 fn parseAudit(args: []const []const u8) ParseError!Command {
@@ -546,6 +697,11 @@ fn parseRm(args: []const []const u8) ParseError!Command {
     for (args) |a| {
         if (eql(a, "-f") or eql(a, "--force")) {
             opts.force = true;
+        } else if (eql(a, "-v") or eql(a, "--volumes")) {
+            opts.volumes = true;
+        } else if (eql(a, "-fv") or eql(a, "-vf")) {
+            opts.force = true;
+            opts.volumes = true;
         } else if (isFlag(a)) {
             return error.UnknownFlag;
         } else if (opts.container.len == 0) {
@@ -1091,6 +1247,8 @@ fn parseSystem(args: []const []const u8) ParseError!Command {
     } else if (eql(sub, "df")) {
         if (rest.len > 0) return if (isFlag(rest[0])) error.UnknownFlag else error.TooManyArguments;
         return .{ .system = .{ .action = .df } };
+    } else if (eql(sub, "info")) {
+        return parseInfo(rest);
     } else if (eql(sub, "prune")) {
         var force = false;
         for (rest) |a| {
@@ -1524,7 +1682,7 @@ test "parse create and prune groups" {
     try std.testing.expectEqual(PruneKind.volume, (try testParse(&.{ "volume", "prune", "--force" })).command.prune);
     try std.testing.expectEqual(PruneKind.network, (try testParse(&.{ "network", "prune" })).command.prune);
     try std.testing.expectError(error.MissingArgument, testParse(&.{"container"}));
-    try std.testing.expectError(error.UnknownCommand, testParse(&.{ "image", "ls" }));
+    try std.testing.expectError(error.UnknownCommand, testParse(&.{ "image", "bogus" }));
     try std.testing.expectError(error.UnknownFlag, testParse(&.{ "image", "prune", "-a" }));
     try std.testing.expectError(error.TooManyArguments, testParse(&.{ "volume", "prune", "x" }));
 }
@@ -2430,4 +2588,88 @@ test "parse run supports --cpus, --env-file, -l/--label, --entrypoint, --hostnam
     try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--env-file", "/srv/a.env", "-l", "k=v", "--cpus", "0", "alpine" }));
     try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--label", "a=b", "--hostname", "-bad", "alpine" }));
     try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "run", "--label", "a=b", "--restart", "never", "alpine" }));
+}
+
+test "parse info, system info, update, rm -v" {
+    const alloc = std.testing.allocator;
+    try std.testing.expect((try parse(alloc, &.{"info"})).command.info.format == null);
+    try std.testing.expect((try parse(alloc, &.{ "info", "--json" })).command.info.json);
+    try std.testing.expectEqualStrings("{{.ServerVersion}}", (try parse(alloc, &.{ "system", "info", "--format", "{{.ServerVersion}}" })).command.info.format.?);
+    try std.testing.expectEqualStrings("x", (try parse(alloc, &.{ "info", "--format=x" })).command.info.format.?);
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "info", "--json", "-f", "x" }));
+    try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "info", "--format", "" }));
+    try std.testing.expectError(error.TooManyArguments, parse(alloc, &.{ "info", "extra" }));
+    try std.testing.expectError(error.UnknownFlag, parse(alloc, &.{ "info", "--bogus" }));
+
+    const u = (try parse(alloc, &.{ "update", "--memory", "128m", "--cpus=1.5", "--pids-limit", "64", "--restart", "on-failure:3", "web" })).command.update;
+    try std.testing.expectEqualStrings("web", u.container);
+    try std.testing.expectEqual(@as(?i64, 128 * 1024 * 1024), u.memory);
+    try std.testing.expectEqual(@as(?i64, 1_500_000_000), u.nano_cpus);
+    try std.testing.expectEqual(@as(?i64, 64), u.pids_limit);
+    try std.testing.expectEqualStrings("on-failure", u.restart_policy.?.name);
+    try std.testing.expectEqual(@as(u32, 3), u.restart_policy.?.max_retry_count);
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "update", "web" }));
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "update", "--memory", "64m" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "update", "--pids-limit", "0", "web" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "update", "--restart", "sometimes", "web" }));
+    try std.testing.expectError(error.TooManyArguments, parse(alloc, &.{ "update", "--cpus", "1", "a", "b" }));
+    try std.testing.expectError(error.UnknownFlag, parse(alloc, &.{ "update", "--privileged", "web" }));
+
+    const rv = (try parse(alloc, &.{ "rm", "-v", "web" })).command.rm;
+    try std.testing.expect(rv.volumes and !rv.force);
+    const rfv = (try parse(alloc, &.{ "rm", "-fv", "web" })).command.rm;
+    try std.testing.expect(rfv.volumes and rfv.force);
+    try std.testing.expect((try parse(alloc, &.{ "rm", "--volumes", "--force", "web" })).command.rm.volumes);
+}
+
+test "parse push, login, logout and reject passwords on argv" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectEqualStrings("localhost:5000/app:v1", (try parse(alloc, &.{ "push", "localhost:5000/app:v1" })).command.push);
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{"push"}));
+    try std.testing.expectError(error.TooManyArguments, parse(alloc, &.{ "push", "a", "b" }));
+
+    const l = (try parse(alloc, &.{ "login", "-u", "alice", "--password-stdin", "quay.io" })).command.login;
+    try std.testing.expectEqualStrings("quay.io", l.registry);
+    try std.testing.expectEqualStrings("alice", l.username);
+    try std.testing.expect(l.password_stdin);
+    try std.testing.expect(!(try parse(alloc, &.{ "login", "--username=bob", "quay.io" })).command.login.password_stdin);
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "login", "-u", "a", "-p", "secret", "quay.io" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "login", "-u", "a", "--password=secret", "quay.io" }));
+    try std.testing.expectError(error.InvalidValue, parse(alloc, &.{ "login", "-u", "a", "--password", "secret", "quay.io" }));
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "login", "quay.io" }));
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "login", "-u", "a" }));
+    try std.testing.expectError(error.MissingValue, parse(alloc, &.{ "login", "-u", "", "quay.io" }));
+    try std.testing.expectError(error.TooManyArguments, parse(alloc, &.{ "login", "-u", "a", "x.io", "y.io" }));
+
+    try std.testing.expectEqualStrings("quay.io", (try parse(alloc, &.{ "logout", "quay.io" })).command.logout.registry.?);
+    try std.testing.expect((try parse(alloc, &.{ "logout", "--all" })).command.logout.all);
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{"logout"}));
+    try std.testing.expectError(error.TooManyArguments, parse(alloc, &.{ "logout", "-a", "quay.io" }));
+    try std.testing.expectError(error.TooManyArguments, parse(alloc, &.{ "logout", "a.io", "b.io" }));
+}
+
+test "parse container and image group aliases" {
+    const alloc = std.testing.allocator;
+    try std.testing.expect((try parse(alloc, &.{ "container", "ls", "-a" })).command.ps.all);
+    try std.testing.expect((try parse(alloc, &.{ "container", "list", "-q" })).command.ps.quiet);
+    try std.testing.expect((try parse(alloc, &.{ "container", "rm", "-f", "web" })).command.rm.force);
+    try std.testing.expectEqualStrings("web", (try parse(alloc, &.{ "container", "start", "web" })).command.start);
+    try std.testing.expectEqualStrings("web", (try parse(alloc, &.{ "container", "inspect", "web" })).command.inspect.target);
+    try std.testing.expect((try parse(alloc, &.{ "container", "create", "alpine" })).command.run.create_only);
+    try std.testing.expectEqual(PruneKind.container, (try parse(alloc, &.{ "container", "prune", "-f" })).command.prune);
+    try std.testing.expect((try parse(alloc, &.{ "image", "ls", "-a" })).command.images.all);
+    try std.testing.expect((try parse(alloc, &.{ "image", "rm", "-f", "alpine" })).command.rmi.force);
+    try std.testing.expectEqualStrings("alpine", (try parse(alloc, &.{ "image", "pull", "alpine" })).command.pull);
+    try std.testing.expectEqualStrings("r/app", (try parse(alloc, &.{ "image", "push", "r/app" })).command.push);
+    try std.testing.expectEqual(PruneKind.image, (try parse(alloc, &.{ "image", "prune" })).command.prune);
+
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{"container"}));
+    try std.testing.expectError(error.UnknownCommand, parse(alloc, &.{ "container", "container", "ls" }));
+    try std.testing.expectError(error.UnknownCommand, parse(alloc, &.{ "container", "images" }));
+    try std.testing.expectError(error.UnknownCommand, parse(alloc, &.{ "image", "ps" }));
+    try std.testing.expectError(error.UnknownCommand, parse(alloc, &.{ "image", "image", "ls" }));
+    try std.testing.expectError(error.UnknownFlag, parse(alloc, &.{ "image", "--all" }));
+    // Arguments are still validated by the target parser.
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "container", "rm" }));
+    try std.testing.expectError(error.UnknownFlag, parse(alloc, &.{ "image", "ls", "--bogus" }));
 }

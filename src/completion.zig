@@ -4,7 +4,7 @@ const cli_types = @import("cli_types.zig");
 
 pub const Shell = cli_types.Shell;
 
-const subcommands = "run ps images pull rmi tag history commit build start stop restart pause unpause rename kill rm logs top exec attach inspect stats create container image volume network cp pod compose system port wait diff events policy completion audit demo search save load export import version help";
+const subcommands = "run ps images pull push login logout info update rmi tag history commit build start stop restart pause unpause rename kill rm logs top exec attach inspect stats create container image volume network cp pod compose system port wait diff events policy completion audit demo search save load export import version help";
 
 const bash_template =
     \\# bash completion for zigpod
@@ -19,8 +19,11 @@ const bash_template =
     \\        completion)
     \\            COMPREPLY=( $(compgen -W "bash zsh fish" -- "${{cur}}") )
     \\            ;;
-    \\        container|image)
-    \\            COMPREPLY=( $(compgen -W "prune" -- "${{cur}}") )
+    \\        container)
+    \\            COMPREPLY=( $(compgen -W "ls list ps create run start stop restart pause unpause rename kill rm logs top inspect exec attach cp stats port wait diff commit export update prune" -- "${{cur}}") )
+    \\            ;;
+    \\        image)
+    \\            COMPREPLY=( $(compgen -W "ls list rm pull push tag inspect history save load import build prune" -- "${{cur}}") )
     \\            ;;
     \\        volume)
     \\            COMPREPLY=( $(compgen -W "ls create rm inspect prune" -- "${{cur}}") )
@@ -41,7 +44,7 @@ const bash_template =
     \\            COMPREPLY=( $(compgen -W "show check" -- "${{cur}}") )
     \\            ;;
     \\        system)
-    \\            COMPREPLY=( $(compgen -W "ping df prune" -- "${{cur}}") )
+    \\            COMPREPLY=( $(compgen -W "ping df info prune" -- "${{cur}}") )
     \\            ;;
     \\        build)
     \\            COMPREPLY=( $(compgen -W "-t --tag -f --file --build-arg --target --no-cache" -- "${{cur}}") )
@@ -89,8 +92,13 @@ const zsh_script =
     \\        'inspect:Inspect a container or image'
     \\        'stats:Display container resource usage'
     \\        'create:Create a container without starting it'
-    \\        'container:Manage containers (prune)'
-    \\        'image:Manage images (prune)'
+    \\        'container:Manage containers'
+    \\        'image:Manage images'
+    \\        'push:Push an image to a registry'
+    \\        'login:Log in to a registry'
+    \\        'logout:Log out of a registry'
+    \\        'info:Display daemon-wide information'
+    \\        'update:Update container resource limits'
     \\        'volume:Manage named volumes'
     \\        'network:Manage networks'
     \\        'cp:Copy files between container and host'
@@ -121,6 +129,12 @@ const zsh_script =
     \\        completion)
     \\            _values 'shell' bash zsh fish
     \\            ;;
+    \\        container)
+    \\            _values 'action' ls list ps create run start stop restart pause unpause rename kill rm logs top inspect exec attach cp stats port wait diff commit export update prune
+    \\            ;;
+    \\        image)
+    \\            _values 'action' ls list rm pull push tag inspect history save load import build prune
+    \\            ;;
     \\        volume)
     \\            _values 'action' ls create rm inspect prune
     \\            ;;
@@ -137,7 +151,7 @@ const zsh_script =
     \\            _values 'action' show check
     \\            ;;
     \\        system)
-    \\            _values 'action' ping df prune
+    \\            _values 'action' ping df info prune
     \\            ;;
     \\    esac
     \\}
@@ -157,7 +171,9 @@ const fish_template =
     \\complete -c zigpod -n "__fish_seen_subcommand_from pod" -a "create ps stop rm"
     \\complete -c zigpod -n "__fish_seen_subcommand_from compose" -a "up down ps start stop restart logs exec pull config"
     \\complete -c zigpod -n "__fish_seen_subcommand_from policy" -a "show check"
-    \\complete -c zigpod -n "__fish_seen_subcommand_from system" -a "ping df prune"
+    \\complete -c zigpod -n "__fish_seen_subcommand_from system" -a "ping df info prune"
+    \\complete -c zigpod -n "__fish_seen_subcommand_from container" -a "ls list ps create run start stop restart pause unpause rename kill rm logs top inspect exec attach cp stats port wait diff commit export update prune"
+    \\complete -c zigpod -n "__fish_seen_subcommand_from image" -a "ls list rm pull push tag inspect history save load import build prune"
     \\
 ;
 
@@ -229,7 +245,7 @@ test "zsh script registers all subcommands and per-command actions" {
     const s = out.written();
 
     try std.testing.expect(std.mem.indexOf(u8, s, "#compdef zigpod") != null);
-    for ([_][]const u8{ "run", "ps", "images", "pull", "rmi", "tag", "history", "commit", "build", "start", "stop", "restart", "pause", "unpause", "rename", "kill", "rm", "logs", "create", "container", "image", "top", "exec", "attach", "inspect", "stats", "volume", "network", "cp", "pod", "system", "port", "wait", "diff", "events", "policy", "completion", "audit", "demo", "version", "help" }) |cmd| {
+    for ([_][]const u8{ "run", "ps", "images", "pull", "push", "login", "logout", "info", "update", "rmi", "tag", "history", "commit", "build", "start", "stop", "restart", "pause", "unpause", "rename", "kill", "rm", "logs", "create", "container", "image", "top", "exec", "attach", "inspect", "stats", "volume", "network", "cp", "pod", "system", "port", "wait", "diff", "events", "policy", "completion", "audit", "demo", "version", "help" }) |cmd| {
         var line_buf: std.Io.Writer.Allocating = .init(alloc);
         defer line_buf.deinit();
         try line_buf.writer.print("'{s}:", .{cmd});
@@ -237,7 +253,7 @@ test "zsh script registers all subcommands and per-command actions" {
     }
     try std.testing.expect(std.mem.indexOf(u8, s, "(( CURRENT == 2 ))") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "_values 'shell' bash zsh fish") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "_values 'action' ping df prune") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "_values 'action' ping df info prune") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "_zigpod \"$@\"") != null);
 }
 

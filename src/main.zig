@@ -12,6 +12,7 @@ const build_mod = @import("podman_build.zig");
 const transfer = @import("podman_transfer.zig");
 const compose = @import("compose.zig");
 const policy = @import("policy.zig");
+const registry = @import("podman_registry.zig");
 
 pub const version = "0.1.0";
 
@@ -182,6 +183,17 @@ fn run(gpa_allocator: std.mem.Allocator, io: std.Io, init: std.process.Init.Mini
         .io = io,
     };
 
+    switch (parsed.command) {
+        .login, .logout => {
+            runRegistryAuth(&client, &logger, parsed.command, init.environ, stdout, stderr) catch |e| {
+                reportFailure(&logger, parsed.command, cfg.socket_path, e);
+                return 1;
+            };
+            return 0;
+        },
+        else => {},
+    }
+
     return dispatch(&client, &logger, parsed.command, stdout) catch |e| {
         var trace_addrs: [32]usize = undefined;
         var saved_trace: ?std.builtin.StackTrace = null;
@@ -199,6 +211,37 @@ fn run(gpa_allocator: std.mem.Allocator, io: std.Io, init: std.process.Init.Mini
         if (saved_trace) |*t| std.debug.dumpErrorReturnTrace(t);
         return 1;
     };
+}
+
+/// `login` / `logout`: resolve the auth file from the environment and read
+/// the password from stdin (`--password-stdin`) or a no-echo TTY prompt.
+fn runRegistryAuth(
+    client: *const http.Client,
+    logger: *log.Logger,
+    cmd: cli.Command,
+    environ: std.process.Environ,
+    stdout: anytype,
+    stderr: *std.Io.Writer,
+) !void {
+    const loc = try registry.resolveAuthFile(client.allocator, environ);
+    switch (cmd) {
+        .login => |opts| {
+            // Validate cheap inputs before prompting for a secret.
+            try registry.validateRegistry(opts.registry);
+            const stdin = std.Io.File.stdin();
+            const password = if (opts.password_stdin)
+                try registry.readPassword(client.io, client.allocator, stdin)
+            else
+                try registry.promptPassword(client.allocator, stdin.handle, stderr);
+            defer {
+                std.crypto.secureZero(u8, password);
+                client.allocator.free(password);
+            }
+            try registry.login(client, logger, loc, opts.registry, opts.username, password, stdout);
+        },
+        .logout => |opts| try registry.logout(client.io, client.allocator, logger, loc, opts.registry, stdout),
+        else => unreachable,
+    }
 }
 
 fn dispatch(
@@ -230,6 +273,19 @@ fn dispatch(
             .json = opts.json,
         }, stdout),
         .pull => |image| try pod.pullImage(client, logger, image, stdout),
+        .push => |image| try pod.pushImage(client, logger, image, stdout),
+        // Needs the process environment and stdin; handled in `run`.
+        .login, .logout => unreachable,
+        .info => |opts| try pod.systemInfo(client, logger, opts.format, opts.json, stdout),
+        .update => |opts| try pod.updateContainer(client, logger, opts.container, .{
+            .memory = opts.memory,
+            .nano_cpus = opts.nano_cpus,
+            .pids_limit = opts.pids_limit,
+            .restart = if (opts.restart_policy) |rp| .{
+                .Name = rp.name,
+                .MaximumRetryCount = rp.max_retry_count,
+            } else null,
+        }),
         .rmi => |opts| try pod.removeImage(client, logger, opts.image, opts.force, stdout),
         .start => |container| try pod.startContainer(client, logger, container),
         .stop => |opts| try pod.stopContainer(client, logger, opts.container, opts.timeout_secs),
@@ -238,7 +294,7 @@ fn dispatch(
         .unpause => |container| try pod.unpauseContainer(client, logger, container),
         .rename => |opts| try pod.renameContainer(client, logger, opts.container, opts.new_name),
         .kill => |opts| try pod.killContainer(client, logger, opts.container, opts.signal),
-        .rm => |opts| try pod.removeContainer(client, logger, opts.container, opts.force),
+        .rm => |opts| try pod.removeContainerWithVolumes(client, logger, opts.container, opts.force, opts.volumes),
         .logs => |opts| try pod.fetchLogsWithOptions(client, logger, opts.container, .{
             .follow = opts.follow,
             .timestamps = opts.timestamps,
@@ -704,6 +760,25 @@ fn reportFailure(logger: *log.Logger, cmd: cli.Command, socket_path: []const u8,
             "api.validatePlatform",
             "Rejected --platform value (must be os/arch[/variant]).",
         ),
+        pod.ApiError.InvalidUpdate => logger.deny(
+            "api.validateUpdate",
+            "Rejected update: give at least one of --memory (6 MiB..1 TiB), --cpus, --pids-limit (1..4194304), --restart.",
+        ),
+        pod.ApiError.InvalidRegistry => logger.deny(
+            "registry.validateRegistry",
+            "Rejected registry (use HOST[:PORT] without scheme or path, e.g. quay.io or localhost:5000).",
+        ),
+        pod.ApiError.InvalidCredentials => logger.deny(
+            "registry.validateCredentials",
+            "Rejected credentials: username must be non-empty without ':' or whitespace; password must be 1..4096 bytes without control characters. Use --password-stdin when stdin is not a terminal.",
+        ),
+        pod.ApiError.InvalidAuthFile => logger.deny(
+            "registry.resolveAuthFile",
+            "Refused registry auth file: it must be a regular file you own in a directory you own that is not group/world-writable, contain a JSON object, and be located via an absolute REGISTRY_AUTH_FILE or XDG_RUNTIME_DIR.",
+        ),
+        pod.ApiError.NotLoggedIn => {
+            // Already logged with the registry name by registry.logout.
+        },
         pod.ApiError.InvalidFilter => logger.deny(
             "api.validateContainerFilter",
             "Rejected invalid ps --filter (unknown key or unsafe value).",
@@ -793,6 +868,7 @@ test {
     _ = transfer;
     _ = compose;
     _ = policy;
+    _ = registry;
     _ = @import("utils.zig");
     std.testing.refAllDecls(@This());
 }

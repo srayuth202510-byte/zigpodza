@@ -37,6 +37,7 @@ zigpodza/
 │  ├─ podman_build.zig # Deterministic ustar build-context archiver & POST /v1.40/build client
     │  ├─ podman_pods.zig  # Libpod /v4.0.0/libpod/pods lifecycle endpoints
     │  ├─ podman_transfer.zig # search/save/load/export/import tar-stream transfer endpoints
+    │  ├─ podman_registry.zig # login/logout: daemon-verified credentials in a 0600 containers auth.json
 │  ├─ policy.zig       # --profile=sandbox & zigpod-policy.json pre-flight engine
 │  ├─ log.zig          # Timestamped file logger (system.log, error.log & SHA-256 hash-chained audit.log)
 │  └─ utils.zig        # Formatting helpers (shortId, formatSize)
@@ -202,6 +203,18 @@ zigpod stop demo-renamed
 zigpod start demo-renamed
 zigpod rm -f demo-renamed
 zigpod rmi alpine:3.20
+
+# Daemon info, live resource updates, and Docker-style groups
+zigpod info --format '{{.ServerVersion}}'
+zigpod update --memory 128m --cpus 0.5 --pids-limit 64 demo-alpine
+zigpod container ls -a
+zigpod image rm alpine:3.20
+zigpod rm -fv demo-alpine         # also remove anonymous volumes
+
+# Registry credentials (never pass a password on the command line)
+printf '%s\n' "$TOKEN" | zigpod login -u alice --password-stdin quay.io
+zigpod push quay.io/alice/app:1.0
+zigpod logout quay.io
 ```
 
 ### Global Options

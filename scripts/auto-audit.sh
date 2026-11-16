@@ -315,6 +315,20 @@ else
     fail "compose UnknownService handling or config env redaction missing (see BUG-024, BUG-027)."
 fi
 
+# 8v. update / login / logout / push: dedicated errors, deny telemetry, no secrets on argv or in logs (BUG-016 / BUG-024 / BUG-041 / BUG-050)
+if has_match 'InvalidUpdate' "src/podman_types.zig" && has_match 'InvalidRegistry' "src/podman_types.zig" \
+    && has_match 'InvalidCredentials' "src/podman_types.zig" && has_match 'InvalidAuthFile' "src/podman_types.zig" \
+    && has_match 'api\.validateUpdate' "src/main.zig" && has_match 'registry\.validateRegistry' "src/main.zig" \
+    && has_match 'registry\.validateCredentials' "src/main.zig" && has_match 'registry\.resolveAuthFile' "src/main.zig" \
+    && has_match 'CpuQuota' "src/podman_api.zig" && has_match 'secureZero' "src/podman_registry.zig" \
+    && has_match '\.NOFOLLOW = true' "src/podman_registry.zig" && has_match '\.exclusive = true' "src/podman_registry.zig" \
+    && has_match '"--password"' "src/cli.zig" \
+    && ! has_match 'logger\.[a-z]+\(.*password' "src/podman_registry.zig"; then
+    pass "update/login/logout/push use dedicated deny telemetry, translate --cpus to CFS quota, and keep credentials off argv and out of logs (BUG-016/BUG-024/BUG-050)."
+else
+    fail "update/registry validation, auth-file hardening, or credential hygiene missing (see BUG-016, BUG-024, BUG-050)."
+fi
+
 # 9. Run security-check.sh (includes zig build test & ELF hardening when zig is installed)
 SEC_OUT=""
 if SEC_OUT="$("$ROOT_DIR/scripts/security-check.sh" 2>&1)"; then

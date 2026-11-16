@@ -98,6 +98,7 @@ pub const listImagesWithOptions = images.listImagesWithOptions;
 pub const imageExists = images.imageExists;
 pub const ImageListOptions = images.ImageListOptions;
 pub const pullImage = images.pullImage;
+pub const pushImage = images.pushImage;
 pub const tagImage = images.tagImage;
 pub const imageHistory = images.imageHistory;
 pub const commitContainer = images.commitContainer;
@@ -120,6 +121,7 @@ pub const showVersion = system.showVersion;
 pub const inspect = system.inspect;
 pub const inspectJson = system.inspectJson;
 pub const inspectFormat = system.inspectFormat;
+pub const systemInfo = system.systemInfo;
 pub const portContainer = system.portContainer;
 pub const diffContainer = system.diffContainer;
 pub const fetchEvents = system.fetchEvents;
@@ -304,6 +306,86 @@ pub fn restartContainer(client: *const http.Client, logger: *log.Logger, id: []c
     logger.info("restarted container {s}", .{utils.shortId(id)});
 }
 
+/// Resource limits changed by `update`; null fields are left untouched.
+pub const UpdateOptions = struct {
+    memory: ?i64 = null,
+    nano_cpus: ?i64 = null,
+    pids_limit: ?i64 = null,
+    restart: ?RestartPolicy = null,
+};
+
+/// Docker's smallest accepted memory limit.
+pub const min_update_memory_bytes: i64 = 6 * 1024 * 1024;
+/// Upper bound shared with the run policy schema: 1 TiB.
+pub const max_update_memory_bytes: i64 = 1024 * 1024 * 1024 * 1024;
+/// Linux PID_MAX_LIMIT.
+pub const max_update_pids: i64 = 4 * 1024 * 1024;
+
+/// API-layer re-validation of `update` (BUG-016): at least one field, and
+/// every field within bounds.
+pub fn validateUpdate(opts: UpdateOptions) ApiError!void {
+    if (opts.memory == null and opts.nano_cpus == null and opts.pids_limit == null and opts.restart == null) {
+        return ApiError.InvalidUpdate;
+    }
+    if (opts.memory) |m| {
+        if (m < min_update_memory_bytes or m > max_update_memory_bytes) return ApiError.InvalidUpdate;
+    }
+    if (opts.pids_limit) |p| {
+        if (p <= 0 or p > max_update_pids) return ApiError.InvalidUpdate;
+    }
+    if (opts.nano_cpus) |nc| {
+        try validateNanoCpus(nc);
+        // The kernel rejects CFS quotas below 1 ms.
+        if (cpuQuotaFor(nc) < 1000) return ApiError.InvalidCpuLimit;
+    }
+    if (opts.restart) |rp| try validateRestartPolicy(rp);
+}
+
+fn cpuQuotaFor(nano_cpus: i64) i64 {
+    return @divTrunc(nano_cpus * update_cpu_period_us, 1_000_000_000);
+}
+
+/// CFS period used to express `--cpus` for `update`.
+pub const update_cpu_period_us: i64 = 100_000;
+
+const UpdateRequest = struct {
+    Memory: ?i64 = null,
+    // Podman's compat update silently ignores `NanoCpus` (verified on 6.2),
+    // so `--cpus` is sent as the equivalent CFS quota/period pair.
+    CpuPeriod: ?i64 = null,
+    CpuQuota: ?i64 = null,
+    PidsLimit: ?i64 = null,
+    RestartPolicy: ?RestartPolicy = null,
+};
+
+/// Updates resource limits of an existing container
+/// (`POST /containers/{id}/update`).
+pub fn updateContainer(client: *const http.Client, logger: *log.Logger, id: []const u8, opts: UpdateOptions) !void {
+    try validateIdentifier(id);
+    try validateUpdate(opts);
+
+    const body = try std.json.Stringify.valueAlloc(client.allocator, UpdateRequest{
+        .Memory = opts.memory,
+        .CpuPeriod = if (opts.nano_cpus != null) update_cpu_period_us else null,
+        .CpuQuota = if (opts.nano_cpus) |nc| cpuQuotaFor(nc) else null,
+        .PidsLimit = opts.pids_limit,
+        .RestartPolicy = opts.restart,
+    }, .{ .emit_null_optional_fields = false });
+    defer client.allocator.free(body);
+
+    const path = try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/update", .{ api_prefix, id });
+    defer client.allocator.free(path);
+
+    logger.debug("POST {s}", .{path});
+    const resp = try client.request("POST", path, body);
+    defer resp.deinit();
+
+    if (resp.status != 204 and !resp.ok()) {
+        return logApiFailure(logger, "POST", path, resp);
+    }
+    logger.info("updated container {s}", .{utils.shortId(id)});
+}
+
 /// Pauses all processes inside a container (`POST /containers/{id}/pause`).
 pub fn pauseContainer(client: *const http.Client, logger: *log.Logger, id: []const u8) !void {
     try validateIdentifier(id);
@@ -422,12 +504,18 @@ pub fn topContainer(client: *const http.Client, logger: *log.Logger, id: []const
 }
 
 pub fn removeContainer(client: *const http.Client, logger: *log.Logger, id: []const u8, force: bool) !void {
+    return removeContainerWithVolumes(client, logger, id, force, false);
+}
+
+/// `DELETE /containers/{id}?force=..[&v=true]`; `volumes` also removes the
+/// container's anonymous volumes (`rm -v`).
+pub fn removeContainerWithVolumes(client: *const http.Client, logger: *log.Logger, id: []const u8, force: bool, volumes: bool) !void {
     try validateIdentifier(id);
 
     const path = try std.fmt.allocPrint(
         client.allocator,
-        "{s}/containers/{s}?force={s}",
-        .{ api_prefix, id, if (force) "true" else "false" },
+        "{s}/containers/{s}?force={s}{s}",
+        .{ api_prefix, id, if (force) "true" else "false", if (volumes) "&v=true" else "" },
     );
     defer client.allocator.free(path);
 
@@ -2315,4 +2403,72 @@ test "pumpBidirectional times out on a silent peer with idle stdin" {
         pumpBidirectional(std.testing.io, alloc, pipeStream(peer[0]), "", stdin_pipe[0], &out.writer, true, 25),
     );
     try std.testing.expectEqualStrings("", out.written());
+}
+
+test "validateUpdate requires a field and bounds every value" {
+    try validateUpdate(.{ .memory = min_update_memory_bytes });
+    try validateUpdate(.{ .pids_limit = max_update_pids });
+    try validateUpdate(.{ .nano_cpus = 500_000_000 });
+    try validateUpdate(.{ .restart = .{ .Name = "always" } });
+    try std.testing.expectError(ApiError.InvalidUpdate, validateUpdate(.{}));
+    try std.testing.expectError(ApiError.InvalidUpdate, validateUpdate(.{ .memory = min_update_memory_bytes - 1 }));
+    try std.testing.expectError(ApiError.InvalidUpdate, validateUpdate(.{ .memory = max_update_memory_bytes + 1 }));
+    try std.testing.expectError(ApiError.InvalidUpdate, validateUpdate(.{ .pids_limit = 0 }));
+    try std.testing.expectError(ApiError.InvalidUpdate, validateUpdate(.{ .pids_limit = max_update_pids + 1 }));
+    try std.testing.expectError(ApiError.InvalidCpuLimit, validateUpdate(.{ .nano_cpus = 0 }));
+    try validateUpdate(.{ .nano_cpus = 10_000_000 });
+    try std.testing.expectError(ApiError.InvalidCpuLimit, validateUpdate(.{ .nano_cpus = 9_999_999 }));
+    try std.testing.expectError(ApiError.InvalidRestartPolicy, validateUpdate(.{ .restart = .{ .Name = "sometimes" } }));
+}
+
+test "updateContainer and rm -v send the expected requests" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(alloc, "/tmp/zp-update-{d}.sock", .{std.Io.Clock.awake.now(std.testing.io).nanoseconds});
+    defer alloc.free(sock_path);
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
+
+    const ok = "HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"Warnings\":[]}";
+    const no_content = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n";
+    const replies = [_]th.ScriptedReply{
+        .{
+            .expected_prefix = "POST /v1.40/containers/web/update HTTP/1.1\r\n",
+            .expected_substring = "{\"Memory\":134217728,\"CpuPeriod\":100000,\"CpuQuota\":150000,\"PidsLimit\":64,\"RestartPolicy\":{\"Name\":\"on-failure\",\"MaximumRetryCount\":2}}",
+            .raw_response = ok,
+        },
+        .{
+            .expected_prefix = "POST /v1.40/containers/web/update HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 2\r\n\r\n{}",
+        },
+        .{ .expected_prefix = "DELETE /v1.40/containers/web?force=true&v=true HTTP/1.1\r\n", .raw_response = no_content },
+        .{ .expected_prefix = "DELETE /v1.40/containers/web?force=false HTTP/1.1\r\n", .raw_response = no_content },
+    };
+    var ctx = th.MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, th.runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path, .io = std.testing.io };
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
+    defer logger.deinit();
+
+    // Rejected before any request.
+    try std.testing.expectError(ApiError.InvalidUpdate, updateContainer(&client, &logger, "web", .{}));
+    try std.testing.expectError(ApiError.InvalidIdentifier, updateContainer(&client, &logger, "a/b", .{ .pids_limit = 1 }));
+
+    try updateContainer(&client, &logger, "web", .{
+        .memory = 128 * 1024 * 1024,
+        .nano_cpus = 1_500_000_000,
+        .pids_limit = 64,
+        .restart = .{ .Name = "on-failure", .MaximumRetryCount = 2 },
+    });
+    try std.testing.expectError(ApiError.PodmanApiError, updateContainer(&client, &logger, "web", .{ .pids_limit = 1 }));
+    try removeContainerWithVolumes(&client, &logger, "web", true, true);
+    try removeContainer(&client, &logger, "web", false);
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
 }

@@ -163,12 +163,64 @@ pub fn pullImage(client: *const http.Client, logger: *log.Logger, image: []const
     logger.info("pulled image {s}", .{image});
 }
 
+/// Pushes a local image to its registry (`POST /images/{repo}/push?tag=`).
+/// Credentials come from the daemon's auth file (see `zigpod login`); no
+/// secret travels in the request.
+pub fn pushImage(client: *const http.Client, logger: *log.Logger, image: []const u8, writer: anytype) !void {
+    try validateResourceRef(image);
+    // Digest references cannot be pushed by tag.
+    if (std.mem.indexOfScalar(u8, image, '@') != null) return ApiError.InvalidIdentifier;
+    const rt = splitRepoTag(image);
+
+    var path_buf: std.ArrayList(u8) = .empty;
+    defer path_buf.deinit(client.allocator);
+    try path_buf.appendSlice(client.allocator, api_prefix ++ "/images/");
+    try path_buf.appendSlice(client.allocator, rt.repo);
+    try path_buf.appendSlice(client.allocator, "/push?tag=");
+    try appendQueryEncoded(client.allocator, &path_buf, rt.tag);
+
+    logger.info("pushing image {s}", .{image});
+    const WriterType = @TypeOf(writer);
+    var push_ctx = PullStreamCtx(WriterType){
+        .allocator = client.allocator,
+        .logger = logger,
+        .image = image,
+        .writer = writer,
+        .verb = "push",
+    };
+    defer push_ctx.deinit();
+
+    const resp = try client.streamRequest(
+        "POST",
+        path_buf.items,
+        null,
+        http.blocking_timeout_ms,
+        &push_ctx,
+        PullStreamCtx(WriterType).onChunk,
+    );
+    defer resp.deinit();
+
+    if (!resp.ok()) {
+        const err_resp = http.Response{
+            .status = resp.status,
+            .body = resp.error_body,
+            .allocator = client.allocator,
+        };
+        return logApiFailure(logger, "POST", path_buf.items, err_resp);
+    }
+    try push_ctx.flush();
+    if (push_ctx.had_error) return ApiError.PodmanApiError;
+    try writer.print("Pushed {s}\n", .{image});
+    logger.info("pushed image {s}", .{image});
+}
+
 fn PullStreamCtx(comptime WriterType: type) type {
     return struct {
         allocator: std.mem.Allocator,
         logger: *log.Logger,
         image: []const u8,
         writer: WriterType,
+        verb: []const u8 = "pull",
         line_buf: std.ArrayList(u8) = .empty,
         had_error: bool = false,
 
@@ -210,7 +262,7 @@ fn PullStreamCtx(comptime WriterType: type) type {
             defer parsed.deinit();
 
             if (parsed.value.@"error") |err_msg| {
-                self.logger.err("pull {s} failed: {s}", .{ self.image, err_msg });
+                self.logger.err("{s} {s} failed: {s}", .{ self.verb, self.image, err_msg });
                 self.had_error = true;
                 return;
             }
@@ -639,6 +691,76 @@ test "pullImage streams status lines and fails closed on error line and HTTP fai
         got_http_err = e == ApiError.PodmanApiError;
     };
     try std.testing.expect(got_http_err);
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
+}
+
+test "pushImage splits repo/tag, streams status, and fails closed" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-img-push-{d}.sock",
+        .{std.Io.Clock.awake.now(std.testing.io).nanoseconds},
+    );
+    defer alloc.free(sock_path);
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
+
+    const ok_out =
+        "{\"status\":\"The push refers to repository [localhost:5000/app]\"}\n" ++
+        "{\"id\":\"abc123\",\"status\":\"Pushed\"}\n";
+    const err_out = "{\"error\":\"unauthorized: authentication required\"}\n";
+
+    const replies = [_]ScriptedReply{
+        .{
+            .expected_prefix = "POST /v1.40/images/localhost:5000/app/push?tag=v1 HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint(
+                "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ ok_out.len, ok_out },
+            ),
+        },
+        .{
+            .expected_prefix = "POST /v1.40/images/localhost:5000/app/push?tag=latest HTTP/1.1\r\n",
+            .raw_response = std.fmt.comptimePrint(
+                "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ err_out.len, err_out },
+            ),
+        },
+        .{
+            .expected_prefix = "POST /v1.40/images/app/push?tag=latest HTTP/1.1\r\n",
+            .raw_response = "HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\n\r\n{}",
+        },
+    };
+
+    var ctx = MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path, .io = std.testing.io };
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
+    defer logger.deinit();
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+
+    // Malformed references never reach the socket.
+    try std.testing.expectError(ApiError.InvalidIdentifier, pushImage(&client, &logger, "app;rm", &out.writer));
+    try std.testing.expectError(ApiError.InvalidIdentifier, pushImage(&client, &logger, "a/../../x", &out.writer));
+    try std.testing.expectError(ApiError.InvalidIdentifier, pushImage(&client, &logger, "app@sha256:abc", &out.writer));
+    try std.testing.expectError(ApiError.InvalidIdentifier, pushImage(&client, &logger, "", &out.writer));
+
+    try pushImage(&client, &logger, "localhost:5000/app:v1", &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "abc123: Pushed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "Pushed localhost:5000/app:v1") != null);
+
+    try std.testing.expectError(ApiError.PodmanApiError, pushImage(&client, &logger, "localhost:5000/app", &out.writer));
+    try std.testing.expectError(ApiError.PodmanApiError, pushImage(&client, &logger, "app", &out.writer));
 
     thread.join();
     joined = true;

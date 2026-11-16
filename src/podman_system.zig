@@ -600,6 +600,91 @@ pub fn inspectFormat(client: *const http.Client, logger: *log.Logger, target: []
     logger.info("inspected image {s} with format", .{target});
 }
 
+/// Subset of Docker-compatible `GET /info` used for the human summary.
+const InfoSummary = struct {
+    Name: []const u8 = "",
+    ServerVersion: []const u8 = "",
+    OperatingSystem: []const u8 = "",
+    OSType: []const u8 = "",
+    Architecture: []const u8 = "",
+    KernelVersion: []const u8 = "",
+    NCPU: i64 = 0,
+    MemTotal: i64 = 0,
+    Containers: i64 = 0,
+    ContainersRunning: i64 = 0,
+    ContainersPaused: i64 = 0,
+    ContainersStopped: i64 = 0,
+    Images: i64 = 0,
+    Driver: []const u8 = "",
+    CgroupVersion: []const u8 = "",
+    CgroupDriver: []const u8 = "",
+    DockerRootDir: []const u8 = "",
+    SecurityOptions: ?[]const []const u8 = null,
+};
+
+/// Displays daemon-wide information (`GET /info`). `format` renders the same
+/// template subset as `inspect --format`; `json` prints the raw document.
+pub fn systemInfo(client: *const http.Client, logger: *log.Logger, format: ?[]const u8, json: bool, writer: anytype) !void {
+    if (format) |f| try validateFormat(f);
+    const path = api_prefix ++ "/info";
+
+    logger.debug("GET {s}", .{path});
+    const resp = try client.request("GET", path, null);
+    defer resp.deinit();
+    if (!resp.ok()) return logApiFailure(logger, "GET", path, resp);
+
+    if (format) |f| {
+        try renderFormatBody(client.allocator, f, resp.body, writer);
+    } else if (json) {
+        try writer.print("{s}\n", .{std.mem.trim(u8, resp.body, " \t\r\n")});
+    } else {
+        const parsed = std.json.parseFromSlice(InfoSummary, client.allocator, resp.body, .{
+            .ignore_unknown_fields = true,
+        }) catch |e| switch (e) {
+            error.OutOfMemory => return e,
+            else => return http.Error.InvalidResponse,
+        };
+        defer parsed.deinit();
+        try printInfoSummary(parsed.value, writer);
+    }
+    logger.info("displayed system info", .{});
+}
+
+fn printInfoSummary(info: InfoSummary, writer: anytype) !void {
+    var mem_buf: [32]u8 = undefined;
+    try writer.print("{s:<18}{s}\n", .{ "Host:", info.Name });
+    try writer.print("{s:<18}{s}\n", .{ "Server Version:", info.ServerVersion });
+    try writer.print("{s:<18}{s}\n", .{ "Operating System:", info.OperatingSystem });
+    try writer.print("{s:<18}{s}/{s}\n", .{ "OS/Arch:", info.OSType, info.Architecture });
+    try writer.print("{s:<18}{s}\n", .{ "Kernel Version:", info.KernelVersion });
+    try writer.print("{s:<18}{d}\n", .{ "CPUs:", info.NCPU });
+    try writer.print("{s:<18}{s}\n", .{ "Total Memory:", utils.formatSize(&mem_buf, info.MemTotal) });
+    try writer.print("{s:<18}{d} (running {d}, paused {d}, stopped {d})\n", .{
+        "Containers:",
+        info.Containers,
+        info.ContainersRunning,
+        info.ContainersPaused,
+        info.ContainersStopped,
+    });
+    try writer.print("{s:<18}{d}\n", .{ "Images:", info.Images });
+    try writer.print("{s:<18}{s}\n", .{ "Storage Driver:", info.Driver });
+    if (info.CgroupVersion.len > 0) {
+        try writer.print("{s:<18}v{s} ({s})\n", .{ "Cgroup:", info.CgroupVersion, info.CgroupDriver });
+    }
+    try writer.print("{s:<18}{s}\n", .{ "Root Dir:", info.DockerRootDir });
+    if (info.SecurityOptions) |opts| {
+        if (opts.len > 0) {
+            try writer.print("{s:<18}", .{"Security:"});
+            // Entries contain commas themselves (`name=seccomp,profile=default`).
+            for (opts, 0..) |o, idx| {
+                if (idx > 0) try writer.writeAll(" ");
+                try writer.writeAll(o);
+            }
+            try writer.writeByte('\n');
+        }
+    }
+}
+
 fn renderFormatBody(allocator: std.mem.Allocator, format: []const u8, body: []const u8, writer: anytype) !void {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch |e| switch (e) {
         error.OutOfMemory => return e,
@@ -1165,6 +1250,74 @@ test "inspectFormat renders container then falls back to image" {
     try inspectFormat(&client, &logger, "alpine:3.20", "{{.Os}}", &out.writer);
     try std.testing.expectEqualStrings("exited:3\nlinux\n", out.written());
     try std.testing.expectError(ApiError.NotFound, inspectFormat(&client, &logger, "gone", "{{.Id}}", &out.writer));
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
+}
+
+test "systemInfo renders summary, json, format, and fails closed" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-info-{d}.sock",
+        .{std.Io.Clock.awake.now(std.testing.io).nanoseconds},
+    );
+    defer alloc.free(sock_path);
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
+
+    const info_json =
+        "{\"Name\":\"box\",\"ServerVersion\":\"6.2.0\",\"OSType\":\"linux\",\"Architecture\":\"amd64\"," ++
+        "\"NCPU\":8,\"MemTotal\":2147483648,\"Containers\":3,\"ContainersRunning\":1,\"ContainersPaused\":0," ++
+        "\"ContainersStopped\":2,\"Images\":5,\"Driver\":\"overlay\",\"CgroupVersion\":\"2\",\"CgroupDriver\":\"systemd\"," ++
+        "\"SecurityOptions\":[\"name=rootless\",\"name=seccomp\"],\"Extra\":{\"x\":1}}";
+    const hdr = "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}";
+    const ok_resp = std.fmt.comptimePrint(hdr, .{ info_json.len, info_json });
+    const bad = "not json";
+    const replies = [_]ScriptedReply{
+        .{ .expected_prefix = "GET /v1.40/info HTTP/1.1\r\n", .raw_response = ok_resp },
+        .{ .expected_prefix = "GET /v1.40/info HTTP/1.1\r\n", .raw_response = ok_resp },
+        .{ .expected_prefix = "GET /v1.40/info HTTP/1.1\r\n", .raw_response = ok_resp },
+        .{ .expected_prefix = "GET /v1.40/info HTTP/1.1\r\n", .raw_response = std.fmt.comptimePrint(hdr, .{ bad.len, bad }) },
+        .{ .expected_prefix = "GET /v1.40/info HTTP/1.1\r\n", .raw_response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 2\r\n\r\n{}" },
+    };
+
+    var ctx = MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path, .io = std.testing.io };
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
+    defer logger.deinit();
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+
+    // A malformed template is rejected before any request is sent.
+    try std.testing.expectError(ApiError.InvalidFormat, systemInfo(&client, &logger, "{{.A | x}}", false, &out.writer));
+
+    try systemInfo(&client, &logger, null, false, &out.writer);
+    const summary = out.written();
+    try std.testing.expect(std.mem.indexOf(u8, summary, "Server Version:   6.2.0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "OS/Arch:          linux/amd64") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "3 (running 1, paused 0, stopped 2)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "v2 (systemd)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "name=rootless name=seccomp") != null);
+    out.clearRetainingCapacity();
+
+    try systemInfo(&client, &logger, null, true, &out.writer);
+    try std.testing.expectEqualStrings(info_json ++ "\n", out.written());
+    out.clearRetainingCapacity();
+
+    try systemInfo(&client, &logger, "{{.ServerVersion}} {{.NCPU}} {{json .Extra}}", false, &out.writer);
+    try std.testing.expectEqualStrings("6.2.0 8 {\"x\":1}\n", out.written());
+
+    try std.testing.expectError(http.Error.InvalidResponse, systemInfo(&client, &logger, null, false, &out.writer));
+    try std.testing.expectError(ApiError.PodmanApiError, systemInfo(&client, &logger, null, false, &out.writer));
 
     thread.join();
     joined = true;

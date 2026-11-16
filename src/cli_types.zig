@@ -52,6 +52,10 @@ pub const usage =
     \\  ps [-a] [-q] [--filter KEY=VALUE] [--json]  List containers (-a: include stopped, -q: IDs only)
     \\  images [-a] [-q] [--json]      List local images (-a: include intermediate, -q: IDs only)
     \\  pull IMAGE                     Pull an image from a registry
+    \\  push IMAGE                     Push an image to its registry (uses stored login credentials)
+    \\  login -u USER [--password-stdin] REGISTRY  Verify and store registry credentials
+    \\                                 (prompts on a TTY; passwords are never taken from argv)
+    \\  logout REGISTRY | logout -a    Remove stored credentials for one or all registries
     \\  rmi [-f] IMAGE                 Remove a local image (-f: force)
     \\  start CONTAINER                Start a created or stopped container
     \\  stop [-t SECS] CONTAINER       Stop a running container (-t: stop timeout seconds)
@@ -60,7 +64,9 @@ pub const usage =
     \\  unpause CONTAINER              Unpause a paused container
     \\  rename CONTAINER NEW_NAME      Rename an existing container
     \\  kill [-s SIGNAL] CONTAINER     Send a signal to a running container (default: SIGTERM)
-    \\  rm [-f] CONTAINER              Remove a container (-f: force)
+    \\  rm [-f] [-v] CONTAINER         Remove a container (-f: force, -v: anonymous volumes)
+    \\  update [--memory M] [--cpus N] [--pids-limit N] [--restart P] CONTAINER
+    \\                                 Change resource limits of an existing container
     \\  logs [-f] [-t] [--tail N|all] [--since UNIX_TS] CONTAINER  Print a container's logs
     \\                                 (-f: follow, -t: timestamps)
     \\  top CONTAINER                  Display the running processes of a container
@@ -78,8 +84,11 @@ pub const usage =
     \\  attach [-i] [-t] CONTAINER               Attach to a running container
     \\  cp SRC DST                               Copy files between container (CTR:PATH) and host path
     \\  create [OPTIONS] IMAGE [CMD...]  Create a container without starting it (same options as run)
+    \\  container ls|rm|start|...      Docker-style group aliases for container commands
+    \\  image ls|rm|pull|push|tag|...  Docker-style group aliases for image commands
     \\  container|image|volume|network prune [-f]  Remove unused containers/images/volumes/networks
-    \\  system ping|df|prune [-f]      Check daemon health, disk usage, or prune unused resources
+    \\  info [--json|--format TEMPLATE]  Show daemon-wide information (also: system info)
+    \\  system ping|df|info|prune [-f]  Check daemon health, disk usage, info, or prune unused resources
     \\  port CONTAINER [PORT[/PROTO]]  List port mappings for a container
     \\  wait CONTAINER                 Block until a container stops and print its exit code
     \\  diff CONTAINER                 Inspect changes on a container's filesystem
@@ -221,6 +230,35 @@ pub const RunOpts = struct {
 pub const RmOpts = struct {
     container: []const u8,
     force: bool = false,
+    /// `-v`: also remove the container's anonymous volumes.
+    volumes: bool = false,
+};
+
+pub const InfoOpts = struct {
+    format: ?[]const u8 = null,
+    json: bool = false,
+};
+
+pub const UpdateOpts = struct {
+    container: []const u8,
+    memory: ?i64 = null,
+    nano_cpus: ?i64 = null,
+    pids_limit: ?i64 = null,
+    restart_policy: ?RestartPolicySpec = null,
+};
+
+pub const LoginOpts = struct {
+    registry: []const u8,
+    username: []const u8,
+    /// Read the password from stdin; otherwise prompt on a TTY. Passwords are
+    /// never accepted on the command line.
+    password_stdin: bool = false,
+};
+
+pub const LogoutOpts = struct {
+    /// null with `all` = remove every stored credential.
+    registry: ?[]const u8 = null,
+    all: bool = false,
 };
 
 pub const LogsOpts = struct {
@@ -512,6 +550,11 @@ pub const Command = union(enum) {
     ps: PsOpts,
     images: ImagesOpts,
     pull: []const u8,
+    push: []const u8,
+    login: LoginOpts,
+    logout: LogoutOpts,
+    info: InfoOpts,
+    update: UpdateOpts,
     rmi: RmiOpts,
     run: RunOpts,
     start: []const u8,
