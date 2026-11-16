@@ -20,13 +20,13 @@ jobs:
           git fetch --no-tags --prune --depth=1 origin "${GITHUB_SHA}"
           git checkout --force "${GITHUB_SHA}"
 
-      - name: Setup Zig 0.13.0
+      - name: Setup Zig 0.17.1
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/zig.tar.xz https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz
-          echo "d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea  /tmp/zig.tar.xz" | sha256sum -c -
+          curl -fsSL -o /tmp/zig.tar.xz https://ziglang.org/download/0.17.1/zig-x86_64-linux-0.17.1.tar.xz
+          echo "3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a  /tmp/zig.tar.xz" | sha256sum -c -
           sudo tar -xJf /tmp/zig.tar.xz -C /opt
-          sudo ln -sf /opt/zig-linux-x86_64-0.13.0/zig /usr/local/bin/zig
+          sudo ln -sf /opt/zig-x86_64-linux-0.17.1/zig /usr/local/bin/zig
           rm -f /tmp/zig.tar.xz
           zig version
 

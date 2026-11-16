@@ -101,24 +101,23 @@ pub fn isValidPortProto(proto: []const u8) bool {
 }
 
 fn writePortObjectField(jw: anytype, p: PortMapping) !void {
-    var key_buf: [64]u8 = undefined;
-    if (std.fmt.bufPrint(&key_buf, "{d}/{s}", .{ p.container_port, p.proto })) |key| {
-        try jw.objectField(key);
-    } else |_| {
-        // Dynamically allocate on ArrayList-backed writers (stringifyAlloc) so arbitrary lengths never panic (BUG-034).
-        if (@hasField(@TypeOf(jw.stream), "context") and @TypeOf(jw.stream.context) == *std.ArrayList(u8)) {
-            const dyn_alloc = jw.stream.context.allocator;
-            const dyn_key = try std.fmt.allocPrint(dyn_alloc, "{d}/{s}", .{ p.container_port, p.proto });
-            defer dyn_alloc.free(dyn_key);
-            try jw.objectField(dyn_key);
-        } else {
-            var fbs = std.io.fixedBufferStream(&key_buf);
-            fbs.writer().print("{d}/", .{p.container_port}) catch {};
-            const rem = key_buf.len - fbs.pos;
-            fbs.writer().writeAll(p.proto[0..@min(p.proto.len, rem)]) catch {};
-            try jw.objectField(fbs.getWritten());
+    // BUG-034: port keys can exceed any fixed buffer, so stream the
+    // JSON-escaped key directly through the raw field writer (arbitrary
+    // lengths are safe and no allocator is required).
+    try jw.beginObjectFieldRaw();
+    try jw.writer.writeAll("\"");
+    try jw.writer.print("{d}/", .{p.container_port});
+    for (p.proto) |c| {
+        switch (c) {
+            '"', '\\' => {
+                try jw.writer.writeAll("\\");
+                try jw.writer.writeAll(&.{c});
+            },
+            else => try jw.writer.writeAll(&.{c}),
         }
     }
+    try jw.writer.writeAll("\"");
+    jw.endObjectFieldRaw();
 }
 
 /// Serializes the Docker `ExposedPorts` object: `{"80/tcp":{},...}`.
@@ -268,13 +267,13 @@ pub const ContainerInspect = struct {
     Name: []const u8 = "",
     Image: []const u8 = "",
     Created: []const u8 = "",
-    State: ?State = null,
-    Config: ?Config = null,
+    State: ?ContainerInspectState = null,
+    Config: ?ContainerInspectConfig = null,
     HostConfig: ?HostConfigView = null,
-    NetworkSettings: ?NetworkSettings = null,
+    NetworkSettings: ?ContainerInspectNetworkSettings = null,
     Mounts: ?[]const MountView = null,
 
-    pub const State = struct {
+    pub const ContainerInspectState = struct {
         Status: []const u8 = "",
         Running: bool = false,
         ExitCode: i64 = 0,
@@ -282,7 +281,7 @@ pub const ContainerInspect = struct {
         FinishedAt: []const u8 = "",
     };
 
-    pub const Config = struct {
+    pub const ContainerInspectConfig = struct {
         Image: []const u8 = "",
         WorkingDir: []const u8 = "",
         User: []const u8 = "",
@@ -299,7 +298,7 @@ pub const ContainerInspect = struct {
         CapDrop: ?[]const []const u8 = null,
     };
 
-    pub const NetworkSettings = struct {
+    pub const ContainerInspectNetworkSettings = struct {
         IPAddress: []const u8 = "",
         Networks: ?std.json.Value = null,
         Ports: ?std.json.Value = null,
@@ -507,9 +506,9 @@ pub const DaemonEvent = struct {
     status: []const u8 = "",
     id: []const u8 = "",
     time: i64 = 0,
-    Actor: ?Actor = null,
+    Actor: ?DaemonEventActor = null,
 
-    pub const Actor = struct {
+    pub const DaemonEventActor = struct {
         ID: []const u8 = "",
     };
 };
@@ -558,10 +557,16 @@ pub const BuildAux = struct {
 
 // ---------------------------------------------------------------- tests
 
+fn rep(comptime s: []const u8, comptime n: usize) [s.len * n]u8 {
+    var out: [s.len * n]u8 = undefined;
+    for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+    return out;
+}
+
 test "TmpfsBounds serializes via std.json.stringifyAlloc" {
     const alloc = std.testing.allocator;
     const t = TmpfsBounds{ .tmp_options = "rw,noexec,nosuid,nodev,size=67108864" };
-    const json = try std.json.stringifyAlloc(alloc, t, .{});
+    const json = try std.json.Stringify.valueAlloc(alloc, t, .{});
     defer alloc.free(json);
     try std.testing.expectEqualSlices(u8, "{\"/tmp\":\"rw,noexec,nosuid,nodev,size=67108864\"}", json);
 }
@@ -573,7 +578,7 @@ test "ExposedPorts serializes via std.json.stringifyAlloc" {
         .{ .container_port = 53, .proto = "udp" },
     };
     const ep = ExposedPorts{ .ports = &ports };
-    const json = try std.json.stringifyAlloc(alloc, ep, .{});
+    const json = try std.json.Stringify.valueAlloc(alloc, ep, .{});
     defer alloc.free(json);
     try std.testing.expect(std.mem.indexOf(u8, json, "{\"80/tcp\":{},\"53/udp\":{}}") != null);
 }
@@ -585,7 +590,7 @@ test "PortBindings serializes via std.json.stringifyAlloc and skips entries with
         .{ .host_ip = "127.0.0.1", .host_port = 9000, .container_port = 9000, .proto = "tcp" },
     };
     const pb = PortBindings{ .ports = &ports };
-    const json = try std.json.stringifyAlloc(alloc, pb, .{});
+    const json = try std.json.Stringify.valueAlloc(alloc, pb, .{});
     defer alloc.free(json);
     try std.testing.expect(std.mem.indexOf(u8, json, "{\"9000/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"9000\"}]}") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "3000") == null);
@@ -594,7 +599,7 @@ test "PortBindings serializes via std.json.stringifyAlloc and skips entries with
 test "ContainerCreateRequest serializes with omit-null optionals" {
     const alloc = std.testing.allocator;
     const req = ContainerCreateRequest{ .Image = "alpine:3.20" };
-    const json = try std.json.stringifyAlloc(alloc, req, .{ .emit_null_optional_fields = false });
+    const json = try std.json.Stringify.valueAlloc(alloc, req, .{ .emit_null_optional_fields = false });
     defer alloc.free(json);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"Image\":\"alpine:3.20\"") != null);
     // Null optionals are omitted entirely when emit_null_optional_fields is false.
@@ -640,7 +645,7 @@ test "ContainerCreateRequest serializes full HostConfig with all fields" {
             .Tmpfs = .{ .tmp_options = "rw,noexec,nosuid,nodev,size=67108864" },
         },
     };
-    const json = try std.json.stringifyAlloc(alloc, req, .{ .emit_null_optional_fields = false });
+    const json = try std.json.Stringify.valueAlloc(alloc, req, .{ .emit_null_optional_fields = false });
     defer alloc.free(json);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"Image\":\"alpine:3.20\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"ReadonlyRootfs\":true") != null);
@@ -657,7 +662,7 @@ test "ContainerCreateRequest serializes full HostConfig with all fields" {
 test "Mount struct field defaults and serialization" {
     const alloc = std.testing.allocator;
     const m = Mount{ .Type = "volume", .Source = "myvol", .Target = "/vol", .ReadOnly = false };
-    const json = try std.json.stringifyAlloc(alloc, m, .{ .emit_null_optional_fields = false });
+    const json = try std.json.Stringify.valueAlloc(alloc, m, .{ .emit_null_optional_fields = false });
     defer alloc.free(json);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"Type\":\"volume\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"Source\":\"myvol\"") != null);
@@ -695,7 +700,7 @@ test "ContainerCreateRequest serializes ShmSize, Ulimits, Init, and Healthcheck"
             .Ulimits = &ulimits,
         },
     };
-    const json = try std.json.stringifyAlloc(alloc, req, .{ .emit_null_optional_fields = false });
+    const json = try std.json.Stringify.valueAlloc(alloc, req, .{ .emit_null_optional_fields = false });
     defer alloc.free(json);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"Init\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"ShmSize\":67108864") != null);
@@ -1029,7 +1034,7 @@ test "LabelsMap, Hostname, Entrypoint, NanoCpus, RestartPolicy, and NetworkCreat
             .RestartPolicy = .{ .Name = "on-failure", .MaximumRetryCount = 3 },
         },
     };
-    const json = try std.json.stringifyAlloc(alloc, req, .{ .emit_null_optional_fields = false });
+    const json = try std.json.Stringify.valueAlloc(alloc, req, .{ .emit_null_optional_fields = false });
     defer alloc.free(json);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"Hostname\":\"api-1.local\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"Entrypoint\":[\"/bin/sh\"]") != null);
@@ -1038,7 +1043,7 @@ test "LabelsMap, Hostname, Entrypoint, NanoCpus, RestartPolicy, and NetworkCreat
     try std.testing.expect(std.mem.indexOf(u8, json, "\"RestartPolicy\":{\"Name\":\"on-failure\",\"MaximumRetryCount\":3}") != null);
 
     const nreq = NetworkCreateRequest{ .Name = "iso-net", .Driver = "bridge", .Internal = true };
-    const njson = try std.json.stringifyAlloc(alloc, nreq, .{ .emit_null_optional_fields = false });
+    const njson = try std.json.Stringify.valueAlloc(alloc, nreq, .{ .emit_null_optional_fields = false });
     defer alloc.free(njson);
     try std.testing.expect(std.mem.indexOf(u8, njson, "\"Name\":\"iso-net\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, njson, "\"Internal\":true") != null);
@@ -1046,17 +1051,17 @@ test "LabelsMap, Hostname, Entrypoint, NanoCpus, RestartPolicy, and NetworkCreat
 
 test "BUG-034: ExposedPorts and PortBindings serialize oversized protos cleanly without panicking" {
     const alloc = std.testing.allocator;
-    const huge_proto = "p" ** 160;
+    const huge_proto = rep("p", 160);
     const long_ports = [_]PortMapping{.{
         .host_port = 8080,
         .container_port = 80,
-        .proto = huge_proto,
+        .proto = &huge_proto,
     }};
-    const pb_json = try std.json.stringifyAlloc(alloc, PortBindings{ .ports = &long_ports }, .{});
+    const pb_json = try std.json.Stringify.valueAlloc(alloc, PortBindings{ .ports = &long_ports }, .{});
     defer alloc.free(pb_json);
     try std.testing.expect(std.mem.indexOf(u8, pb_json, "80/" ++ huge_proto) != null);
 
-    const ep_json = try std.json.stringifyAlloc(alloc, ExposedPorts{ .ports = &long_ports }, .{});
+    const ep_json = try std.json.Stringify.valueAlloc(alloc, ExposedPorts{ .ports = &long_ports }, .{});
     defer alloc.free(ep_json);
     try std.testing.expect(std.mem.indexOf(u8, ep_json, "80/" ++ huge_proto) != null);
 }

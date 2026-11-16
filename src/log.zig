@@ -4,6 +4,8 @@
 //!   audit.log   – tamper-evident SHA-256 hash-chained log entries
 //! Errors and warnings are also echoed to stderr; info/debug only with --verbose.
 const std = @import("std");
+const Io = std.Io;
+const Clock = Io.Clock;
 
 pub const AuditError = error{
     AuditTampered,
@@ -27,40 +29,41 @@ pub const Level = enum {
 };
 
 pub const Logger = struct {
-    system_file: ?std.fs.File = null,
-    error_file: ?std.fs.File = null,
-    audit_file: ?std.fs.File = null,
-    last_hash: [64]u8 = [_]u8{'0'} ** 64,
+    io: Io,
+    system_file: ?Io.File = null,
+    error_file: ?Io.File = null,
+    audit_file: ?Io.File = null,
+    last_hash: [64]u8 = @splat('0'),
     verbose: bool = false,
     echo_stderr: bool = true,
 
     /// Opens (creating if needed) `<log_dir>/system.log`, `error.log`, and `audit.log`.
     /// Never fails: if the files cannot be opened, logging to them is skipped.
-    pub fn init(log_dir: []const u8, verbose: bool) Logger {
-        var self = Logger{ .verbose = verbose };
-        var dir = std.fs.cwd().makeOpenPath(log_dir, .{}) catch |e| {
+    pub fn init(io: Io, log_dir: []const u8, verbose: bool) Logger {
+        var self = Logger{ .io = io, .verbose = verbose };
+        var dir = Io.Dir.cwd().createDirPathOpen(io, log_dir, .{}) catch |e| {
             std.debug.print("zigpod: warning: cannot open log dir '{s}': {s}\n", .{ log_dir, @errorName(e) });
             return self;
         };
-        defer dir.close();
-        self.system_file = openAppend(dir, "system.log", false);
-        self.error_file = openAppend(dir, "error.log", false);
-        self.audit_file = openAppend(dir, "audit.log", true);
+        defer dir.close(io);
+        self.system_file = openAppend(io, dir, "system.log", false);
+        self.error_file = openAppend(io, dir, "error.log", false);
+        self.audit_file = openAppend(io, dir, "audit.log", true);
         if (self.audit_file) |f| {
             // BUG-008/BUG-009: repair an interrupted tail and resume the chain
             // under an exclusive lock so concurrent processes stay consistent.
-            lockAudit(f);
-            defer unlockAudit(f);
-            repairAuditTail(f);
+            lockAudit(f.handle);
+            defer unlockAudit(f.handle);
+            repairAuditTail(f, io);
             self.last_hash = lastHashFromFd(f.handle);
         }
         return self;
     }
 
     pub fn deinit(self: *Logger) void {
-        if (self.system_file) |f| f.close();
-        if (self.error_file) |f| f.close();
-        if (self.audit_file) |f| f.close();
+        if (self.system_file) |f| f.close(self.io);
+        if (self.error_file) |f| f.close(self.io);
+        if (self.audit_file) |f| f.close(self.io);
         self.system_file = null;
         self.error_file = null;
         self.audit_file = null;
@@ -87,25 +90,27 @@ pub const Logger = struct {
     }
 
     pub fn log(self: *Logger, level: Level, comptime fmt: []const u8, args: anytype) void {
+        const now_ns = Clock.Timestamp.now(self.io, .real).raw.nanoseconds;
+        const ts: i64 = @intCast(@divFloor(now_ns, @as(i96, std.time.ns_per_s)));
         var buf: [4096]u8 = undefined;
-        const line = formatLine(&buf, std.time.timestamp(), level, fmt, args);
+        const line = formatLine(&buf, ts, level, fmt, args);
 
-        if (self.system_file) |f| f.writeAll(line.text) catch {};
+        if (self.system_file) |f| f.writeStreamingAll(self.io, line.text) catch {};
         if (level == .err) {
-            if (self.error_file) |f| f.writeAll(line.text) catch {};
+            if (self.error_file) |f| f.writeStreamingAll(self.io, line.text) catch {};
         }
         if (self.audit_file) |f| {
             var audit_msg_buf: [4096]u8 = undefined;
-            const raw_msg = std.mem.trimRight(u8, line.text[line.msg_start..], "\r\n");
+            const raw_msg = std.mem.trimEnd(u8, line.text[line.msg_start..], "\r\n");
             const audit_msg = sanitizeAuditField(&audit_msg_buf, raw_msg);
             const ts_end = std.mem.indexOfScalar(u8, line.text, ' ') orelse 0;
             const ts_str = line.text[0..ts_end];
             // BUG-009/BUG-030: hold an exclusive lock, repair any partial tail
             // caused by prior write errors, and re-read the chain head before
             // computing and appending the next entry hash.
-            lockAudit(f);
-            defer unlockAudit(f);
-            repairAuditTail(f);
+            lockAudit(f.handle);
+            defer unlockAudit(f.handle);
+            repairAuditTail(f, self.io);
             const prev_hash = lastHashFromFd(f.handle);
             const entry_hash = computeEntryHash(ts_str, level.label(), &prev_hash, audit_msg);
             var audit_buf: [4400]u8 = undefined;
@@ -116,7 +121,7 @@ pub const Logger = struct {
                 entry_hash,
                 audit_msg,
             })) |audit_line| {
-                if (f.writeAll(audit_line)) |_| {
+                if (f.writeStreamingAll(self.io, audit_line)) |_| {
                     self.last_hash = entry_hash;
                 } else |_| {}
             } else |_| {}
@@ -124,10 +129,13 @@ pub const Logger = struct {
 
         const echo = level == .err or level == .warn or self.verbose;
         if (self.echo_stderr and echo) {
-            std.io.getStdErr().writer().print("zigpod: {s}: {s}", .{
+            var echo_buf: [512]u8 = undefined;
+            var fw: Io.File.Writer = .init(Io.File.stderr(), self.io, &echo_buf);
+            fw.interface.print("zigpod: {s}: {s}", .{
                 level.label(),
                 line.text[line.msg_start..],
             }) catch {};
+            fw.interface.flush() catch {};
         }
     }
 };
@@ -163,27 +171,59 @@ pub fn computeEntryHash(ts_str: []const u8, level_str: []const u8, prev_hash: *c
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
     var out: [64]u8 = undefined;
-    _ = std.fmt.bufPrint(&out, "{s}", .{std.fmt.fmtSliceHexLower(&digest)}) catch unreachable;
+    _ = std.fmt.bufPrint(&out, "{x}", .{&digest}) catch unreachable;
     return out;
 }
 
-fn lockAudit(f: std.fs.File) void {
-    std.posix.flock(f.handle, std.posix.LOCK.EX) catch {};
+fn lockAudit(fd: std.posix.fd_t) void {
+    const rc = std.os.linux.flock(fd, std.posix.LOCK.EX);
+    if (std.os.linux.errno(rc) != .SUCCESS) {}
 }
 
-fn unlockAudit(f: std.fs.File) void {
-    std.posix.flock(f.handle, std.posix.LOCK.UN) catch {};
+fn unlockAudit(fd: std.posix.fd_t) void {
+    const rc = std.os.linux.flock(fd, std.posix.LOCK.UN);
+    if (std.os.linux.errno(rc) != .SUCCESS) {}
 }
 
 /// `pread` in a loop; short reads are normal for regular files.
 fn preadAll(fd: std.posix.fd_t, buf: []u8, offset: u64) usize {
+    const linux = std.os.linux;
     var total: usize = 0;
     while (total < buf.len) {
-        const n = std.posix.pread(fd, buf[total..], offset + total) catch break;
-        if (n == 0) break;
-        total += n;
+        const rc = linux.pread(fd, buf[total..].ptr, buf.len - total, @intCast(offset + total));
+        switch (linux.errno(rc)) {
+            .SUCCESS => {
+                const n: usize = @intCast(rc);
+                if (n == 0) break;
+                total += n;
+            },
+            .INTR => continue,
+            else => break,
+        }
     }
     return total;
+}
+
+/// Metadata of an open file descriptor via `statx` (uid is not part of
+/// `Io.File.Stat` on Linux, so the security-relevant owner check needs the
+/// raw syscall; Zig 0.17 removed `std.posix.fstat`).
+pub const FdStat = struct {
+    size: u64,
+    uid: std.os.linux.uid_t,
+    mode: u16,
+};
+
+pub fn statxFd(fd: std.posix.fd_t) ?FdStat {
+    const linux = std.os.linux;
+    var stx = std.mem.zeroes(linux.Statx);
+    const rc = linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .TYPE = true, .UID = true, .SIZE = true }, &stx);
+    switch (linux.errno(rc)) {
+        .SUCCESS => {
+            if (!stx.mask.UID or !stx.mask.TYPE or !stx.mask.SIZE) return null;
+            return .{ .size = stx.size, .uid = stx.uid, .mode = stx.mode };
+        },
+        else => return null,
+    }
 }
 
 const AuditLineFields = struct {
@@ -225,11 +265,11 @@ fn verifyAuditLine(line: []const u8, expected_prev: *[64]u8) AuditError!AuditLin
 /// previous write stopped mid-append, unless the tail already parses as a
 /// complete 5-field entry missing only its trailing `\n` (in which case `\n`
 /// is restored rather than discarding committed data or tamper evidence).
-fn repairAuditTail(f: std.fs.File) void {
-    const stat = f.stat() catch return;
-    if (stat.size == 0) return;
+fn repairAuditTail(f: Io.File, io: Io) void {
+    const st = statxFd(f.handle) orelse return;
+    if (st.size == 0) return;
     var buf: [8192]u8 = undefined;
-    const start: u64 = if (stat.size > buf.len) stat.size - buf.len else 0;
+    const start: u64 = if (st.size > buf.len) st.size - buf.len else 0;
     const n = preadAll(f.handle, &buf, start);
     if (n == 0) return;
     const last_nl = std.mem.lastIndexOfScalar(u8, buf[0..n], '\n') orelse {
@@ -237,22 +277,24 @@ fn repairAuditTail(f: std.fs.File) void {
         // line (start == 0) or the partial tail exceeds the writer's max
         // line size; only the former is safe to repair here.
         if (start == 0) {
-            const tail = std.mem.trimRight(u8, buf[0..n], "\r");
+            const tail = std.mem.trimEnd(u8, buf[0..n], "\r");
             if (parseAuditFields(tail) != null) {
-                _ = f.writeAll("\n") catch {};
+                _ = f.writeStreamingAll(io, "\n") catch {};
             } else {
-                std.posix.ftruncate(f.handle, 0) catch {};
+                const rc = std.os.linux.ftruncate(f.handle, 0);
+                if (std.os.linux.errno(rc) != .SUCCESS) {}
             }
         }
         return;
     };
     const complete_end: u64 = start + @as(u64, last_nl) + 1;
-    if (complete_end < stat.size) {
-        const tail = std.mem.trimRight(u8, buf[last_nl + 1 .. n], "\r");
+    if (complete_end < st.size) {
+        const tail = std.mem.trimEnd(u8, buf[last_nl + 1 .. n], "\r");
         if (parseAuditFields(tail) != null) {
-            _ = f.writeAll("\n") catch {};
+            _ = f.writeStreamingAll(io, "\n") catch {};
         } else {
-            std.posix.ftruncate(f.handle, complete_end) catch {};
+            const rc = std.os.linux.ftruncate(f.handle, @intCast(complete_end));
+            if (std.os.linux.errno(rc) != .SUCCESS) {}
         }
     }
 }
@@ -260,16 +302,15 @@ fn repairAuditTail(f: std.fs.File) void {
 /// Reads the hash of the last complete audit line directly from the file
 /// descriptor (usable both at init and for per-write re-reads under flock).
 fn lastHashFromFd(fd: std.posix.fd_t) [64]u8 {
-    const genesis = [_]u8{'0'} ** 64;
-    const f = std.fs.File{ .handle = fd };
-    const stat = f.stat() catch return genesis;
-    if (stat.size == 0) return genesis;
+    const genesis: [64]u8 = @splat('0');
+    const st = statxFd(fd) orelse return genesis;
+    if (st.size == 0) return genesis;
 
     var buf: [8192]u8 = undefined;
-    const start: u64 = if (stat.size > buf.len) stat.size - buf.len else 0;
+    const start: u64 = if (st.size > buf.len) st.size - buf.len else 0;
     const n = preadAll(fd, &buf, start);
     if (n == 0) return genesis;
-    const trimmed = std.mem.trimRight(u8, buf[0..n], "\r\n");
+    const trimmed = std.mem.trimEnd(u8, buf[0..n], "\r\n");
     if (trimmed.len == 0) return genesis;
 
     const last_nl = std.mem.lastIndexOfScalar(u8, trimmed, '\n');
@@ -283,13 +324,13 @@ fn lastHashFromFd(fd: std.posix.fd_t) [64]u8 {
 const AuditEvaluation = struct {
     entries: usize = 0,
     error_events: usize = 0,
-    head_hash: [64]u8 = [_]u8{'0'} ** 64,
+    head_hash: [64]u8 = @splat('0'),
     failure: ?AuditError = null,
 };
 
 fn evaluateAuditContent(
     content: []const u8,
-    deny_list: ?*std.ArrayList(AuditDenyRecord),
+    deny_list: ?*std.array_list.Managed(AuditDenyRecord),
 ) !AuditEvaluation {
     var out = AuditEvaluation{};
     if (content.len == 0) return out;
@@ -300,7 +341,7 @@ fn evaluateAuditContent(
             if (lines.peek() == null) break;
             continue;
         }
-        const line = std.mem.trimRight(u8, raw_line, "\r");
+        const line = std.mem.trimEnd(u8, raw_line, "\r");
         // An unterminated trailing slice is treated as an uncommitted crash
         // partial line (BUG-008) ONLY if it does not parse as a complete
         // 5-field audit record (BUG-036).
@@ -329,8 +370,8 @@ fn evaluateAuditContent(
 /// Verifies the SHA-256 hash chain in `path`. Returns the verified entry count.
 /// An unterminated trailing line is ignored as an uncommitted crash tail ONLY
 /// when it does not parse as a complete 5-field entry (BUG-008, BUG-036).
-pub fn verifyAuditFile(allocator: std.mem.Allocator, path: []const u8) !usize {
-    const content = try std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024 * 1024);
+pub fn verifyAuditFile(io: Io, allocator: std.mem.Allocator, path: []const u8) !usize {
+    const content = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024 + 1));
     defer allocator.free(content);
     const eval = try evaluateAuditContent(content, null);
     if (eval.failure) |err| return err;
@@ -373,11 +414,11 @@ fn parseDenyMessage(msg: []const u8) ?struct { rule: []const u8, detail: []const
 /// Verifies `path` and writes a structured JSON audit report to `writer`.
 /// Returns `true` if the hash chain is intact, or `false` if tampering or
 /// format corruption was detected.
-pub fn writeAuditJson(allocator: std.mem.Allocator, path: []const u8, writer: anytype) !bool {
-    const content = try std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024 * 1024);
+pub fn writeAuditJson(io: Io, allocator: std.mem.Allocator, path: []const u8, writer: *Io.Writer) !bool {
+    const content = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024 + 1));
     defer allocator.free(content);
 
-    var deny_list = std.ArrayList(AuditDenyRecord).init(allocator);
+    var deny_list = std.array_list.Managed(AuditDenyRecord).init(allocator);
     defer deny_list.deinit();
 
     const eval = try evaluateAuditContent(content, &deny_list);
@@ -397,7 +438,7 @@ pub fn writeAuditJson(allocator: std.mem.Allocator, path: []const u8, writer: an
         .failure_reason = failure_reason,
         .deny_records = deny_list.items,
     };
-    try std.json.stringify(report, .{ .emit_null_optional_fields = false }, writer);
+    try std.json.Stringify.value(report, .{ .emit_null_optional_fields = false }, writer);
     try writer.writeByte('\n');
     return valid;
 }
@@ -406,8 +447,8 @@ pub fn writeAuditJson(allocator: std.mem.Allocator, path: []const u8, writer: an
 /// `readable` requests RDWR (needed by the audit file for tail repair/re-reads).
 /// Refuses symlinks (O_NOFOLLOW), non-regular files, and wrong ownership, and
 /// enforces mode 0640 on pre-existing files (BUG-013, BUG-031).
-fn openAppend(dir: std.fs.Dir, name: []const u8, readable: bool) ?std.fs.File {
-    const fd = std.posix.openat(dir.fd, name, .{
+fn openAppend(io: Io, dir: Io.Dir, name: []const u8, readable: bool) ?Io.File {
+    const fd = std.posix.openat(dir.handle, name, .{
         .ACCMODE = if (readable) .RDWR else .WRONLY,
         .CREAT = true,
         .APPEND = true,
@@ -417,22 +458,25 @@ fn openAppend(dir: std.fs.Dir, name: []const u8, readable: bool) ?std.fs.File {
         std.debug.print("zigpod: warning: cannot open log file '{s}': {s}\n", .{ name, @errorName(e) });
         return null;
     };
-    const st = std.posix.fstat(fd) catch |e| {
-        std.posix.close(fd);
-        std.debug.print("zigpod: warning: cannot stat log file '{s}': {s}\n", .{ name, @errorName(e) });
+    const st = statxFd(fd) orelse {
+        _ = std.os.linux.close(fd);
+        std.debug.print("zigpod: warning: cannot stat log file '{s}'\n", .{name});
         return null;
     };
-    if (!std.posix.S.ISREG(st.mode) or st.uid != std.os.linux.getuid()) {
-        std.posix.close(fd);
+    const linux = std.os.linux;
+    if ((st.mode & linux.S.IFMT) != linux.S.IFREG or st.uid != linux.getuid()) {
+        _ = linux.close(fd);
         std.debug.print("zigpod: warning: refusing insecure log file '{s}' (type/owner mismatch)\n", .{name});
         return null;
     }
-    std.posix.fchmod(fd, 0o640) catch |e| {
-        std.posix.close(fd);
-        std.debug.print("zigpod: warning: cannot enforce 0640 mode on log file '{s}': {s}\n", .{ name, @errorName(e) });
+    const fchmod_rc = linux.fchmod(fd, 0o640);
+    if (linux.errno(fchmod_rc) != .SUCCESS) {
+        _ = linux.close(fd);
+        std.debug.print("zigpod: warning: cannot enforce 0640 mode on log file '{s}'\n", .{name});
         return null;
-    };
-    return std.fs.File{ .handle = fd };
+    }
+    _ = io;
+    return Io.File{ .handle = fd, .flags = .{ .nonblocking = false } };
 }
 
 pub const Line = struct {
@@ -443,18 +487,17 @@ pub const Line = struct {
 
 /// Formats "<ISO-8601 UTC> [LEVEL] message\n" into `buf`, truncating if too long.
 pub fn formatLine(buf: []u8, ts: i64, level: Level, comptime fmt: []const u8, args: anytype) Line {
-    var fbs = std.io.fixedBufferStream(buf);
-    const w = fbs.writer();
-    writeTimestamp(w, ts) catch {};
+    var w: std.Io.Writer = .fixed(buf);
+    writeTimestamp(&w, ts) catch {};
     w.print(" [{s}] ", .{level.label()}) catch {};
-    const msg_start = fbs.pos;
+    const msg_start = w.end;
     w.print(fmt, args) catch {};
     w.writeByte('\n') catch {
         // Buffer full: force the last byte to be a newline.
         buf[buf.len - 1] = '\n';
         return .{ .text = buf, .msg_start = @min(msg_start, buf.len) };
     };
-    return .{ .text = fbs.getWritten(), .msg_start = msg_start };
+    return .{ .text = w.buffered(), .msg_start = msg_start };
 }
 
 pub fn writeTimestamp(w: anytype, ts: i64) !void {
@@ -475,13 +518,13 @@ pub fn writeTimestamp(w: anytype, ts: i64) !void {
 
 test "timestamp formatting" {
     var buf: [32]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try writeTimestamp(fbs.writer(), 0);
-    try std.testing.expectEqualStrings("1970-01-01T00:00:00Z", fbs.getWritten());
+    var w: std.Io.Writer = .fixed(&buf);
+    try writeTimestamp(&w, 0);
+    try std.testing.expectEqualStrings("1970-01-01T00:00:00Z", w.buffered());
 
-    fbs.reset();
-    try writeTimestamp(fbs.writer(), 1_700_000_000);
-    try std.testing.expectEqualStrings("2023-11-14T22:13:20Z", fbs.getWritten());
+    w.end = 0;
+    try writeTimestamp(&w, 1_700_000_000);
+    try std.testing.expectEqualStrings("2023-11-14T22:13:20Z", w.buffered());
 }
 
 test "line formatting" {
@@ -499,20 +542,21 @@ test "line truncation keeps trailing newline" {
 }
 
 test "logger writes system.log and error.log" {
+    const tio = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(tio, ".", std.testing.allocator);
     defer std.testing.allocator.free(dir_path);
 
-    var logger = Logger.init(dir_path, false);
+    var logger = Logger.init(tio, dir_path, false);
     logger.echo_stderr = false;
     logger.info("hello {s}", .{"world"});
     logger.err("bad {d}", .{1});
     logger.deinit();
 
-    const sys = try tmp.dir.readFileAlloc(std.testing.allocator, "system.log", 4096);
+    const sys = try tmp.dir.readFileAlloc(tio, "system.log", std.testing.allocator, .limited(4096));
     defer std.testing.allocator.free(sys);
-    const errs = try tmp.dir.readFileAlloc(std.testing.allocator, "error.log", 4096);
+    const errs = try tmp.dir.readFileAlloc(tio, "error.log", std.testing.allocator, .limited(4096));
     defer std.testing.allocator.free(errs);
 
     try std.testing.expect(std.mem.indexOf(u8, sys, "[INFO] hello world") != null);
@@ -522,24 +566,25 @@ test "logger writes system.log and error.log" {
 
     const audit_path = try std.fs.path.join(std.testing.allocator, &.{ dir_path, "audit.log" });
     defer std.testing.allocator.free(audit_path);
-    const verified_count = try verifyAuditFile(std.testing.allocator, audit_path);
+    const verified_count = try verifyAuditFile(tio, std.testing.allocator, audit_path);
     try std.testing.expectEqual(@as(usize, 2), verified_count);
 
     // Re-opening logger continues the existing SHA-256 chain seamlessly.
-    var logger2 = Logger.init(dir_path, false);
+    var logger2 = Logger.init(tio, dir_path, false);
     logger2.echo_stderr = false;
     logger2.warn("resumed", .{});
     logger2.deinit();
-    try std.testing.expectEqual(@as(usize, 3), try verifyAuditFile(std.testing.allocator, audit_path));
+    try std.testing.expectEqual(@as(usize, 3), try verifyAuditFile(tio, std.testing.allocator, audit_path));
 }
 
 test "verifyAuditFile detects single-byte tampering" {
+    const tio = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(tio, ".", std.testing.allocator);
     defer std.testing.allocator.free(dir_path);
 
-    var logger = Logger.init(dir_path, false);
+    var logger = Logger.init(tio, dir_path, false);
     logger.echo_stderr = false;
     logger.info("entry one", .{});
     logger.err("entry two", .{});
@@ -548,23 +593,24 @@ test "verifyAuditFile detects single-byte tampering" {
     const audit_path = try std.fs.path.join(std.testing.allocator, &.{ dir_path, "audit.log" });
     defer std.testing.allocator.free(audit_path);
 
-    const content = try tmp.dir.readFileAlloc(std.testing.allocator, "audit.log", 8192);
+    const content = try tmp.dir.readFileAlloc(tio, "audit.log", std.testing.allocator, .limited(8192));
     defer std.testing.allocator.free(content);
     const idx = std.mem.indexOf(u8, content, "entry one") orelse unreachable;
     content[idx] = 'X';
-    try tmp.dir.writeFile(.{ .sub_path = "audit.log", .data = content });
+    try tmp.dir.writeFile(tio, .{ .sub_path = "audit.log", .data = content });
 
-    try std.testing.expectError(AuditError.AuditTampered, verifyAuditFile(std.testing.allocator, audit_path));
+    try std.testing.expectError(AuditError.AuditTampered, verifyAuditFile(tio, std.testing.allocator, audit_path));
 }
 
 test "incomplete audit tail is skipped by verify and repaired on next init" {
+    const tio = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(tio, ".", std.testing.allocator);
     defer std.testing.allocator.free(dir_path);
 
     {
-        var logger = Logger.init(dir_path, false);
+        var logger = Logger.init(tio, dir_path, false);
         logger.echo_stderr = false;
         logger.info("entry one", .{});
         logger.deinit();
@@ -575,32 +621,33 @@ test "incomplete audit tail is skipped by verify and repaired on next init" {
 
     // Simulate a crash mid-append: a partial line with no trailing newline.
     {
-        const f = try tmp.dir.openFile("audit.log", .{ .mode = .read_write });
-        defer f.close();
-        try f.seekTo(try f.getEndPos());
-        try f.writeAll("crash-partial-line");
+        var f = try tmp.dir.openFile(tio, "audit.log", .{ .mode = .read_write });
+        defer f.close(tio);
+        const st = try f.stat(tio);
+        try f.writePositionalAll(tio, "crash-partial-line", st.size);
     }
 
     // BUG-008: the uncommitted tail must not be reported as tampering.
-    try std.testing.expectEqual(@as(usize, 1), try verifyAuditFile(std.testing.allocator, audit_path));
+    try std.testing.expectEqual(@as(usize, 1), try verifyAuditFile(tio, std.testing.allocator, audit_path));
 
     // Re-opening repairs (truncates) the partial tail and continues the chain.
-    var logger2 = Logger.init(dir_path, false);
+    var logger2 = Logger.init(tio, dir_path, false);
     logger2.echo_stderr = false;
     logger2.info("after repair", .{});
     logger2.deinit();
-    try std.testing.expectEqual(@as(usize, 2), try verifyAuditFile(std.testing.allocator, audit_path));
+    try std.testing.expectEqual(@as(usize, 2), try verifyAuditFile(tio, std.testing.allocator, audit_path));
 }
 
 test "interleaved loggers keep the audit chain consistent (flock + re-read)" {
+    const tio = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(tio, ".", std.testing.allocator);
     defer std.testing.allocator.free(dir_path);
 
-    var logger_a = Logger.init(dir_path, false);
+    var logger_a = Logger.init(tio, dir_path, false);
     defer logger_a.deinit();
-    var logger_b = Logger.init(dir_path, false);
+    var logger_b = Logger.init(tio, dir_path, false);
     defer logger_b.deinit();
     logger_a.echo_stderr = false;
     logger_b.echo_stderr = false;
@@ -615,18 +662,19 @@ test "interleaved loggers keep the audit chain consistent (flock + re-read)" {
 
     const audit_path = try std.fs.path.join(std.testing.allocator, &.{ dir_path, "audit.log" });
     defer std.testing.allocator.free(audit_path);
-    try std.testing.expectEqual(@as(usize, 4), try verifyAuditFile(std.testing.allocator, audit_path));
+    try std.testing.expectEqual(@as(usize, 4), try verifyAuditFile(tio, std.testing.allocator, audit_path));
 }
 
 test "logger.deny and writeAuditJson emit structured DENY telemetry and detect tampering" {
     const alloc = std.testing.allocator;
+    const tio = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(tio, ".", alloc);
     defer alloc.free(dir_path);
 
     {
-        var logger = Logger.init(dir_path, false);
+        var logger = Logger.init(tio, dir_path, false);
         defer logger.deinit();
         logger.echo_stderr = false;
         logger.info("zigpod start", .{});
@@ -636,39 +684,40 @@ test "logger.deny and writeAuditJson emit structured DENY telemetry and detect t
     const audit_path = try std.fs.path.join(alloc, &.{ dir_path, "audit.log" });
     defer alloc.free(audit_path);
 
-    var json_out = std.ArrayList(u8).init(alloc);
+    var json_out: std.Io.Writer.Allocating = .init(alloc);
     defer json_out.deinit();
-    const ok = try writeAuditJson(alloc, audit_path, json_out.writer());
+    const ok = try writeAuditJson(tio, alloc, audit_path, &json_out.writer);
     try std.testing.expect(ok);
-    try std.testing.expect(std.mem.indexOf(u8, json_out.items, "\"valid\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json_out.items, "\"entries\":2") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json_out.items, "\"deny_events\":1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json_out.items, "\"rule\":\"policy.max_memory_bytes\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_out.written(), "\"valid\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_out.written(), "\"entries\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_out.written(), "\"deny_events\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_out.written(), "\"rule\":\"policy.max_memory_bytes\"") != null);
 
     // Tamper with the audit file and verify writeAuditJson reports valid=false.
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(tio, .{
         .sub_path = "audit.log",
         .data = "2026-01-01T00:00:00Z\tINFO\t0000000000000000000000000000000000000000000000000000000000000000\tffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\ttampered\n",
     });
-    json_out.clearRetainingCapacity();
-    const ok_tampered = try writeAuditJson(alloc, audit_path, json_out.writer());
+    json_out.writer.end = 0;
+    const ok_tampered = try writeAuditJson(tio, alloc, audit_path, &json_out.writer);
     try std.testing.expect(!ok_tampered);
-    try std.testing.expect(std.mem.indexOf(u8, json_out.items, "\"valid\":false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json_out.items, "\"failure_reason\":\"AuditTampered\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_out.written(), "\"valid\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_out.written(), "\"failure_reason\":\"AuditTampered\"") != null);
 }
 
 test "fuzz verifyAuditFile and writeAuditJson over corrupted and random audit logs" {
     const alloc = std.testing.allocator;
+    const tio = std.testing.io;
     var prng = std.Random.DefaultPrng.init(0xa0d17f02);
     const rng = prng.random();
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(tio, ".", alloc);
     defer alloc.free(dir_path);
 
     {
-        var logger = Logger.init(dir_path, false);
+        var logger = Logger.init(tio, dir_path, false);
         defer logger.deinit();
         logger.echo_stderr = false;
         logger.info("entry one", .{});
@@ -680,9 +729,9 @@ test "fuzz verifyAuditFile and writeAuditJson over corrupted and random audit lo
     const audit_path = try std.fs.path.join(alloc, &.{ dir_path, "audit.log" });
     defer alloc.free(audit_path);
 
-    const baseline = try tmp.dir.readFileAlloc(alloc, "audit.log", 16384);
+    const baseline = try tmp.dir.readFileAlloc(tio, "audit.log", alloc, .limited(16384));
     defer alloc.free(baseline);
-    try std.testing.expectEqual(@as(usize, 4), try verifyAuditFile(alloc, audit_path));
+    try std.testing.expectEqual(@as(usize, 4), try verifyAuditFile(tio, alloc, audit_path));
 
     // Part A: Any single-byte bitflip inside the committed log (including the
     // final '\n', BUG-036) must be caught by both verifyAuditFile and
@@ -694,12 +743,12 @@ test "fuzz verifyAuditFile and writeAuditJson over corrupted and random audit lo
 
         const pos = if (i == 0) mutated.len - 1 else rng.intRangeLessThan(usize, 0, mutated.len);
         mutated[pos] ^= @as(u8, 1) << rng.int(u3);
-        try tmp.dir.writeFile(.{ .sub_path = "audit.log", .data = mutated });
+        try tmp.dir.writeFile(tio, .{ .sub_path = "audit.log", .data = mutated });
 
-        const verify_res = verifyAuditFile(alloc, audit_path);
-        var json_out = std.ArrayList(u8).init(alloc);
+        const verify_res = verifyAuditFile(tio, alloc, audit_path);
+        var json_out: std.Io.Writer.Allocating = .init(alloc);
         defer json_out.deinit();
-        const json_ok = try writeAuditJson(alloc, audit_path, json_out.writer());
+        const json_ok = try writeAuditJson(tio, alloc, audit_path, &json_out.writer);
 
         if (verify_res) |_| {
             return error.TestUnexpectedResult;
@@ -707,7 +756,7 @@ test "fuzz verifyAuditFile and writeAuditJson over corrupted and random audit lo
             try std.testing.expect(err == AuditError.AuditTampered or err == AuditError.InvalidAuditFormat);
         }
         try std.testing.expect(!json_ok);
-        try std.testing.expect(std.mem.indexOf(u8, json_out.items, "\"valid\":false") != null);
+        try std.testing.expect(std.mem.indexOf(u8, json_out.written(), "\"valid\":false") != null);
     }
 
     // Part B: Arbitrary random byte buffers with embedded '\n' and '\t' must never panic or leak.
@@ -719,71 +768,73 @@ test "fuzz verifyAuditFile and writeAuditJson over corrupted and random audit lo
         rng.bytes(buf);
         buf[len - 1] = '\n';
 
-        try tmp.dir.writeFile(.{ .sub_path = "audit.log", .data = buf });
-        _ = verifyAuditFile(alloc, audit_path) catch {};
+        try tmp.dir.writeFile(tio, .{ .sub_path = "audit.log", .data = buf });
+        _ = verifyAuditFile(tio, alloc, audit_path) catch {};
 
-        var json_out = std.ArrayList(u8).init(alloc);
+        var json_out: std.Io.Writer.Allocating = .init(alloc);
         defer json_out.deinit();
-        _ = try writeAuditJson(alloc, audit_path, json_out.writer());
+        _ = try writeAuditJson(tio, alloc, audit_path, &json_out.writer);
     }
 }
 
 test "BUG-031: Logger.init blocks symlinks and enforces mode 0640 on existing log files" {
     const alloc = std.testing.allocator;
+    const tio = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(tio, ".", alloc);
     defer alloc.free(dir_path);
 
-    const victim = try tmp.dir.createFile("victim.txt", .{});
-    victim.close();
-    try tmp.dir.symLink("victim.txt", "audit.log", .{});
+    const victim = try tmp.dir.createFile(tio, "victim.txt", .{});
+    victim.close(tio);
+    try tmp.dir.symLink(tio, "victim.txt", "audit.log", .{});
 
-    const sys_f = try tmp.dir.createFile("system.log", .{});
-    try sys_f.chmod(0o644);
-    sys_f.close();
+    const sys_f = try tmp.dir.createFile(tio, "system.log", .{});
+    try sys_f.setPermissions(tio, .fromMode(0o644));
+    sys_f.close(tio);
 
-    const err_f = try tmp.dir.createFile("error.log", .{});
-    try err_f.chmod(0o666);
-    err_f.close();
+    const err_f = try tmp.dir.createFile(tio, "error.log", .{});
+    try err_f.setPermissions(tio, .fromMode(0o666));
+    err_f.close(tio);
 
-    var logger = Logger.init(dir_path, false);
+    var logger = Logger.init(tio, dir_path, false);
     logger.echo_stderr = false;
     logger.err("probe event", .{});
     logger.deinit();
 
     // Audit symlink must never be followed or appended to.
     try std.testing.expect(logger.audit_file == null);
-    const victim_contents = try tmp.dir.readFileAlloc(alloc, "victim.txt", 4096);
+    const victim_contents = try tmp.dir.readFileAlloc(tio, "victim.txt", alloc, .limited(4096));
     defer alloc.free(victim_contents);
     try std.testing.expectEqualStrings("", victim_contents);
 
     // Pre-existing permissive log files must be tightened to 0640.
-    const sys_stat = try tmp.dir.statFile("system.log");
-    const err_stat = try tmp.dir.statFile("error.log");
-    try std.testing.expectEqual(@as(std.fs.File.Mode, 0o640), sys_stat.mode & 0o777);
-    try std.testing.expectEqual(@as(std.fs.File.Mode, 0o640), err_stat.mode & 0o777);
+    const sys_stat = try tmp.dir.statFile(tio, "system.log", .{});
+    const err_stat = try tmp.dir.statFile(tio, "error.log", .{});
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o640), sys_stat.permissions.toMode() & 0o777);
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o640), err_stat.permissions.toMode() & 0o777);
 }
 
 test "BUG-030: Logger.log repairs partial tail under lock without re-init" {
     const alloc = std.testing.allocator;
+    const tio = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(tio, ".", alloc);
     defer alloc.free(dir_path);
 
-    var logger = Logger.init(dir_path, false);
+    var logger = Logger.init(tio, dir_path, false);
     defer logger.deinit();
     logger.echo_stderr = false;
     logger.info("entry one", .{});
 
     // Simulate a partial crash write while the logger remains open.
     {
-        const f = try tmp.dir.openFile("audit.log", .{ .mode = .read_write });
-        defer f.close();
-        try f.seekTo(try f.getEndPos());
-        try f.writeAll("partial-tail-no-newline");
+        var f = try tmp.dir.openFile(tio, "audit.log", .{ .mode = .read_write });
+        defer f.close(tio);
+        const st = try f.stat(tio);
+        try f.writePositionalAll(tio, "partial-tail-no-newline", st.size);
     }
 
     logger.info("entry two", .{});
@@ -791,26 +842,27 @@ test "BUG-030: Logger.log repairs partial tail under lock without re-init" {
     // Also verify a complete entry whose trailing '\n' was missing gets newline-restored
     // rather than fused with the next write or truncated away.
     {
-        const raw = try tmp.dir.readFileAlloc(alloc, "audit.log", 8192);
+        const raw = try tmp.dir.readFileAlloc(tio, "audit.log", alloc, .limited(8192));
         defer alloc.free(raw);
-        try tmp.dir.writeFile(.{ .sub_path = "audit.log", .data = raw[0 .. raw.len - 1] });
+        try tmp.dir.writeFile(tio, .{ .sub_path = "audit.log", .data = raw[0 .. raw.len - 1] });
     }
     logger.info("entry three", .{});
 
     const audit_path = try std.fs.path.join(alloc, &.{ dir_path, "audit.log" });
     defer alloc.free(audit_path);
-    try std.testing.expectEqual(@as(usize, 3), try verifyAuditFile(alloc, audit_path));
+    try std.testing.expectEqual(@as(usize, 3), try verifyAuditFile(tio, alloc, audit_path));
 }
 
 test "BUG-036: verifyAuditFile and writeAuditJson check complete final entries missing newline" {
     const alloc = std.testing.allocator;
+    const tio = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(tio, ".", alloc);
     defer alloc.free(dir_path);
 
     {
-        var logger = Logger.init(dir_path, false);
+        var logger = Logger.init(tio, dir_path, false);
         defer logger.deinit();
         logger.echo_stderr = false;
         logger.info("entry one", .{});
@@ -820,31 +872,31 @@ test "BUG-036: verifyAuditFile and writeAuditJson check complete final entries m
     const audit_path = try std.fs.path.join(alloc, &.{ dir_path, "audit.log" });
     defer alloc.free(audit_path);
 
-    const original = try tmp.dir.readFileAlloc(alloc, "audit.log", 8192);
+    const original = try tmp.dir.readFileAlloc(tio, "audit.log", alloc, .limited(8192));
     defer alloc.free(original);
     try std.testing.expect(original.len > 2 and original[original.len - 1] == '\n');
 
     // 1) Removing the trailing newline from an otherwise valid entry must still count and verify it.
     const no_nl = original[0 .. original.len - 1];
-    try tmp.dir.writeFile(.{ .sub_path = "audit.log", .data = no_nl });
-    try std.testing.expectEqual(@as(usize, 2), try verifyAuditFile(alloc, audit_path));
+    try tmp.dir.writeFile(tio, .{ .sub_path = "audit.log", .data = no_nl });
+    try std.testing.expectEqual(@as(usize, 2), try verifyAuditFile(tio, alloc, audit_path));
 
-    var valid_json = std.ArrayList(u8).init(alloc);
+    var valid_json: std.Io.Writer.Allocating = .init(alloc);
     defer valid_json.deinit();
-    try std.testing.expect(try writeAuditJson(alloc, audit_path, valid_json.writer()));
-    try std.testing.expect(std.mem.indexOf(u8, valid_json.items, "\"entries\":2") != null);
+    try std.testing.expect(try writeAuditJson(tio, alloc, audit_path, &valid_json.writer));
+    try std.testing.expect(std.mem.indexOf(u8, valid_json.written(), "\"entries\":2") != null);
 
     // 2) Tampering with the final entry while removing its trailing newline must fail verification.
     const tampered = try alloc.dupe(u8, no_nl);
     defer alloc.free(tampered);
     const idx = std.mem.lastIndexOf(u8, tampered, "entry two") orelse return error.TestUnexpectedResult;
     tampered[idx] = 'X';
-    try tmp.dir.writeFile(.{ .sub_path = "audit.log", .data = tampered });
-    try std.testing.expectError(AuditError.AuditTampered, verifyAuditFile(alloc, audit_path));
+    try tmp.dir.writeFile(tio, .{ .sub_path = "audit.log", .data = tampered });
+    try std.testing.expectError(AuditError.AuditTampered, verifyAuditFile(tio, alloc, audit_path));
 
-    var json_out = std.ArrayList(u8).init(alloc);
+    var json_out: std.Io.Writer.Allocating = .init(alloc);
     defer json_out.deinit();
-    const json_ok = try writeAuditJson(alloc, audit_path, json_out.writer());
+    const json_ok = try writeAuditJson(tio, alloc, audit_path, &json_out.writer);
     try std.testing.expect(!json_ok);
-    try std.testing.expect(std.mem.indexOf(u8, json_out.items, "\"valid\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_out.written(), "\"valid\":false") != null);
 }

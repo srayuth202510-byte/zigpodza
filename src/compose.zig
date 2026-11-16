@@ -124,28 +124,28 @@ pub const ComposeFile = struct {
 };
 
 fn sanitizeProjectName(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
-    var out = std.ArrayList(u8).init(alloc);
-    errdefer out.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
     for (raw) |c| {
         if (out.items.len >= 32) break;
         if (std.ascii.isAlphanumeric(c) or c == '_' or c == '-') {
-            try out.append(std.ascii.toLower(c));
+            try out.append(alloc, std.ascii.toLower(c));
         } else if (c == ' ' or c == '.') {
-            try out.append('-');
+            try out.append(alloc, '-');
         }
     }
-    if (out.items.len == 0) try out.appendSlice("zigpod");
-    return out.toOwnedSlice();
+    if (out.items.len == 0) try out.appendSlice(alloc, "zigpod");
+    return out.toOwnedSlice(alloc);
 }
 
-fn verifyNonSymlinkRegularFile(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
+fn verifyNonSymlinkRegularFile(io: std.Io, alloc: std.mem.Allocator, path: []const u8) ![]u8 {
     if (path.len == 0 or path.len > 4096) return ComposeError.InvalidComposePath;
     for (path) |c| {
         if (c < 0x20 or c == 0x7f) return ComposeError.InvalidComposePath;
     }
 
-    var link_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-    if (std.fs.cwd().readLink(path, &link_buf)) |_| {
+    var link_buf: [utils.max_path_bytes]u8 = undefined;
+    if (std.Io.Dir.cwd().readLink(io, path, &link_buf)) |_| {
         return ComposeError.InvalidComposePath;
     } else |err| switch (err) {
         error.NotLink => {},
@@ -153,21 +153,21 @@ fn verifyNonSymlinkRegularFile(alloc: std.mem.Allocator, path: []const u8) ![]u8
         else => return ComposeError.InvalidComposePath,
     }
 
-    const real = std.fs.cwd().realpathAlloc(alloc, path) catch |err| switch (err) {
+    const real = utils.realpathAlloc(io, std.Io.Dir.cwd(), path, alloc) catch |err| switch (err) {
         error.FileNotFound => return ComposeError.ComposeFileNotFound,
         else => return ComposeError.InvalidComposePath,
     };
     errdefer alloc.free(real);
 
-    var f = std.fs.openFileAbsolute(real, .{}) catch return ComposeError.InvalidComposePath;
-    defer f.close();
-    const st = f.stat() catch return ComposeError.InvalidComposePath;
+    var f = std.Io.Dir.openFileAbsolute(io, real, .{}) catch return ComposeError.InvalidComposePath;
+    defer f.close(io);
+    const st = f.stat(io) catch return ComposeError.InvalidComposePath;
     if (st.kind != .file or st.size > max_compose_bytes) return ComposeError.InvalidComposePath;
     return real;
 }
 
 /// Resolves and reads a compose file (`-f` or `compose.yaml`/`compose.yml`/`docker-compose.yml`).
-pub fn loadComposeFile(alloc: std.mem.Allocator, explicit_path: ?[]const u8) !ComposeFile {
+pub fn loadComposeFile(io: std.Io, alloc: std.mem.Allocator, explicit_path: ?[]const u8) !ComposeFile {
     const default_candidates = [_][]const u8{
         "compose.yaml",
         "compose.yml",
@@ -175,11 +175,11 @@ pub fn loadComposeFile(alloc: std.mem.Allocator, explicit_path: ?[]const u8) !Co
     };
 
     const real_path = if (explicit_path) |p|
-        try verifyNonSymlinkRegularFile(alloc, p)
+        try verifyNonSymlinkRegularFile(io, alloc, p)
     else blk: {
         var found: ?[]u8 = null;
         for (default_candidates) |cand| {
-            if (verifyNonSymlinkRegularFile(alloc, cand)) |rp| {
+            if (verifyNonSymlinkRegularFile(io, alloc, cand)) |rp| {
                 found = rp;
                 break;
             } else |err| switch (err) {
@@ -196,9 +196,9 @@ pub fn loadComposeFile(alloc: std.mem.Allocator, explicit_path: ?[]const u8) !Co
     const project = try sanitizeProjectName(alloc, proj_raw);
     defer alloc.free(project);
 
-    var f = try std.fs.openFileAbsolute(real_path, .{});
-    defer f.close();
-    const content = try f.readToEndAlloc(alloc, max_compose_bytes);
+    var f = try std.Io.Dir.openFileAbsolute(io, real_path, .{});
+    defer f.close(io);
+    const content = try utils.readFileToEndAlloc(io, f, alloc, max_compose_bytes);
     defer alloc.free(content);
 
     return parseComposeYaml(alloc, content, project, base_dir);
@@ -213,10 +213,10 @@ fn stripYamlComment(line: []const u8) []const u8 {
         } else if (c == '"' and !in_single) {
             in_double = !in_double;
         } else if (c == '#' and !in_single and !in_double) {
-            if (idx == 0 or line[idx - 1] == ' ') return std.mem.trimRight(u8, line[0..idx], " \t");
+            if (idx == 0 or line[idx - 1] == ' ') return std.mem.trimEnd(u8, line[0..idx], " \t");
         }
     }
-    return std.mem.trimRight(u8, line, " \t");
+    return std.mem.trimEnd(u8, line, " \t");
 }
 
 fn unquoteScalar(raw: []const u8) []const u8 {
@@ -233,12 +233,12 @@ fn splitFlowList(alloc: std.mem.Allocator, raw: []const u8) ![][]const u8 {
         return ComposeError.InvalidComposeSyntax;
     }
     const inner = std.mem.trim(u8, trimmed[1 .. trimmed.len - 1], " \t");
-    var list = std.ArrayList([]const u8).init(alloc);
+    var list: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (list.items) |it| alloc.free(it);
-        list.deinit();
+        list.deinit(alloc);
     }
-    if (inner.len == 0) return list.toOwnedSlice();
+    if (inner.len == 0) return list.toOwnedSlice(alloc);
 
     var start: usize = 0;
     var in_single = false;
@@ -247,7 +247,7 @@ fn splitFlowList(alloc: std.mem.Allocator, raw: []const u8) ![][]const u8 {
         if (c == '\'' and !in_double) in_single = !in_single else if (c == '"' and !in_single) in_double = !in_double else if (c == ',' and !in_single and !in_double) {
             const item = unquoteScalar(inner[start..idx]);
             if (item.len > 0) {
-                try list.ensureUnusedCapacity(1);
+                try list.ensureUnusedCapacity(alloc, 1);
                 list.appendAssumeCapacity(try alloc.dupe(u8, item));
             }
             start = idx + 1;
@@ -255,49 +255,49 @@ fn splitFlowList(alloc: std.mem.Allocator, raw: []const u8) ![][]const u8 {
     }
     const tail = unquoteScalar(inner[start..]);
     if (tail.len > 0) {
-        try list.ensureUnusedCapacity(1);
+        try list.ensureUnusedCapacity(alloc, 1);
         list.appendAssumeCapacity(try alloc.dupe(u8, tail));
     }
-    return list.toOwnedSlice();
+    return list.toOwnedSlice(alloc);
 }
 
 fn splitCommandWords(alloc: std.mem.Allocator, raw: []const u8) ![][]const u8 {
     const s = std.mem.trim(u8, raw, " \t");
     if (s.len >= 2 and s[0] == '[' and s[s.len - 1] == ']') return splitFlowList(alloc, s);
-    var out = std.ArrayList([]const u8).init(alloc);
+    var out: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (out.items) |it| alloc.free(it);
-        out.deinit();
+        out.deinit(alloc);
     }
     const clean = unquoteScalar(s);
     var it = std.mem.tokenizeAny(u8, clean, " \t");
     while (it.next()) |tok| {
-        try out.ensureUnusedCapacity(1);
+        try out.ensureUnusedCapacity(alloc, 1);
         out.appendAssumeCapacity(try alloc.dupe(u8, tok));
     }
-    return out.toOwnedSlice();
+    return out.toOwnedSlice(alloc);
 }
 
 fn appendDupStr(alloc: std.mem.Allocator, dst: *[][]const u8, val: []const u8) !void {
-    var list = std.ArrayList([]const u8).fromOwnedSlice(alloc, dst.*);
+    var list = std.ArrayList([]const u8).fromOwnedSlice(dst.*);
     errdefer {
         for (list.items) |s| alloc.free(s);
-        list.deinit();
+        list.deinit(alloc);
         dst.* = &.{};
     }
-    try list.ensureUnusedCapacity(1);
+    try list.ensureUnusedCapacity(alloc, 1);
     list.appendAssumeCapacity(try alloc.dupe(u8, val));
-    dst.* = try list.toOwnedSlice();
+    dst.* = try list.toOwnedSlice(alloc);
 }
 
 fn appendDupPort(alloc: std.mem.Allocator, dst: *[]cli.PortMapping, pm: cli.PortMapping) !void {
-    var list = std.ArrayList(cli.PortMapping).fromOwnedSlice(alloc, dst.*);
+    var list = std.ArrayList(cli.PortMapping).fromOwnedSlice(dst.*);
     errdefer {
         for (list.items) |p| {
             if (p.host_ip) |ip| alloc.free(ip);
             alloc.free(p.proto);
         }
-        list.deinit();
+        list.deinit(alloc);
         dst.* = &.{};
     }
     const ip_dup: ?[]const u8 = if (pm.host_ip) |ip| try alloc.dupe(u8, ip) else null;
@@ -305,7 +305,7 @@ fn appendDupPort(alloc: std.mem.Allocator, dst: *[]cli.PortMapping, pm: cli.Port
         if (ip_dup) |ip| alloc.free(ip);
         return err;
     };
-    list.append(.{
+    list.append(alloc, .{
         .host_ip = ip_dup,
         .host_port = pm.host_port,
         .container_port = pm.container_port,
@@ -315,17 +315,17 @@ fn appendDupPort(alloc: std.mem.Allocator, dst: *[]cli.PortMapping, pm: cli.Port
         alloc.free(proto_dup);
         return err;
     };
-    dst.* = try list.toOwnedSlice();
+    dst.* = try list.toOwnedSlice(alloc);
 }
 
 fn appendDupVolume(alloc: std.mem.Allocator, dst: *[]cli.Volume, v: cli.Volume) !void {
-    var list = std.ArrayList(cli.Volume).fromOwnedSlice(alloc, dst.*);
+    var list = std.ArrayList(cli.Volume).fromOwnedSlice(dst.*);
     errdefer {
         for (list.items) |item| {
             alloc.free(item.source);
             alloc.free(item.destination);
         }
-        list.deinit();
+        list.deinit(alloc);
         dst.* = &.{};
     }
     const src_dup = try alloc.dupe(u8, v.source);
@@ -333,22 +333,22 @@ fn appendDupVolume(alloc: std.mem.Allocator, dst: *[]cli.Volume, v: cli.Volume) 
         alloc.free(src_dup);
         return err;
     };
-    list.append(.{ .source = src_dup, .destination = dst_dup, .readonly = v.readonly }) catch |err| {
+    list.append(alloc, .{ .source = src_dup, .destination = dst_dup, .readonly = v.readonly }) catch |err| {
         alloc.free(src_dup);
         alloc.free(dst_dup);
         return err;
     };
-    dst.* = try list.toOwnedSlice();
+    dst.* = try list.toOwnedSlice(alloc);
 }
 
 fn appendDupLabel(alloc: std.mem.Allocator, dst: *[]cli.Label, lbl: cli.Label) !void {
-    var list = std.ArrayList(cli.Label).fromOwnedSlice(alloc, dst.*);
+    var list = std.ArrayList(cli.Label).fromOwnedSlice(dst.*);
     errdefer {
         for (list.items) |l| {
             alloc.free(l.key);
             alloc.free(l.value);
         }
-        list.deinit();
+        list.deinit(alloc);
         dst.* = &.{};
     }
     const k_dup = try alloc.dupe(u8, lbl.key);
@@ -356,12 +356,12 @@ fn appendDupLabel(alloc: std.mem.Allocator, dst: *[]cli.Label, lbl: cli.Label) !
         alloc.free(k_dup);
         return err;
     };
-    list.append(.{ .key = k_dup, .value = v_dup }) catch |err| {
+    list.append(alloc, .{ .key = k_dup, .value = v_dup }) catch |err| {
         alloc.free(k_dup);
         alloc.free(v_dup);
         return err;
     };
-    dst.* = try list.toOwnedSlice();
+    dst.* = try list.toOwnedSlice(alloc);
 }
 
 fn parseBoolScalar(raw: []const u8) !bool {
@@ -395,15 +395,15 @@ pub fn parseComposeYaml(
     const base_dir = try alloc.dupe(u8, base_dir_in);
     errdefer alloc.free(base_dir);
 
-    var services = std.ArrayList(ComposeService).init(alloc);
+    var services: std.ArrayList(ComposeService) = .empty;
     errdefer {
         for (services.items) |*s| s.deinit(alloc);
-        services.deinit();
+        services.deinit(alloc);
     }
-    var networks = std.ArrayList(ComposeNetwork).init(alloc);
+    var networks: std.ArrayList(ComposeNetwork) = .empty;
     errdefer {
         for (networks.items) |n| n.deinit(alloc);
-        networks.deinit();
+        networks.deinit(alloc);
     }
 
     const Section = enum { none, services, networks };
@@ -415,7 +415,7 @@ pub fn parseComposeYaml(
 
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |raw_line| {
-        const no_cr = std.mem.trimRight(u8, raw_line, "\r");
+        const no_cr = std.mem.trimEnd(u8, raw_line, "\r");
         const clean = stripYamlComment(no_cr);
         if (clean.len == 0) continue;
 
@@ -456,7 +456,7 @@ pub fn parseComposeYaml(
                     errdefer alloc.free(n_name);
                     const n_drv = try alloc.dupe(u8, "bridge");
                     errdefer alloc.free(n_drv);
-                    try networks.append(.{ .name = n_name, .driver = n_drv });
+                    try networks.append(alloc, .{ .name = n_name, .driver = n_drv });
                 } else if (networks.items.len > 0) {
                     var cur_net = &networks.items[networks.items.len - 1];
                     const pair = parseColonPair(body) orelse return ComposeError.InvalidComposeSyntax;
@@ -484,7 +484,7 @@ pub fn parseComposeYaml(
                     if (services.items.len >= max_services) return ComposeError.TooManyServices;
                     const svc_name = try alloc.dupe(u8, pair.key);
                     errdefer alloc.free(svc_name);
-                    try services.append(.{ .name = svc_name, .image = &.{} });
+                    try services.append(alloc, .{ .name = svc_name, .image = &.{} });
                     continue;
                 }
 
@@ -546,12 +546,12 @@ pub fn parseComposeYaml(
         }
     }
 
-    const svc_slice = try services.toOwnedSlice();
+    const svc_slice = try services.toOwnedSlice(alloc);
     errdefer {
         for (svc_slice) |*s| s.deinit(alloc);
         alloc.free(svc_slice);
     }
-    const net_slice = try networks.toOwnedSlice();
+    const net_slice = try networks.toOwnedSlice(alloc);
     return .{
         .project = project,
         .base_dir = base_dir,
@@ -729,11 +729,12 @@ pub fn topoSortServices(alloc: std.mem.Allocator, services: []const ComposeServi
     defer alloc.free(state);
     @memset(state, .unvisited);
 
-    var order = std.ArrayList(usize).init(alloc);
-    errdefer order.deinit();
+    var order: std.ArrayList(usize) = .empty;
+    errdefer order.deinit(alloc);
 
     const Helper = struct {
         fn visit(
+            a: std.mem.Allocator,
             svcs: []const ComposeService,
             st: []State,
             ord: *std.ArrayList(usize),
@@ -754,17 +755,17 @@ pub fn topoSortServices(alloc: std.mem.Allocator, services: []const ComposeServi
                     }
                 }
                 const resolved = dep_idx orelse return ComposeError.UnknownDependency;
-                try visit(svcs, st, ord, resolved);
+                try visit(a, svcs, st, ord, resolved);
             }
             st[idx] = .visited;
-            ord.append(idx) catch return ComposeError.TooManyServices;
+            ord.append(a, idx) catch return ComposeError.TooManyServices;
         }
     };
 
     for (0..services.len) |i| {
-        try Helper.visit(services, state, &order, i);
+        try Helper.visit(alloc, services, state, &order, i);
     }
-    return order.toOwnedSlice();
+    return order.toOwnedSlice(alloc);
 }
 
 fn resolveComposeHostPath(alloc: std.mem.Allocator, base_dir: []const u8, src: []const u8) ![]u8 {
@@ -813,7 +814,7 @@ fn resolveVolumes(alloc: std.mem.Allocator, base_dir: []const u8, specs: []const
 fn ensureNetwork(client: *const http.Client, logger: *log.Logger, net: ComposeNetwork) !bool {
     try pod.validateIdentifier(net.name);
     try pod.validateNetworkDriver(net.driver);
-    const body = try std.json.stringifyAlloc(client.allocator, pod.NetworkCreateRequest{
+    const body = try std.json.Stringify.valueAlloc(client.allocator, pod.NetworkCreateRequest{
         .Name = net.name,
         .Driver = net.driver,
         .Internal = net.internal,
@@ -878,10 +879,10 @@ fn listProjectContainers(
     const filter = try std.fmt.allocPrint(alloc, "{{\"label\":[\"com.docker.compose.project={s}\"]}}", .{project});
     defer alloc.free(filter);
 
-    var path = std.ArrayList(u8).init(alloc);
-    defer path.deinit();
-    try path.appendSlice(pod.api_prefix ++ "/containers/json?all=true&filters=");
-    try pod.validate.appendQueryEncoded(&path, filter);
+    var path: std.ArrayList(u8) = .empty;
+    defer path.deinit(alloc);
+    try path.appendSlice(alloc, pod.api_prefix ++ "/containers/json?all=true&filters=");
+    try pod.validate.appendQueryEncoded(alloc, &path, filter);
 
     logger.debug("GET {s}", .{path.items});
     const resp = try client.request("GET", path.items, null);
@@ -901,7 +902,7 @@ fn listProjectContainers(
     for (parsed.value) |c| {
         var name: []const u8 = utils.shortId(c.Id);
         if (c.Names) |names| {
-            if (names.len > 0) name = std.mem.trimLeft(u8, names[0], "/");
+            if (names.len > 0) name = std.mem.trimStart(u8, names[0], "/");
         }
         try stdout.print("{s:<32} {s:<28} {s}\n", .{ name, c.Image, c.Status });
     }
@@ -913,8 +914,9 @@ pub fn executeCompose(
     opts: cli.ComposeOpts,
     stdout: anytype,
 ) !void {
+    const io = client.io;
     const alloc = client.allocator;
-    var cf = try loadComposeFile(alloc, opts.file);
+    var cf = try loadComposeFile(io, alloc, opts.file);
     defer cf.deinit(alloc);
 
     const order = try topoSortServices(alloc, cf.services);
@@ -925,7 +927,7 @@ pub fn executeCompose(
             var loaded_pol: ?std.json.Parsed(policy.Policy) = null;
             defer if (loaded_pol) |*lp| lp.deinit();
             const pol_opt: ?policy.Policy = if (opts.policy_path) |pp| blk: {
-                loaded_pol = try policy.loadPolicyFile(alloc, pp);
+                loaded_pol = try policy.loadPolicyFile(io, alloc, pp);
                 break :blk loaded_pol.?.value;
             } else if (opts.profile == .sandbox)
                 policy.default_sandbox_policy
@@ -964,7 +966,7 @@ pub fn executeCompose(
                     env_file_paths[ef_count] = try resolveEnvFilePath(alloc, cf.base_dir, ef);
                     ef_count += 1;
                 }
-                resolved_envs[idx] = try pod.loadAndMergeEnv(alloc, env_file_paths, svc.env);
+                resolved_envs[idx] = try pod.loadAndMergeEnv(io, alloc, env_file_paths, svc.env);
 
                 const vols = try resolveVolumes(alloc, cf.base_dir, svc.volumes);
                 resolved_vols[idx] = vols;
@@ -1009,13 +1011,13 @@ pub fn executeCompose(
                 }
             }
 
-            var created_nets = std.ArrayList([]const u8).init(alloc);
-            defer created_nets.deinit();
+            var created_nets: std.ArrayList([]const u8) = .empty;
+            defer created_nets.deinit(alloc);
 
-            var created_cnames = std.ArrayList([]const u8).init(alloc);
+            var created_cnames: std.ArrayList([]const u8) = .empty;
             defer {
                 for (created_cnames.items) |cn| alloc.free(cn);
-                created_cnames.deinit();
+                created_cnames.deinit(alloc);
             }
 
             // Registered after buffer defers so Zig LIFO errdefer cleans daemon state first.
@@ -1023,7 +1025,7 @@ pub fn executeCompose(
 
             for (cf.networks) |net| {
                 if (try ensureNetwork(client, logger, net)) {
-                    try created_nets.append(net.name);
+                    try created_nets.append(alloc, net.name);
                 }
             }
 
@@ -1032,31 +1034,31 @@ pub fn executeCompose(
                 const cname = try svc.resolvedContainerName(alloc, cf.project);
                 defer alloc.free(cname);
 
-                var mounts = std.ArrayList(pod.Mount).init(alloc);
-                defer mounts.deinit();
+                var mounts: std.ArrayList(pod.Mount) = .empty;
+                defer mounts.deinit(alloc);
                 for (resolved_vols[idx].?) |v| {
-                    try mounts.append(try pod.makeMount(v.source, v.destination, v.readonly));
+                    try mounts.append(alloc, try pod.makeMount(io, v.source, v.destination, v.readonly));
                 }
 
-                var port_list = std.ArrayList(pod.PortMapping).init(alloc);
-                defer port_list.deinit();
+                var port_list: std.ArrayList(pod.PortMapping) = .empty;
+                defer port_list.deinit(alloc);
                 for (svc.ports) |p| {
-                    try port_list.append(try pod.makePortMapping(p.host_ip, p.host_port, p.container_port, p.proto));
+                    try port_list.append(alloc, try pod.makePortMapping(p.host_ip, p.host_port, p.container_port, p.proto));
                 }
 
-                var lbl_list = std.ArrayList(pod.LabelEntry).init(alloc);
-                defer lbl_list.deinit();
-                try lbl_list.append(.{ .key = "com.docker.compose.project", .value = cf.project });
-                try lbl_list.append(.{ .key = "com.docker.compose.service", .value = svc.name });
+                var lbl_list: std.ArrayList(pod.LabelEntry) = .empty;
+                defer lbl_list.deinit(alloc);
+                try lbl_list.append(alloc, .{ .key = "com.docker.compose.project", .value = cf.project });
+                try lbl_list.append(alloc, .{ .key = "com.docker.compose.service", .value = svc.name });
                 var net_label_owned: ?[]u8 = null;
                 defer if (net_label_owned) |nl| alloc.free(nl);
                 if (svc.networks.len == 1) {
-                    try lbl_list.append(.{ .key = "com.docker.compose.network", .value = svc.networks[0] });
+                    try lbl_list.append(alloc, .{ .key = "com.docker.compose.network", .value = svc.networks[0] });
                 } else if (svc.networks.len > 1) {
                     net_label_owned = try std.mem.join(alloc, ",", svc.networks);
-                    try lbl_list.append(.{ .key = "com.docker.compose.network", .value = net_label_owned.? });
+                    try lbl_list.append(alloc, .{ .key = "com.docker.compose.network", .value = net_label_owned.? });
                 }
-                for (svc.labels) |l| try lbl_list.append(.{ .key = l.key, .value = l.value });
+                for (svc.labels) |l| try lbl_list.append(alloc, .{ .key = l.key, .value = l.value });
 
                 var run_opts = cli.RunOpts{
                     .image = svc.image,
@@ -1105,7 +1107,7 @@ pub fn executeCompose(
                     } else null,
                 };
 
-                try created_cnames.ensureUnusedCapacity(1);
+                try created_cnames.ensureUnusedCapacity(alloc, 1);
                 const cname_dup = try alloc.dupe(u8, cname);
                 const cid = pod.createContainer(client, logger, req, cname) catch |err| {
                     alloc.free(cname_dup);
@@ -1237,9 +1239,9 @@ test "executeCompose up, ps, down, and sandbox pre-flight denial over mock socke
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir("data");
-    try tmp.dir.writeFile(.{ .sub_path = "db.env", .data = "DB_PASS=secret\n" });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDir(std.testing.io, "data", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "db.env", .data = "DB_PASS=secret\n" });
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "blocked.yaml",
         .data =
         \\name: demo
@@ -1254,7 +1256,7 @@ test "executeCompose up, ps, down, and sandbox pre-flight denial over mock socke
         \\
         ,
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "compose.yaml",
         .data =
         \\name: demo
@@ -1275,35 +1277,35 @@ test "executeCompose up, ps, down, and sandbox pre-flight denial over mock socke
         ,
     });
 
-    const blocked_path = try tmp.dir.realpathAlloc(alloc, "blocked.yaml");
+    const blocked_path = try tmp.dir.realPathFileAlloc(std.testing.io, "blocked.yaml", alloc);
     defer alloc.free(blocked_path);
-    const compose_path = try tmp.dir.realpathAlloc(alloc, "compose.yaml");
+    const compose_path = try tmp.dir.realPathFileAlloc(std.testing.io, "compose.yaml", alloc);
     defer alloc.free(compose_path);
 
-    var logger = log.Logger{ .echo_stderr = false };
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
     defer logger.deinit();
 
     // 1) Pre-flight sandbox violation with out-of-order topological indices ([1, 0])
     //    must fail before touching any daemon socket and free slot 1 without crashing or leaking.
     {
-        const unused_client = http.Client{ .allocator = alloc, .socket_path = "/tmp/zp-compose-unused.sock" };
-        var sink = std.ArrayList(u8).init(alloc);
+        const unused_client = http.Client{ .allocator = alloc, .socket_path = "/tmp/zp-compose-unused.sock", .io = std.testing.io };
+        var sink: std.Io.Writer.Allocating = .init(alloc);
         defer sink.deinit();
         try std.testing.expectError(pod.ApiError.PolicyViolation, executeCompose(&unused_client, &logger, .{
             .action = .up,
             .file = blocked_path,
             .profile = .sandbox,
-        }, sink.writer()));
+        }, &sink.writer));
     }
 
     // 2) Full up -> ps -> down lifecycle over mock Unix socket.
-    const sock_path = try std.fmt.allocPrint(alloc, "/tmp/zp-compose-{d}.sock", .{std.time.nanoTimestamp()});
+    const sock_path = try std.fmt.allocPrint(alloc, "/tmp/zp-compose-{d}.sock", .{std.Io.Clock.awake.now(std.testing.io).nanoseconds});
     defer alloc.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
 
     const net_resp = "{\"Id\":\"net1234567890\",\"Warning\":\"\"}";
     const db_resp = "{\"Id\":\"db1234567890abcd\"}";
@@ -1369,27 +1371,27 @@ test "executeCompose up, ps, down, and sandbox pre-flight denial over mock socke
         },
     };
 
-    var ctx = th.MockApiCtx{ .server = &server, .replies = &replies };
+    var ctx = th.MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
     const thread = try std.Thread.spawn(.{}, th.runMockPodmanServer, .{&ctx});
     var joined = false;
     defer if (!joined) thread.join();
 
-    const client = http.Client{ .allocator = alloc, .socket_path = sock_path };
-    var out = std.ArrayList(u8).init(alloc);
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path, .io = std.testing.io };
+    var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
-    try executeCompose(&client, &logger, .{ .action = .up, .file = compose_path }, out.writer());
-    try executeCompose(&client, &logger, .{ .action = .ps, .file = compose_path }, out.writer());
-    try executeCompose(&client, &logger, .{ .action = .down, .file = compose_path }, out.writer());
+    try executeCompose(&client, &logger, .{ .action = .up, .file = compose_path }, &out.writer);
+    try executeCompose(&client, &logger, .{ .action = .ps, .file = compose_path }, &out.writer);
+    try executeCompose(&client, &logger, .{ .action = .down, .file = compose_path }, &out.writer);
 
     thread.join();
     joined = true;
     try std.testing.expectEqual(replies.len, ctx.matched);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "demo_db_1 (db1234567890) started") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "demo_api_1 (api123456789) started") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "postgres:16-alpine") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "demo_api_1 removed") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "demo_db_1 absent") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "demo_db_1 (db1234567890) started") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "demo_api_1 (api123456789) started") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "postgres:16-alpine") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "demo_api_1 removed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "demo_db_1 absent") != null);
 }
 
 test "BUG-027: scalar list values parsed and long-syntax or unknown keys rejected" {
@@ -1547,12 +1549,10 @@ test "BUG-028: compose service networks attach container, label network, and enf
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(dir_path);
 
-    try tmp.dir.writeFile(.{
-        .sub_path = "compose.yaml",
-        .data =
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "compose.yaml", .data =
         \\name: demo
         \\networks:
         \\  back:
@@ -1569,27 +1569,27 @@ test "BUG-028: compose service networks attach container, label network, and enf
     const compose_path = try std.fs.path.join(alloc, &.{ dir_path, "compose.yaml" });
     defer alloc.free(compose_path);
 
-    var logger = log.Logger.init(dir_path, false);
+    var logger = log.Logger.init(std.testing.io, dir_path, false);
     defer logger.deinit();
     logger.echo_stderr = false;
 
     // 2) Under sandbox profile, non-allow-listed compose networks fail pre-flight before socket I/O.
     const unused_sock = try std.fs.path.join(alloc, &.{ dir_path, "unused.sock" });
     defer alloc.free(unused_sock);
-    const sandbox_client = http.Client{ .allocator = alloc, .socket_path = unused_sock };
-    var deny_out = std.ArrayList(u8).init(alloc);
+    const sandbox_client = http.Client{ .allocator = alloc, .socket_path = unused_sock, .io = std.testing.io };
+    var deny_out: std.Io.Writer.Allocating = .init(alloc);
     defer deny_out.deinit();
     try std.testing.expectError(
         pod.ApiError.PolicyViolation,
-        executeCompose(&sandbox_client, &logger, .{ .action = .up, .file = compose_path, .profile = .sandbox }, deny_out.writer()),
+        executeCompose(&sandbox_client, &logger, .{ .action = .up, .file = compose_path, .profile = .sandbox }, &deny_out.writer),
     );
 
     // 3) In standard profile, containers receive both compose network label and NetworkingConfig.EndpointsConfig.
     const sock_path = try std.fs.path.join(alloc, &.{ dir_path, "podman.sock" });
     defer alloc.free(sock_path);
-    const addr = try std.net.Address.initUnix(sock_path);
-    var server = try addr.listen(.{});
-    defer server.deinit();
+    const addr = try std.Io.net.UnixAddress.init(sock_path);
+    var server = try addr.listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
 
     const net_resp = "{\"Id\":\"net123456\"}";
     const api_resp = "{\"Id\":\"api123456789000\"}";
@@ -1628,16 +1628,16 @@ test "BUG-028: compose service networks attach container, label network, and enf
         },
     };
 
-    var ctx = th.MockApiCtx{ .server = &server, .replies = &replies };
+    var ctx = th.MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
     const thread = try std.Thread.spawn(.{}, th.runMockPodmanServer, .{&ctx});
     var joined = false;
     defer if (!joined) thread.join();
 
-    const client = http.Client{ .allocator = alloc, .socket_path = sock_path };
-    var out = std.ArrayList(u8).init(alloc);
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path, .io = std.testing.io };
+    var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
-    try executeCompose(&client, &logger, .{ .action = .up, .file = compose_path }, out.writer());
+    try executeCompose(&client, &logger, .{ .action = .up, .file = compose_path }, &out.writer);
     thread.join();
     joined = true;
     try std.testing.expectEqual(replies.len, ctx.matched);
@@ -1649,12 +1649,10 @@ test "BUG-029: compose up rolls back created containers and newly created networ
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(dir_path);
 
-    try tmp.dir.writeFile(.{
-        .sub_path = "compose.yaml",
-        .data =
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "compose.yaml", .data =
         \\name: demo
         \\networks:
         \\  back:
@@ -1671,11 +1669,11 @@ test "BUG-029: compose up rolls back created containers and newly created networ
 
     const sock_path = try std.fs.path.join(alloc, &.{ dir_path, "podman.sock" });
     defer alloc.free(sock_path);
-    const addr = try std.net.Address.initUnix(sock_path);
-    var server = try addr.listen(.{});
-    defer server.deinit();
+    const addr = try std.Io.net.UnixAddress.init(sock_path);
+    var server = try addr.listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
 
-    var logger = log.Logger.init(dir_path, false);
+    var logger = log.Logger.init(std.testing.io, dir_path, false);
     defer logger.deinit();
     logger.echo_stderr = false;
 
@@ -1746,22 +1744,22 @@ test "BUG-029: compose up rolls back created containers and newly created networ
         },
     };
 
-    var ctx = th.MockApiCtx{ .server = &server, .replies = &replies };
+    var ctx = th.MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
     const thread = try std.Thread.spawn(.{}, th.runMockPodmanServer, .{&ctx});
     var joined = false;
     defer if (!joined) thread.join();
 
-    const client = http.Client{ .allocator = alloc, .socket_path = sock_path };
-    var out = std.ArrayList(u8).init(alloc);
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path, .io = std.testing.io };
+    var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
     try std.testing.expectError(
         pod.ApiError.PodmanApiError,
-        executeCompose(&client, &logger, .{ .action = .up, .file = compose_path }, out.writer()),
+        executeCompose(&client, &logger, .{ .action = .up, .file = compose_path }, &out.writer),
     );
     try std.testing.expectError(
         pod.ApiError.PodmanApiError,
-        executeCompose(&client, &logger, .{ .action = .up, .file = compose_path }, out.writer()),
+        executeCompose(&client, &logger, .{ .action = .up, .file = compose_path }, &out.writer),
     );
     thread.join();
     joined = true;

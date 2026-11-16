@@ -38,8 +38,9 @@ echo "==> [3/4] Static memory & security audit"
 echo "==> [4/4] Runtime CLI & tamper-evident audit E2E"
 BIN="$ROOT_DIR/zig-out/bin/zigpod"
 if [ ! -x "$BIN" ]; then
-    if command -v zig >/dev/null 2>&1; then
-        zig build -Doptimize=ReleaseSafe
+    ZIG_BIN=$(sh scripts/find-zig.sh)
+    if command -v "$ZIG_BIN" >/dev/null 2>&1; then
+        "$ZIG_BIN" build -Doptimize=ReleaseSafe
     else
         echo "[SKIP] 'zig' not installed and zig-out/bin/zigpod absent; skipping compiled binary E2E."
         exit 0

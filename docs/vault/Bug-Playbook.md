@@ -511,3 +511,10 @@ status: active
 - **Root Cause**: Reuse `InvalidIdentifier` แทนที่จะนิยาม dedicated `InvalidTimeout` สำหรับ timeout validation domain
 - **Fix**: เพิ่ม `ApiError.InvalidTimeout` ใน [src/podman_types.zig](../../src/podman_types.zig), คืนจาก `restartContainer` ใน [src/podman_api.zig](../../src/podman_api.zig), และ map เข้า deny rule `"api.restartContainer"` ใน [src/main.zig](../../src/main.zig)
 - **Prevention Rule**: ห้าม reuse error code ข้าม validation domain — แต่ละขอบเขตการตรวจสอบต้องมี error code และ audit rule ที่สะท้อนสาเหตุที่แท้จริง
+
+## BUG-046: Zig 0.17 Migration Hazards — Sentinel Free Mismatch & Off-by-One Read Limits `#bug-pattern` `#memory-safety`
+
+- **Symptom**: หลังย้ายไป Zig 0.17.1 เทส `tarBuildContext`/`buildImage`/`compose up` panic ด้วย `free of [len: 74] mismatches allocation of [len: 75]` และ `saveImage` เทสล้มด้วย `error.StreamTooLong` เมื่อไฟล์มีขนาดเท่ากับ limit พอดี
+- **Root Cause**: `std.Io.Dir.realPathFileAlloc` คืน `[:0]u8` (จองเพิ่ม 1 ไบต์สำหรับ sentinel) แต่ถูก coerce เป็น `[]u8` ผ่าน return type แล้ว free ด้วยความยาวที่ไม่รวม sentinel; และ `readFileAlloc(..., .limited(n))` (unbuffered reader) ถือว่า "อ่านครบ n ไบต์" = เกิน limit ต่างจาก `readToEndAlloc(max)` ของ 0.13
+- **Fix**: เพิ่ม `utils.realpathAlloc` (คืน `[]u8` ความยาวตรง) ใช้ใน [src/podman_build.zig](../../src/podman_build.zig), [src/compose.zig](../../src/compose.zig), [src/podman_transfer.zig](../../src/podman_transfer.zig), [src/podman_validate.zig](../../src/podman_validate.zig); ใช้ `.limited(N + 1)` และ `utils.readFileToEndAlloc` ใน [src/utils.zig](../../src/utils.zig), [src/policy.zig](../../src/policy.zig), [src/log.zig](../../src/log.zig)
+- **Prevention Rule**: ห้ามคืน/เก็บผลจาก `realPathFileAlloc` เป็น `[]u8`; การอ่านไฟล์แบบจำกัดขนาดต้องคง semantics "ไม่เกิน N ไบต์" (`.limited(N + 1)`) — ดู `.agents/rules/zig-0.17-gotchas.md` ข้อ 6

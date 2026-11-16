@@ -1,19 +1,37 @@
 //! Shared mock Unix-socket HTTP server helpers for Podman API tests.
 const std = @import("std");
+const Io = std.Io;
 
-pub fn readHttpRequest(stream: std.net.Stream, buf: []u8) ![]const u8 {
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) ?usize {
+    if (needle.len == 0) return 0;
+    if (haystack.len < needle.len) return null;
+    outer: for (0..haystack.len - needle.len + 1) |i| {
+        for (needle, 0..) |nc, j| {
+            const hc = haystack[i + j];
+            if (std.ascii.toLower(hc) != std.ascii.toLower(nc)) continue :outer;
+        }
+        return i;
+    }
+    return null;
+}
+
+pub fn readHttpRequest(io: Io, stream: Io.net.Stream, buf: []u8) ![]const u8 {
     var total: usize = 0;
     var header_end: ?usize = null;
     var expected_total: ?usize = null;
     while (total < buf.len) {
-        const n = try stream.read(buf[total..]);
+        var data = [_][]u8{buf[total..]};
+        const n = (try (try io.operate(.{ .net_read = .{
+            .socket_handle = stream.socket.handle,
+            .data = &data,
+        } })).net_read).data_len;
         if (n == 0) break;
         total += n;
         if (header_end == null) {
             if (std.mem.indexOf(u8, buf[0..total], "\r\n\r\n")) |idx| {
                 header_end = idx;
                 var cl: usize = 0;
-                if (std.ascii.indexOfIgnoreCase(buf[0..idx], "content-length:")) |cl_pos| {
+                if (containsIgnoreCase(buf[0..idx], "content-length:")) |cl_pos| {
                     const after = buf[cl_pos + "content-length:".len .. idx];
                     const eol = std.mem.indexOfScalar(u8, after, '\r') orelse after.len;
                     cl = std.fmt.parseInt(usize, std.mem.trim(u8, after[0..eol], " \t"), 10) catch 0;
@@ -35,7 +53,8 @@ pub const ScriptedReply = struct {
 };
 
 pub const MockApiCtx = struct {
-    server: *std.net.Server,
+    io: Io,
+    server: *Io.net.Server,
     replies: []const ScriptedReply,
     matched: usize = 0,
     timeout_ms: i32 = 5_000,
@@ -58,17 +77,17 @@ fn pollReadable(fd: std.posix.fd_t, timeout_ms: i32) bool {
 pub fn runMockPodmanServer(ctx: *MockApiCtx) void {
     var buf: [4096]u8 = undefined;
     for (ctx.replies, 0..) |reply, idx| {
-        if (!pollReadable(ctx.server.stream.handle, ctx.timeout_ms)) {
+        if (!pollReadable(ctx.server.socket.handle, ctx.timeout_ms)) {
             ctx.timed_out = true;
             return;
         }
-        const conn = ctx.server.accept() catch return;
-        defer conn.stream.close();
-        if (!pollReadable(conn.stream.handle, ctx.timeout_ms)) {
+        const conn = ctx.server.accept(ctx.io) catch return;
+        defer conn.close(ctx.io);
+        if (!pollReadable(conn.socket.handle, ctx.timeout_ms)) {
             ctx.timed_out = true;
             return;
         }
-        const req = readHttpRequest(conn.stream, &buf) catch return;
+        const req = readHttpRequest(ctx.io, conn, &buf) catch return;
         const prefix_ok = std.mem.startsWith(u8, req, reply.expected_prefix);
         const sub_ok = if (reply.expected_substring) |sub| std.mem.indexOf(u8, req, sub) != null else true;
         if (prefix_ok and sub_ok) {
@@ -84,7 +103,24 @@ pub fn runMockPodmanServer(ctx: *MockApiCtx) void {
                 );
             }
         }
-        conn.stream.writeAll(reply.raw_response) catch return;
+        http_socket_write(conn.socket.handle, reply.raw_response);
+    }
+}
+
+fn http_socket_write(handle: Io.net.Socket.Handle, data: []const u8) void {
+    var remaining = data;
+    const linux = std.os.linux;
+    while (remaining.len > 0) {
+        const rc = linux.sendto(@intCast(handle), remaining.ptr, remaining.len, linux.MSG.NOSIGNAL, null, 0);
+        switch (linux.errno(rc)) {
+            .SUCCESS => {
+                const n: usize = @intCast(rc);
+                if (n == 0) return;
+                remaining = remaining[n..];
+            },
+            .AGAIN, .INTR => std.Thread.yield() catch {},
+            else => return,
+        }
     }
 }
 
@@ -92,93 +128,105 @@ pub fn runMockPodmanServer(ctx: *MockApiCtx) void {
 
 const ServeMode = enum { eof, keep_open };
 
-fn servePayloadOnce(server: *std.net.Server, payload: []const u8, mode: ServeMode) void {
-    const conn = server.accept() catch return;
-    defer conn.stream.close();
-    conn.stream.writeAll(payload) catch return;
-    if (mode == .eof) std.posix.shutdown(conn.stream.handle, .both) catch {};
+fn servePayloadOnce(server: *Io.net.Server, io: Io, payload: []const u8, mode: ServeMode) void {
+    const conn = server.accept(io) catch return;
+    defer conn.close(io);
+    http_socket_write(conn.socket.handle, payload);
+    if (mode == .eof) {
+        const rc = std.os.linux.shutdown(conn.socket.handle, std.os.linux.SHUT.RDWR);
+        if (std.os.linux.errno(rc) != .SUCCESS) {}
+    }
+}
+
+fn rep(comptime s: []const u8, comptime n: usize) [s.len * n]u8 {
+    var out: [s.len * n]u8 = undefined;
+    for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+    return out;
 }
 
 test "readHttpRequest reads Content-Length framed body across socket" {
     const alloc = std.testing.allocator;
+    const test_io = std.testing.io;
     const sock_path = try std.fmt.allocPrint(
         alloc,
         "/tmp/zp-th-frame-{d}.sock",
-        .{std.time.nanoTimestamp()},
+        .{Io.Clock.awake.now(test_io).nanoseconds},
     );
     defer alloc.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
+    defer Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try Io.net.UnixAddress.init(sock_path)).listen(test_io, .{});
+    defer server.deinit(test_io);
 
     const payload = "POST /v1.40/libpod/pods/create HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
-    const thread = try std.Thread.spawn(.{}, servePayloadOnce, .{ &server, payload, ServeMode.eof });
+    const thread = try std.Thread.spawn(.{}, servePayloadOnce, .{ &server, test_io, payload, ServeMode.eof });
 
-    const stream = try std.net.connectUnixSocket(sock_path);
-    defer stream.close();
+    const stream = try (try Io.net.UnixAddress.init(sock_path)).connect(test_io);
+    defer stream.close(test_io);
 
     const buf = try alloc.alloc(u8, 256);
     defer alloc.free(buf);
 
-    const got = try readHttpRequest(stream, buf);
+    const got = try readHttpRequest(test_io, stream, buf);
     thread.join();
     try std.testing.expectEqualStrings(payload, got);
 }
 
 test "readHttpRequest stops at header block without Content-Length" {
     const alloc = std.testing.allocator;
+    const test_io = std.testing.io;
     const sock_path = try std.fmt.allocPrint(
         alloc,
         "/tmp/zp-th-hdr-{d}.sock",
-        .{std.time.nanoTimestamp()},
+        .{Io.Clock.awake.now(test_io).nanoseconds},
     );
     defer alloc.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
+    defer Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try Io.net.UnixAddress.init(sock_path)).listen(test_io, .{});
+    defer server.deinit(test_io);
 
     const payload = "GET /v1.40/_ping HTTP/1.1\r\nHost: podman\r\n\r\n";
-    const thread = try std.Thread.spawn(.{}, servePayloadOnce, .{ &server, payload, ServeMode.keep_open });
+    const thread = try std.Thread.spawn(.{}, servePayloadOnce, .{ &server, test_io, payload, ServeMode.keep_open });
 
-    const stream = try std.net.connectUnixSocket(sock_path);
-    defer stream.close();
+    const stream = try (try Io.net.UnixAddress.init(sock_path)).connect(test_io);
+    defer stream.close(test_io);
 
     const buf = try alloc.alloc(u8, 256);
     defer alloc.free(buf);
 
-    const got = try readHttpRequest(stream, buf);
+    const got = try readHttpRequest(test_io, stream, buf);
     thread.join();
     try std.testing.expectEqualStrings(payload, got);
 }
 
 test "readHttpRequest treats malformed Content-Length as zero" {
     const alloc = std.testing.allocator;
+    const test_io = std.testing.io;
     const sock_path = try std.fmt.allocPrint(
         alloc,
         "/tmp/zp-th-badcl-{d}.sock",
-        .{std.time.nanoTimestamp()},
+        .{Io.Clock.awake.now(test_io).nanoseconds},
     );
     defer alloc.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
+    defer Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try Io.net.UnixAddress.init(sock_path)).listen(test_io, .{});
+    defer server.deinit(test_io);
 
     const payload = "GET /x HTTP/1.1\r\ncontent-length: abc\r\n\r\nbody-leftover";
-    const thread = try std.Thread.spawn(.{}, servePayloadOnce, .{ &server, payload, ServeMode.keep_open });
+    const thread = try std.Thread.spawn(.{}, servePayloadOnce, .{ &server, test_io, payload, ServeMode.keep_open });
 
-    const stream = try std.net.connectUnixSocket(sock_path);
-    defer stream.close();
+    const stream = try (try Io.net.UnixAddress.init(sock_path)).connect(test_io);
+    defer stream.close(test_io);
 
     const buf = try alloc.alloc(u8, 256);
     defer alloc.free(buf);
 
-    const got = try readHttpRequest(stream, buf);
+    const got = try readHttpRequest(test_io, stream, buf);
     thread.join();
     // Malformed Content-Length parses as 0, so the reader stops waiting for a
     // framed body (expected_total = header end) but still returns every byte
@@ -188,28 +236,29 @@ test "readHttpRequest treats malformed Content-Length as zero" {
 
 test "readHttpRequest caps output at buffer size" {
     const alloc = std.testing.allocator;
+    const test_io = std.testing.io;
     const sock_path = try std.fmt.allocPrint(
         alloc,
         "/tmp/zp-th-cap-{d}.sock",
-        .{std.time.nanoTimestamp()},
+        .{Io.Clock.awake.now(test_io).nanoseconds},
     );
     defer alloc.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
+    defer Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try Io.net.UnixAddress.init(sock_path)).listen(test_io, .{});
+    defer server.deinit(test_io);
 
-    const payload = "GET / HTTP/1.1\r\n\r\n" ++ "A" ** 64;
-    const thread = try std.Thread.spawn(.{}, servePayloadOnce, .{ &server, payload, ServeMode.eof });
+    const payload = "GET / HTTP/1.1\r\n\r\n" ++ rep("A", 64);
+    const thread = try std.Thread.spawn(.{}, servePayloadOnce, .{ &server, test_io, payload, ServeMode.eof });
 
-    const stream = try std.net.connectUnixSocket(sock_path);
-    defer stream.close();
+    const stream = try (try Io.net.UnixAddress.init(sock_path)).connect(test_io);
+    defer stream.close(test_io);
 
     const buf = try alloc.alloc(u8, 16);
     defer alloc.free(buf);
 
-    const got = try readHttpRequest(stream, buf);
+    const got = try readHttpRequest(test_io, stream, buf);
     thread.join();
     try std.testing.expectEqual(@as(usize, buf.len), got.len);
     try std.testing.expectEqualStrings(payload[0..buf.len], got);
@@ -217,28 +266,29 @@ test "readHttpRequest caps output at buffer size" {
 
 test "readHttpRequest returns partial payload on EOF before header end" {
     const alloc = std.testing.allocator;
+    const test_io = std.testing.io;
     const sock_path = try std.fmt.allocPrint(
         alloc,
         "/tmp/zp-th-partial-{d}.sock",
-        .{std.time.nanoTimestamp()},
+        .{Io.Clock.awake.now(test_io).nanoseconds},
     );
     defer alloc.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
+    defer Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try Io.net.UnixAddress.init(sock_path)).listen(test_io, .{});
+    defer server.deinit(test_io);
 
     const payload = "HTTP/1.1 200 OK\r\nX-Partial: 1\r\n";
-    const thread = try std.Thread.spawn(.{}, servePayloadOnce, .{ &server, payload, ServeMode.eof });
+    const thread = try std.Thread.spawn(.{}, servePayloadOnce, .{ &server, test_io, payload, ServeMode.eof });
 
-    const stream = try std.net.connectUnixSocket(sock_path);
-    defer stream.close();
+    const stream = try (try Io.net.UnixAddress.init(sock_path)).connect(test_io);
+    defer stream.close(test_io);
 
     const buf = try alloc.alloc(u8, 256);
     defer alloc.free(buf);
 
-    const got = try readHttpRequest(stream, buf);
+    const got = try readHttpRequest(test_io, stream, buf);
     thread.join();
     try std.testing.expectEqualStrings(payload, got);
 }
@@ -255,17 +305,18 @@ test "ScriptedReply defaults tolerate absent substring matcher" {
 
 test "runMockPodmanServer enforces poll timeout and tracks request mismatches" {
     const alloc = std.testing.allocator;
+    const test_io = std.testing.io;
     const sock_path = try std.fmt.allocPrint(
         alloc,
         "/tmp/zp-th-timeout-{d}.sock",
-        .{std.time.nanoTimestamp()},
+        .{Io.Clock.awake.now(test_io).nanoseconds},
     );
     defer alloc.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
+    defer Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try Io.net.UnixAddress.init(sock_path)).listen(test_io, .{});
+    defer server.deinit(test_io);
 
     const replies = [_]ScriptedReply{.{
         .expected_prefix = "GET /v1.40/expected HTTP/1.1\r\n",
@@ -274,6 +325,7 @@ test "runMockPodmanServer enforces poll timeout and tracks request mismatches" {
 
     // 1) Timed out cleanly when no client connects within timeout_ms.
     var timeout_ctx = MockApiCtx{
+        .io = test_io,
         .server = &server,
         .replies = &replies,
         .timeout_ms = 20,
@@ -285,6 +337,7 @@ test "runMockPodmanServer enforces poll timeout and tracks request mismatches" {
 
     // 2) Records mismatch_count without blocking when client sends an unexpected request.
     var mismatch_ctx = MockApiCtx{
+        .io = test_io,
         .server = &server,
         .replies = &replies,
         .timeout_ms = 500,
@@ -294,11 +347,15 @@ test "runMockPodmanServer enforces poll timeout and tracks request mismatches" {
     var joined = false;
     defer if (!joined) t2.join();
 
-    const stream = try std.net.connectUnixSocket(sock_path);
-    defer stream.close();
-    try stream.writeAll("GET /v1.40/wrong HTTP/1.1\r\nHost: podman\r\n\r\n");
+    const stream = try (try Io.net.UnixAddress.init(sock_path)).connect(test_io);
+    defer stream.close(test_io);
+    http_socket_write(stream.socket.handle, "GET /v1.40/wrong HTTP/1.1\r\nHost: podman\r\n\r\n");
     var rbuf: [64]u8 = undefined;
-    _ = try stream.read(&rbuf);
+    var rdata = [_][]u8{&rbuf};
+    _ = (try (try test_io.operate(.{ .net_read = .{
+        .socket_handle = stream.socket.handle,
+        .data = &rdata,
+    } })).net_read).data_len;
 
     t2.join();
     joined = true;

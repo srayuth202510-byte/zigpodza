@@ -1,7 +1,8 @@
 .{
-    .name = "zigpod",
+    .fingerprint = 0xd5e3effb45da9324,
+    .name = .zigpod,
     .version = "0.1.0",
-    .minimum_zig_version = "0.13.0",
+    .minimum_zig_version = "0.17.1",
     .dependencies = .{},
     .paths = .{
         "build.zig",

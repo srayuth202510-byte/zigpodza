@@ -1,6 +1,9 @@
 //! Container log demultiplexing and resource stats (CPU, memory, PIDs).
 const std = @import("std");
+const Io = std.Io;
 const http = @import("http.zig");
+const http_socket = @import("http_socket.zig");
+const http_socket_write = http_socket.http_socket_write;
 const log = @import("log.zig");
 const utils = @import("utils.zig");
 const types = @import("podman_types.zig");
@@ -26,7 +29,7 @@ pub fn LogDemuxer(comptime WriterType: type) type {
     return struct {
         allocator: std.mem.Allocator,
         writer: WriterType,
-        buf: std.ArrayListUnmanaged(u8) = .{},
+        buf: std.array_list.Aligned(u8, null) = .empty,
         raw_mode: bool = false,
         seen_valid_frame: bool = false,
 
@@ -126,10 +129,9 @@ pub fn computeMemoryUsage(ms_opt: ?ContainerStats.MemoryStats) struct { used: u6
     return .{ .used = used, .limit = limit, .percent = percent };
 }
 
-
 fn formatStatsRow(writer: anytype, fallback_id: []const u8, s: ContainerStats) !void {
     const id = if (s.id.len > 0) s.id else fallback_id;
-    const name = std.mem.trimLeft(u8, s.name, "/");
+    const name = std.mem.trimStart(u8, s.name, "/");
     const cpu_pct = computeCpuPercent(s);
     const mem = computeMemoryUsage(s.memory_stats);
     const pids: u64 = if (s.pids_stats) |p| p.current orelse 0 else 0;
@@ -237,7 +239,7 @@ fn StatsStreamCtx(comptime WriterType: type) type {
         allocator: std.mem.Allocator,
         id: []const u8,
         writer: WriterType,
-        line_buf: std.ArrayListUnmanaged(u8) = .{},
+        line_buf: std.array_list.Aligned(u8, null) = .empty,
         frames: usize = 0,
 
         fn deinit(self: *@This()) void {
@@ -352,7 +354,7 @@ fn fetchStatsJsonEntry(
     const s = parsed.value;
     const entry = StatsJsonEntry{
         .id = if (s.id.len > 0) s.id else id,
-        .name = std.mem.trimLeft(u8, s.name, "/"),
+        .name = std.mem.trimStart(u8, s.name, "/"),
         .cpu_percent = computeCpuPercent(s),
         .mem_used_bytes = computeMemoryUsage(s.memory_stats).used,
         .mem_limit_bytes = computeMemoryUsage(s.memory_stats).limit,
@@ -360,7 +362,7 @@ fn fetchStatsJsonEntry(
         .pids = if (s.pids_stats) |p| p.current orelse 0 else 0,
     };
 
-    const item_json = try std.json.stringifyAlloc(client.allocator, entry, .{});
+    const item_json = try std.json.Stringify.valueAlloc(client.allocator, entry, .{});
     defer client.allocator.free(item_json);
     if (!first) try writer.writeByte(',');
     try writer.writeAll(item_json);
@@ -458,56 +460,56 @@ pub fn demuxLogs(raw: []const u8, writer: anytype) !void {
 
 // ---------------------------------------------------------------- tests
 
-test "demuxLogs handles multiplexed docker stream frames and zero-length frame" {    const frame = [_]u8{
-        1, 0, 0, 0, 0, 0, 0, 6, 'h', 'e', 'l', 'l', 'o', '\n',
-        1, 0, 0, 0, 0, 0, 0, 0,
-        2, 0, 0, 0, 0, 0, 0, 4, 'e', 'r', 'r', '\n',
+test "demuxLogs handles multiplexed docker stream frames and zero-length frame" {
+    const frame = [_]u8{
+        1, 0, 0,   0,   0,   0,    0, 6, 'h', 'e', 'l', 'l', 'o', '\n',
+        1, 0, 0,   0,   0,   0,    0, 0, 2,   0,   0,   0,   0,   0,
+        0, 4, 'e', 'r', 'r', '\n',
     };
-    var out = std.ArrayList(u8).init(std.testing.allocator);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
-    try demuxLogs(&frame, out.writer());
-    try std.testing.expectEqualStrings("hello\nerr\n", out.items);
+    try demuxLogs(&frame, &out.writer);
+    try std.testing.expectEqualStrings("hello\nerr\n", out.written());
 }
 
 test "demuxLogs falls back to plain text on malformed frames" {
     const plain = "plain log output\nline 2\n";
-    var out = std.ArrayList(u8).init(std.testing.allocator);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
-    try demuxLogs(plain, out.writer());
-    try std.testing.expectEqualStrings(plain, out.items);
+    try demuxLogs(plain, &out.writer);
+    try std.testing.expectEqualStrings(plain, out.written());
 
     // Invalid stream type 3
-    out.clearRetainingCapacity();
+    out.writer.end = 0;
     const bad_stream = [_]u8{ 3, 0, 0, 0, 0, 0, 0, 2, 'h', 'i' };
-    try demuxLogs(&bad_stream, out.writer());
-    try std.testing.expectEqualSlices(u8, &bad_stream, out.items);
+    try demuxLogs(&bad_stream, &out.writer);
+    try std.testing.expectEqualSlices(u8, &bad_stream, out.written());
 
     // Non-zero reserved byte
-    out.clearRetainingCapacity();
+    out.writer.end = 0;
     const bad_reserved = [_]u8{ 1, 0, 1, 0, 0, 0, 0, 2, 'h', 'i' };
-    try demuxLogs(&bad_reserved, out.writer());
-    try std.testing.expectEqualSlices(u8, &bad_reserved, out.items);
+    try demuxLogs(&bad_reserved, &out.writer);
+    try std.testing.expectEqualSlices(u8, &bad_reserved, out.written());
 
     // Frame size exceeds buffer length
-    out.clearRetainingCapacity();
+    out.writer.end = 0;
     const truncated_payload = [_]u8{ 1, 0, 0, 0, 0, 0, 0, 99, 'h', 'i' };
-    try demuxLogs(&truncated_payload, out.writer());
-    try std.testing.expectEqualSlices(u8, &truncated_payload, out.items);
+    try demuxLogs(&truncated_payload, &out.writer);
+    try std.testing.expectEqualSlices(u8, &truncated_payload, out.written());
 
     // Truncated header (< 8 bytes)
-    out.clearRetainingCapacity();
+    out.writer.end = 0;
     const short_hdr = [_]u8{ 1, 0, 0, 0, 0 };
-    try demuxLogs(&short_hdr, out.writer());
-    try std.testing.expectEqualSlices(u8, &short_hdr, out.items);
+    try demuxLogs(&short_hdr, &out.writer);
+    try std.testing.expectEqualSlices(u8, &short_hdr, out.written());
 }
 
 test "demuxLogs handles empty slice" {
-    var out = std.ArrayList(u8).init(std.testing.allocator);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
-    try demuxLogs("", out.writer());
-    try std.testing.expectEqual(@as(usize, 0), out.items.len);
+    try demuxLogs("", &out.writer);
+    try std.testing.expectEqual(@as(usize, 0), out.written().len);
 }
-
 
 test "computeCpuPercent and computeMemoryUsage handle normal and boundary cases" {
     const s = ContainerStats{
@@ -566,14 +568,14 @@ test "statsContainers fetches metrics via mock Unix socket and enforces identifi
     const sock_path = try std.fmt.allocPrint(
         std.testing.allocator,
         "/tmp/zp-stats-test-{d}.sock",
-        .{std.time.milliTimestamp()},
+        .{Io.Clock.awake.now(std.testing.io).nanoseconds},
     );
     defer std.testing.allocator.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
 
     const list_json = "[{\"Id\":\"abcdef1234567890\",\"Image\":\"alpine:3.20\",\"Status\":\"Up\",\"Names\":[\"/web\"]}]";
     const list_resp = std.fmt.comptimePrint(
@@ -606,43 +608,44 @@ test "statsContainers fetches metrics via mock Unix socket and enforces identifi
         },
     };
 
-    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    var ctx = MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
     const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
     var joined = false;
     defer if (!joined) thread.join();
 
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
     const client = http.Client{
         .allocator = std.testing.allocator,
         .socket_path = sock_path,
+        .io = std.testing.io,
     };
-    var logger = log.Logger{ .echo_stderr = false };
     defer logger.deinit();
 
     // Invalid identifier must be rejected before any socket traffic.
-    var bad_out = std.ArrayList(u8).init(std.testing.allocator);
+    var bad_out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer bad_out.deinit();
     try std.testing.expectError(
         ApiError.InvalidIdentifier,
-        statsContainers(&client, &logger, &.{"../bad"}, false, bad_out.writer()),
+        statsContainers(&client, &logger, &.{"../bad"}, false, &bad_out.writer),
     );
 
     // 1) All running containers (empty list -> GET /containers/json -> GET /stats?stream=false)
-    var out1 = std.ArrayList(u8).init(std.testing.allocator);
+    var out1: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out1.deinit();
-    try statsContainers(&client, &logger, &.{}, false, out1.writer());
-    try std.testing.expect(std.mem.indexOf(u8, out1.items, "CONTAINER ID") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out1.items, "abcdef123456") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out1.items, "web") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out1.items, "20.00%") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out1.items, "48.0 MB / 256.0 MB") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out1.items, "18.75%") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out1.items, "12") != null);
+    try statsContainers(&client, &logger, &.{}, false, &out1.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out1.written(), "CONTAINER ID") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out1.written(), "abcdef123456") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out1.written(), "web") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out1.written(), "20.00%") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out1.written(), "48.0 MB / 256.0 MB") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out1.written(), "18.75%") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out1.written(), "12") != null);
 
     // 2) Explicit container name
-    var out2 = std.ArrayList(u8).init(std.testing.allocator);
+    var out2: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out2.deinit();
-    try statsContainers(&client, &logger, &.{"web"}, false, out2.writer());
-    try std.testing.expect(std.mem.indexOf(u8, out2.items, "48.0 MB / 256.0 MB") != null);
+    try statsContainers(&client, &logger, &.{"web"}, false, &out2.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out2.written(), "48.0 MB / 256.0 MB") != null);
 
     thread.join();
     joined = true;
@@ -650,12 +653,12 @@ test "statsContainers fetches metrics via mock Unix socket and enforces identifi
 }
 
 test "LogDemuxer handles split frames and raw TTY passthrough" {
-    var out = std.ArrayList(u8).init(std.testing.allocator);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
 
-    var d = LogDemuxer(@TypeOf(out.writer())){
+    var d = LogDemuxer(*std.Io.Writer){
         .allocator = std.testing.allocator,
-        .writer = out.writer(),
+        .writer = &out.writer,
     };
     defer d.deinit();
 
@@ -665,22 +668,21 @@ test "LogDemuxer handles split frames and raw TTY passthrough" {
     try d.push(frame[4..10]);
     try d.push(frame[10..]);
     try d.flush();
-    try std.testing.expectEqualStrings("hello world", out.items);
+    try std.testing.expectEqualStrings("hello world", out.written());
 
     // Raw TTY text without multiplexed header.
-    var raw_out = std.ArrayList(u8).init(std.testing.allocator);
+    var raw_out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer raw_out.deinit();
-    var d_raw = LogDemuxer(@TypeOf(raw_out.writer())){
+    var d_raw = LogDemuxer(*std.Io.Writer){
         .allocator = std.testing.allocator,
-        .writer = raw_out.writer(),
+        .writer = &raw_out.writer,
     };
     defer d_raw.deinit();
     try d_raw.push("plain tty ");
     try d_raw.push("output\n");
     try d_raw.flush();
-    try std.testing.expectEqualStrings("plain tty output\n", raw_out.items);
+    try std.testing.expectEqualStrings("plain tty output\n", raw_out.written());
 }
-
 
 test "fuzz demuxLogs and LogDemuxer with arbitrary split boundaries and random frames" {
     const alloc = std.testing.allocator;
@@ -690,9 +692,9 @@ test "fuzz demuxLogs and LogDemuxer with arbitrary split boundaries and random f
     // Part A: Differential property test — valid multiplexed stream split at random chunk sizes.
     var iter: usize = 0;
     while (iter < 48) : (iter += 1) {
-        var wire = std.ArrayList(u8).init(alloc);
+        var wire: std.Io.Writer.Allocating = .init(alloc);
         defer wire.deinit();
-        var expected = std.ArrayList(u8).init(alloc);
+        var expected: std.Io.Writer.Allocating = .init(alloc);
         defer expected.deinit();
 
         const num_frames = rng.intRangeAtMost(usize, 1, 8);
@@ -702,36 +704,37 @@ test "fuzz demuxLogs and LogDemuxer with arbitrary split boundaries and random f
             const payload_len = rng.intRangeAtMost(usize, 0, 64);
             var hdr: [8]u8 = .{ stream_type, 0, 0, 0, 0, 0, 0, 0 };
             std.mem.writeInt(u32, hdr[4..8], @intCast(payload_len), .big);
-            try wire.appendSlice(&hdr);
+            try wire.writer.writeAll(&hdr);
 
-            const start = expected.items.len;
-            try expected.resize(start + payload_len);
-            rng.bytes(expected.items[start .. start + payload_len]);
-            try wire.appendSlice(expected.items[start .. start + payload_len]);
+            var payload_buf: [64]u8 = undefined;
+            const payload = payload_buf[0..payload_len];
+            rng.bytes(payload);
+            try expected.writer.writeAll(payload);
+            try wire.writer.writeAll(payload);
         }
 
-        var oneshot_out = std.ArrayList(u8).init(alloc);
+        var oneshot_out: std.Io.Writer.Allocating = .init(alloc);
         defer oneshot_out.deinit();
-        try demuxLogs(wire.items, oneshot_out.writer());
-        try std.testing.expectEqualSlices(u8, expected.items, oneshot_out.items);
+        try demuxLogs(wire.written(), &oneshot_out.writer);
+        try std.testing.expectEqualSlices(u8, expected.written(), oneshot_out.written());
 
-        var stream_out = std.ArrayList(u8).init(alloc);
+        var stream_out: std.Io.Writer.Allocating = .init(alloc);
         defer stream_out.deinit();
-        var demuxer = LogDemuxer(@TypeOf(stream_out.writer())){
+        var demuxer = LogDemuxer(*std.Io.Writer){
             .allocator = alloc,
-            .writer = stream_out.writer(),
+            .writer = &stream_out.writer,
         };
         defer demuxer.deinit();
 
         var pos: usize = 0;
-        while (pos < wire.items.len) {
+        while (pos < wire.written().len) {
             const step = rng.intRangeAtMost(usize, 1, 19);
-            const end = @min(wire.items.len, pos + step);
-            try demuxer.push(wire.items[pos..end]);
+            const end = @min(wire.written().len, pos + step);
+            try demuxer.push(wire.written()[pos..end]);
             pos = end;
         }
         try demuxer.flush();
-        try std.testing.expectEqualSlices(u8, expected.items, stream_out.items);
+        try std.testing.expectEqualSlices(u8, expected.written(), stream_out.written());
     }
 
     // Part B: Arbitrary/corrupted byte streams must never panic, overflow, or leak.
@@ -742,15 +745,15 @@ test "fuzz demuxLogs and LogDemuxer with arbitrary split boundaries and random f
         defer alloc.free(buf);
         rng.bytes(buf);
 
-        var out1 = std.ArrayList(u8).init(alloc);
+        var out1: std.Io.Writer.Allocating = .init(alloc);
         defer out1.deinit();
-        try demuxLogs(buf, out1.writer());
+        try demuxLogs(buf, &out1.writer);
 
-        var out2 = std.ArrayList(u8).init(alloc);
+        var out2: std.Io.Writer.Allocating = .init(alloc);
         defer out2.deinit();
-        var demuxer = LogDemuxer(@TypeOf(out2.writer())){
+        var demuxer = LogDemuxer(*std.Io.Writer){
             .allocator = alloc,
-            .writer = out2.writer(),
+            .writer = &out2.writer,
         };
         defer demuxer.deinit();
 
@@ -765,8 +768,7 @@ test "fuzz demuxLogs and LogDemuxer with arbitrary split boundaries and random f
     }
 }
 
-
-fn runStreamStatsMockServer(server: *std.net.Server) void {
+fn runStreamStatsMockServer(server: *Io.net.Server, io: Io) void {
     const frame1 =
         "{\"id\":\"abcdef1234567890\",\"name\":\"/web\"," ++
         "\"cpu_stats\":{\"cpu_usage\":{\"total_usage\":200000000},\"system_cpu_usage\":2000000000,\"online_cpus\":2}," ++
@@ -783,11 +785,12 @@ fn runStreamStatsMockServer(server: *std.net.Server) void {
         "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{x}\r\n{s}\r\n{x}\r\n{s}\r\n0\r\n\r\n",
         .{ frame1.len, frame1, frame2.len, frame2 },
     );
-    if (server.accept()) |conn| {
-        defer conn.stream.close();
+    if (server.accept(io)) |conn| {
+        defer conn.close(io);
         var req_buf: [512]u8 = undefined;
-        _ = conn.stream.read(&req_buf) catch {};
-        conn.stream.writeAll(raw) catch {};
+        var rdata = [_][]u8{&req_buf};
+        _ = (io.operate(.{ .net_read = .{ .socket_handle = conn.socket.handle, .data = &rdata } }) catch return).net_read catch return;
+        http_socket.http_socket_write(conn.socket.handle, raw);
     } else |_| {}
 }
 
@@ -796,43 +799,43 @@ test "streamContainerStats streams live chunked JSON metrics (stream=true)" {
     const sock_path = try std.fmt.allocPrint(
         alloc,
         "/tmp/zp-stream-stats-{d}.sock",
-        .{std.time.nanoTimestamp()},
+        .{Io.Clock.awake.now(std.testing.io).nanoseconds},
     );
     defer alloc.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
 
-    const thread = try std.Thread.spawn(.{}, runStreamStatsMockServer, .{&server});
+    const thread = try std.Thread.spawn(.{}, runStreamStatsMockServer, .{ &server, std.testing.io });
     var joined = false;
     defer if (!joined) thread.join();
 
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
+    defer logger.deinit();
     const client = http.Client{
         .allocator = alloc,
         .socket_path = sock_path,
+        .io = std.testing.io,
     };
-    var logger = log.Logger{ .echo_stderr = false };
-    defer logger.deinit();
 
-    var out = std.ArrayList(u8).init(alloc);
+    var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
     // Reject path traversal identifier before any socket traffic.
     try std.testing.expectError(
         ApiError.InvalidIdentifier,
-        streamContainerStats(&client, &logger, "../bad", out.writer()),
+        streamContainerStats(&client, &logger, "../bad", &out.writer),
     );
 
-    try streamContainerStats(&client, &logger, "web", out.writer());
+    try streamContainerStats(&client, &logger, "web", &out.writer);
     thread.join();
     joined = true;
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "CONTAINER ID") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "20.00%") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "32.0 MB / 256.0 MB") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "60.00%") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "64.0 MB / 256.0 MB") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "CONTAINER ID") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "20.00%") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "32.0 MB / 256.0 MB") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "60.00%") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "64.0 MB / 256.0 MB") != null);
 }
-

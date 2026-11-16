@@ -340,7 +340,6 @@ fn parsePodCmd(args: []const []const u8) ParseError!Command {
     return error.UnknownCommand;
 }
 
-
 fn noArgs(args: []const []const u8, cmd: Command) ParseError!Command {
     if (args.len > 0) return if (isFlag(args[0])) error.UnknownFlag else error.TooManyArguments;
     return cmd;
@@ -447,25 +446,24 @@ fn parseLogs(args: []const []const u8) ParseError!Command {
     return .{ .logs = opts };
 }
 
-
 fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!RunOpts {
     var opts = RunOpts{ .image = "" };
-    var env = std.ArrayList([]const u8).init(allocator);
-    errdefer env.deinit();
-    var env_files = std.ArrayList([]const u8).init(allocator);
-    errdefer env_files.deinit();
-    var volumes = std.ArrayList(Volume).init(allocator);
-    errdefer volumes.deinit();
-    var ports = std.ArrayList(PortMapping).init(allocator);
-    errdefer ports.deinit();
-    var labels = std.ArrayList(Label).init(allocator);
-    errdefer labels.deinit();
-    var ulimits = std.ArrayList(UlimitSpec).init(allocator);
-    errdefer ulimits.deinit();
-    var cap_drop = std.ArrayList([]const u8).init(allocator);
-    errdefer cap_drop.deinit();
-    var cap_add = std.ArrayList([]const u8).init(allocator);
-    errdefer cap_add.deinit();
+    var env: std.ArrayList([]const u8) = .empty;
+    errdefer env.deinit(allocator);
+    var env_files: std.ArrayList([]const u8) = .empty;
+    errdefer env_files.deinit(allocator);
+    var volumes: std.ArrayList(Volume) = .empty;
+    errdefer volumes.deinit(allocator);
+    var ports: std.ArrayList(PortMapping) = .empty;
+    errdefer ports.deinit(allocator);
+    var labels: std.ArrayList(Label) = .empty;
+    errdefer labels.deinit(allocator);
+    var ulimits: std.ArrayList(UlimitSpec) = .empty;
+    errdefer ulimits.deinit(allocator);
+    var cap_drop: std.ArrayList([]const u8) = .empty;
+    errdefer cap_drop.deinit(allocator);
+    var cap_add: std.ArrayList([]const u8) = .empty;
+    errdefer cap_add.deinit(allocator);
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -489,15 +487,15 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
         } else if (eql(a, "--name")) {
             opts.name = try takeValue(args, &i);
         } else if (eql(a, "-e") or eql(a, "--env")) {
-            try env.append(try takeValue(args, &i));
+            try env.append(allocator, try takeValue(args, &i));
         } else if (eql(a, "-v") or eql(a, "--volume")) {
-            try volumes.append(try parseVolumeSpec(try takeValue(args, &i)));
+            try volumes.append(allocator, try parseVolumeSpec(try takeValue(args, &i)));
         } else if (std.mem.startsWith(u8, a, "--volume=")) {
-            try volumes.append(try parseVolumeSpec(a["--volume=".len..]));
+            try volumes.append(allocator, try parseVolumeSpec(a["--volume=".len..]));
         } else if (eql(a, "-p") or eql(a, "--publish")) {
-            try ports.append(try parsePortSpec(try takeValue(args, &i)));
+            try ports.append(allocator, try parsePortSpec(try takeValue(args, &i)));
         } else if (std.mem.startsWith(u8, a, "--publish=")) {
-            try ports.append(try parsePortSpec(a["--publish=".len..]));
+            try ports.append(allocator, try parsePortSpec(a["--publish=".len..]));
         } else if (eql(a, "--network")) {
             opts.network = try parseNetworkMode(try takeValue(args, &i));
         } else if (std.mem.startsWith(u8, a, "--network=")) {
@@ -511,13 +509,13 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
         } else if (std.mem.startsWith(u8, a, "--user=")) {
             opts.user = try parseUserSpec(a["--user=".len..]);
         } else if (eql(a, "--cap-drop")) {
-            try cap_drop.append(try parseCapName(try takeValue(args, &i)));
+            try cap_drop.append(allocator, try parseCapName(try takeValue(args, &i)));
         } else if (std.mem.startsWith(u8, a, "--cap-drop=")) {
-            try cap_drop.append(try parseCapName(a["--cap-drop=".len..]));
+            try cap_drop.append(allocator, try parseCapName(a["--cap-drop=".len..]));
         } else if (eql(a, "--cap-add")) {
-            try cap_add.append(try parseCapName(try takeValue(args, &i)));
+            try cap_add.append(allocator, try parseCapName(try takeValue(args, &i)));
         } else if (std.mem.startsWith(u8, a, "--cap-add=")) {
-            try cap_add.append(try parseCapName(a["--cap-add=".len..]));
+            try cap_add.append(allocator, try parseCapName(a["--cap-add=".len..]));
         } else if (eql(a, "-i") or eql(a, "--interactive")) {
             opts.interactive = true;
         } else if (eql(a, "-t") or eql(a, "--tty")) {
@@ -538,13 +536,13 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
         } else if (std.mem.startsWith(u8, a, "--cpus=")) {
             opts.nano_cpus = try parseCpuNanos(a["--cpus=".len..]);
         } else if (eql(a, "--env-file")) {
-            try env_files.append(try parseEnvFilePath(try takeValue(args, &i)));
+            try env_files.append(allocator, try parseEnvFilePath(try takeValue(args, &i)));
         } else if (std.mem.startsWith(u8, a, "--env-file=")) {
-            try env_files.append(try parseEnvFilePath(a["--env-file=".len..]));
+            try env_files.append(allocator, try parseEnvFilePath(a["--env-file=".len..]));
         } else if (eql(a, "-l") or eql(a, "--label")) {
-            try labels.append(try parseLabelSpec(try takeValue(args, &i)));
+            try labels.append(allocator, try parseLabelSpec(try takeValue(args, &i)));
         } else if (std.mem.startsWith(u8, a, "--label=")) {
-            try labels.append(try parseLabelSpec(a["--label=".len..]));
+            try labels.append(allocator, try parseLabelSpec(a["--label=".len..]));
         } else if (eql(a, "--entrypoint")) {
             opts.entrypoint = try parseEntrypoint(try takeValue(args, &i));
         } else if (std.mem.startsWith(u8, a, "--entrypoint=")) {
@@ -562,9 +560,9 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
         } else if (std.mem.startsWith(u8, a, "--shm-size=")) {
             opts.shm_size = try parseShmSizeBytes(a["--shm-size=".len..]);
         } else if (eql(a, "--ulimit")) {
-            try ulimits.append(try parseUlimitSpec(try takeValue(args, &i)));
+            try ulimits.append(allocator, try parseUlimitSpec(try takeValue(args, &i)));
         } else if (std.mem.startsWith(u8, a, "--ulimit=")) {
-            try ulimits.append(try parseUlimitSpec(a["--ulimit=".len..]));
+            try ulimits.append(allocator, try parseUlimitSpec(a["--ulimit=".len..]));
         } else if (eql(a, "--init")) {
             opts.init = true;
         } else if (eql(a, "--health-cmd")) {
@@ -583,21 +581,21 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
     if (opts.health_interval_ns != null and opts.health_cmd == null) return error.InvalidValue;
     opts.image = args[i];
     opts.cmd = args[i + 1 ..];
-    opts.env = try env.toOwnedSlice();
+    opts.env = try env.toOwnedSlice(allocator);
     errdefer allocator.free(opts.env);
-    opts.env_files = try env_files.toOwnedSlice();
+    opts.env_files = try env_files.toOwnedSlice(allocator);
     errdefer allocator.free(opts.env_files);
-    opts.volumes = try volumes.toOwnedSlice();
+    opts.volumes = try volumes.toOwnedSlice(allocator);
     errdefer allocator.free(opts.volumes);
-    opts.ports = try ports.toOwnedSlice();
+    opts.ports = try ports.toOwnedSlice(allocator);
     errdefer allocator.free(opts.ports);
-    opts.labels = try labels.toOwnedSlice();
+    opts.labels = try labels.toOwnedSlice(allocator);
     errdefer allocator.free(opts.labels);
-    opts.ulimits = try ulimits.toOwnedSlice();
+    opts.ulimits = try ulimits.toOwnedSlice(allocator);
     errdefer allocator.free(opts.ulimits);
-    opts.cap_drop = try cap_drop.toOwnedSlice();
+    opts.cap_drop = try cap_drop.toOwnedSlice(allocator);
     errdefer allocator.free(opts.cap_drop);
-    opts.cap_add = try cap_add.toOwnedSlice();
+    opts.cap_add = try cap_add.toOwnedSlice(allocator);
     return opts;
 }
 
@@ -605,16 +603,16 @@ fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!R
 /// name; everything after it is the command, like docker.
 fn parseExec(allocator: std.mem.Allocator, args: []const []const u8) ParseError!ExecOpts {
     var opts = ExecOpts{ .container = "" };
-    var env = std.ArrayList([]const u8).init(allocator);
-    errdefer env.deinit();
+    var env: std.ArrayList([]const u8) = .empty;
+    errdefer env.deinit(allocator);
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const a = args[i];
         if (eql(a, "-e") or eql(a, "--env")) {
-            try env.append(try takeValue(args, &i));
+            try env.append(allocator, try takeValue(args, &i));
         } else if (std.mem.startsWith(u8, a, "--env=")) {
-            try env.append(a["--env=".len..]);
+            try env.append(allocator, a["--env=".len..]);
         } else if (eql(a, "-u") or eql(a, "--user")) {
             opts.user = try parseUserSpec(try takeValue(args, &i));
         } else if (std.mem.startsWith(u8, a, "--user=")) {
@@ -637,7 +635,7 @@ fn parseExec(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
     if (i >= args.len) return error.MissingArgument;
     opts.container = args[i];
     opts.cmd = args[i + 1 ..];
-    opts.env = try env.toOwnedSlice();
+    opts.env = try env.toOwnedSlice(allocator);
     errdefer allocator.free(opts.env);
     if (opts.cmd.len == 0) return error.MissingArgument;
     return opts;
@@ -645,8 +643,8 @@ fn parseExec(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
 
 /// Parses `stats [--no-stream] [-a|--all] [--json] [CONTAINER...]`.
 fn parseStats(allocator: std.mem.Allocator, args: []const []const u8) ParseError!StatsOpts {
-    var containers = std.ArrayList([]const u8).init(allocator);
-    errdefer containers.deinit();
+    var containers: std.ArrayList([]const u8) = .empty;
+    errdefer containers.deinit(allocator);
 
     var opts = StatsOpts{};
     for (args) |a| {
@@ -659,13 +657,12 @@ fn parseStats(allocator: std.mem.Allocator, args: []const []const u8) ParseError
         } else if (isFlag(a)) {
             return error.UnknownFlag;
         } else {
-            try containers.append(a);
+            try containers.append(allocator, a);
         }
     }
-    opts.containers = try containers.toOwnedSlice();
+    opts.containers = try containers.toOwnedSlice(allocator);
     return opts;
 }
-
 
 /// Parses `kill [-s|--signal SIGNAL] CONTAINER`.
 fn parseKill(args: []const []const u8) ParseError!Command {
@@ -1225,7 +1222,7 @@ test "run error path frees env allocations without leaks" {
 
 test "simple commands" {
     try std.testing.expect((try testParse(&.{})).command == .help);
-    try std.testing.expect((try testParse(&.{ "-h" })).command == .help);
+    try std.testing.expect((try testParse(&.{"-h"})).command == .help);
     try std.testing.expect((try testParse(&.{"--help"})).command == .help);
     try std.testing.expect((try testParse(&.{"help"})).command == .help);
     try std.testing.expect((try testParse(&.{"--version"})).command == .client_version);
@@ -1268,7 +1265,11 @@ test "search, save, load, export, and import parsers" {
     try std.testing.expectEqualStrings("/tmp/img.tar", sv.output);
     const sv2 = (try testParse(&.{ "save", "--output=/x.tar", "alpine" })).command.save;
     try std.testing.expectEqualStrings("/x.tar", sv2.output);
-    const sv3 = (try testParse(&.{ "save", "-o=/y.tar", "alpine", })).command.save;
+    const sv3 = (try testParse(&.{
+        "save",
+        "-o=/y.tar",
+        "alpine",
+    })).command.save;
     try std.testing.expectEqualStrings("/y.tar", sv3.output);
     try std.testing.expectError(error.MissingValue, testParse(&.{ "save", "alpine" }));
     try std.testing.expectError(error.MissingArgument, testParse(&.{ "save", "-o", "/x.tar" }));
@@ -1503,7 +1504,7 @@ test "parse exec command with env, user, and workdir" {
 
 test "parse exec rejects malformed specs without leaking allocations" {
     const alloc = std.testing.allocator;
-    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "exec" }));
+    try std.testing.expectError(error.MissingArgument, parse(alloc, &.{"exec"}));
     try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "exec", "web" }));
     try std.testing.expectError(error.MissingArgument, parse(alloc, &.{ "exec", "-e", "A=1" }));
     try std.testing.expectError(error.UnknownFlag, parse(alloc, &.{ "exec", "--bogus", "web", "ls" }));

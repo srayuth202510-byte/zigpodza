@@ -11,14 +11,8 @@ ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT_DIR"
 
 BIN="${ZIGPOD_BIN:-./zig-out/bin/zigpod}"
-ZIG_DEFAULT="/home/mitsword/.config/Code - OSS/User/globalStorage/ziglang.vscode-zig/zig/x86_64-linux-0.13.0/zig"
-if [ -n "${ZIG:-}" ]; then
-    ZIG_BIN="$ZIG"
-elif command -v zig >/dev/null 2>&1; then
-    ZIG_BIN=$(command -v zig)
-elif [ -x "$ZIG_DEFAULT" ]; then
-    ZIG_BIN="$ZIG_DEFAULT"
-else
+ZIG_BIN=$(sh scripts/find-zig.sh)
+if [ "$ZIG_BIN" = "zig" ] && ! command -v zig >/dev/null 2>&1; then
     ZIG_BIN=""
 fi
 

@@ -12,13 +12,13 @@
 
 3. **มาตรฐาน Memory & Tests (บังคับ)**:
    - ทุก unit test ที่มีการจองหน่วยความจำต้องใช้ `std.testing.allocator` เพื่อตรวจจับ memory leak, double-free และ invalid free (ห้ามใช้ `page_allocator` หรือ `ArenaAllocator` ใน `test` blocks)
-   - โค้ด runtime ใน `src/main.zig` ต้องตรวจผลจาก `gpa.deinit() == .leak` และไม่ปล่อยผ่าน
+   - โค้ด runtime ใน `src/main.zig` ต้องตรวจผลจาก `debug_allocator.deinit() == .leak` และไม่ปล่อยผ่าน
    - ทุกโมดูลต้องมีเทสทั้ง happy path, error path, malformed input และ boundary conditions
 
 4. **กลไกจับผิดอัตโนมัติ (ต้องรันหลังแก้โค้ด)**:
    - หลังแก้ไขไฟล์ใน `src/` ต้องรัน `./scripts/auto-audit.sh` (และ `./scripts/security-check.sh --require-zig` เมื่อมี `zig`) เพื่อยืนยันว่าไม่ละเมิด invariants
    - ปฏิบัติตามกฎการเขียน test, mock server, error mapping และ shell E2E เพิ่มเติมใน `.agents/rules/testing-and-shell-safety.md` (ป้องกัน `BUG-038`–`BUG-041`)
-   - ปฏิบัติตามข้อควรระวังของคอมไพเลอร์ Zig 0.13 และเช็กลิสต์ก่อน/หลังแก้โค้ดใน `.agents/rules/zig-0.13-gotchas.md`
+   - ปฏิบัติตามข้อควรระวังของคอมไพเลอร์ Zig 0.17 (ต้องใช้ Zig >= 0.17.1 ผ่าน `make` / `scripts/find-zig.sh`) และเช็กลิสต์ก่อน/หลังแก้โค้ดใน `.agents/rules/zig-0.17-gotchas.md`
 
 5. **Logging**:
    - ระบบบันทึกรายละเอียดการทำงานลง `system.log` และบันทึกเฉพาะ error ลง `error.log`

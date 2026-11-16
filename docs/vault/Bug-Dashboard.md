@@ -19,10 +19,10 @@ status: active
 
 | Metric | Value |
 | :--- | :--- |
-| Tracked Bug Patterns | **45** (45 Guarded) |
-| Zig Source Modules | **24** |
+| Tracked Bug Patterns | **46** (46 Guarded) |
+| Zig Source Modules | **25** |
 | Unit & Integration Tests | **244** |
-| Static Security & Memory Gates | **9/9 PASS** |
+| Static Security & Memory Gates | **7/9 PASS** |
 
 ## Guard Coverage Map
 
@@ -142,6 +142,9 @@ flowchart LR
     BUG045["BUG-045"] --> SEC["[[Security-And-Memory-Checklist]]"]
     BUG045 --> src_podman_types_zig["src/podman_types.zig"]
     BUG045 --> src_podman_api_zig["src/podman_api.zig"]
+    BUG046["BUG-046"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG046 --> src_podman_build_zig["src/podman_build.zig"]
+    BUG046 --> src_compose_zig["src/compose.zig"]
 ```
 
 ## Bug Pattern Registry
@@ -193,43 +196,45 @@ flowchart LR
 | [BUG-043](../../docs/vault/Bug-Playbook.md#L490) | Unvalidated Image References in `pullImage`, `createContainer`, and Compose | `#bug-pattern` `#security-gate` | [podman_images.zig](../../src/podman_images.zig), [podman_api.zig](../../src/podman_api.zig), [main.zig](../../src/main.zig), [compose.zig](../../src/compose.zig) | **Guarded** |
 | [BUG-044](../../docs/vault/Bug-Playbook.md#L499) | Double Free on OOM in Compose Slice Builders (`appendDupPort`, `appendDupVolume`, `appendDupLabel`) | `#memory-leak` `#bug-pattern` | [compose.zig](../../src/compose.zig) | **Guarded** |
 | [BUG-045](../../docs/vault/Bug-Playbook.md#L508) | Container Restart Timeout Error Aliasing (`InvalidIdentifier`) Corrupting Audit Telemetry | `#bug-pattern` `#security-gate` | [podman_types.zig](../../src/podman_types.zig), [podman_api.zig](../../src/podman_api.zig), [main.zig](../../src/main.zig) | **Guarded** |
+| [BUG-046](../../docs/vault/Bug-Playbook.md#L515) | Zig 0.17 Migration Hazards — Sentinel Free Mismatch & Off-by-One Read Limits | `#bug-pattern` `#memory-safety` | [podman_build.zig](../../src/podman_build.zig), [compose.zig](../../src/compose.zig), [podman_transfer.zig](../../src/podman_transfer.zig), [podman_validate.zig](../../src/podman_validate.zig), [utils.zig](../../src/utils.zig), [policy.zig](../../src/policy.zig), [log.zig](../../src/log.zig) | **Guarded** |
 
 ## Module Test & Allocator Coverage
 
 | Module | Lines | Public Decls | Unit Tests | Memory Gate |
 | :--- | ---: | ---: | ---: | :--- |
-| [cli.zig](../../src/cli.zig) | 2064 | 48 | 28 | `std.testing.allocator` |
-| [cli_specs.zig](../../src/cli_specs.zig) | 724 | 28 | 17 | `std.testing.allocator` |
+| [cli.zig](../../src/cli.zig) | 2065 | 48 | 28 | `std.testing.allocator` |
+| [cli_specs.zig](../../src/cli_specs.zig) | 730 | 28 | 17 | `std.testing.allocator` |
 | [cli_types.zig](../../src/cli_types.zig) | 714 | 57 | 12 | `std.testing.allocator` |
 | [completion.zig](../../src/completion.zig) | 270 | 2 | 5 | `std.testing.allocator` |
-| [compose.zig](../../src/compose.zig) | 1854 | 14 | 9 | `std.testing.allocator` |
-| [config.zig](../../src/config.zig) | 348 | 9 | 6 | `std.testing.allocator` |
-| [demo.zig](../../src/demo.zig) | 487 | 6 | 2 | `std.testing.allocator` |
-| [http.zig](../../src/http.zig) | 851 | 23 | 6 | `std.testing.allocator` |
-| [http_parser.zig](../../src/http_parser.zig) | 289 | 2 | 10 | `std.testing.allocator` |
-| [http_types.zig](../../src/http_types.zig) | 268 | 19 | 11 | `std.testing.allocator` |
-| [log.zig](../../src/log.zig) | 850 | 20 | 12 | `std.testing.allocator` |
-| [main.zig](../../src/main.zig) | 1113 | 2 | 4 | `gpa.deinit() != .leak` |
-| [podman_api.zig](../../src/podman_api.zig) | 1934 | 118 | 15 | `std.testing.allocator` |
-| [podman_build.zig](../../src/podman_build.zig) | 594 | 8 | 6 | `std.testing.allocator` |
-| [podman_images.zig](../../src/podman_images.zig) | 671 | 7 | 7 | `std.testing.allocator` |
-| [podman_logs.zig](../../src/podman_logs.zig) | 838 | 10 | 8 | `std.testing.allocator` |
-| [podman_pods.zig](../../src/podman_pods.zig) | 331 | 4 | 4 | `std.testing.allocator` |
-| [podman_system.zig](../../src/podman_system.zig) | 1161 | 17 | 6 | `std.testing.allocator` |
-| [podman_test_helpers.zig](../../src/podman_test_helpers.zig) | 308 | 4 | 7 | `std.testing.allocator` |
-| [podman_transfer.zig](../../src/podman_transfer.zig) | 1566 | 9 | 10 | `std.testing.allocator` |
-| [podman_types.zig](../../src/podman_types.zig) | 1062 | 70 | 35 | `std.testing.allocator` |
-| [podman_validate.zig](../../src/podman_validate.zig) | 1008 | 49 | 17 | `std.testing.allocator` |
+| [compose.zig](../../src/compose.zig) | 1852 | 14 | 9 | `std.testing.allocator` |
+| [config.zig](../../src/config.zig) | 352 | 9 | 6 | `std.testing.allocator` |
+| [demo.zig](../../src/demo.zig) | 495 | 6 | 2 | `std.testing.allocator` |
+| [http.zig](../../src/http.zig) | 823 | 25 | 6 | `std.testing.allocator` |
+| [http_parser.zig](../../src/http_parser.zig) | 303 | 2 | 10 | `std.testing.allocator` |
+| [http_socket.zig](../../src/http_socket.zig) | 157 | 14 | 0 | `MISSING` |
+| [http_types.zig](../../src/http_types.zig) | 284 | 22 | 11 | `std.testing.allocator` |
+| [log.zig](../../src/log.zig) | 902 | 22 | 12 | `std.testing.allocator` |
+| [main.zig](../../src/main.zig) | 1134 | 2 | 4 | `missing gpa check` |
+| [podman_api.zig](../../src/podman_api.zig) | 1940 | 118 | 15 | `std.testing.allocator` |
+| [podman_build.zig](../../src/podman_build.zig) | 614 | 8 | 6 | `std.testing.allocator` |
+| [podman_images.zig](../../src/podman_images.zig) | 672 | 7 | 7 | `std.testing.allocator` |
+| [podman_logs.zig](../../src/podman_logs.zig) | 841 | 10 | 8 | `std.testing.allocator` |
+| [podman_pods.zig](../../src/podman_pods.zig) | 337 | 4 | 4 | `std.testing.allocator` |
+| [podman_system.zig](../../src/podman_system.zig) | 1164 | 17 | 6 | `std.testing.allocator` |
+| [podman_test_helpers.zig](../../src/podman_test_helpers.zig) | 365 | 4 | 7 | `std.testing.allocator` |
+| [podman_transfer.zig](../../src/podman_transfer.zig) | 1584 | 9 | 10 | `std.testing.allocator` |
+| [podman_types.zig](../../src/podman_types.zig) | 1067 | 70 | 35 | `std.testing.allocator` |
+| [podman_validate.zig](../../src/podman_validate.zig) | 1007 | 49 | 17 | `std.testing.allocator` |
 | [policy.zig](../../src/policy.zig) | 389 | 18 | 5 | `std.testing.allocator` |
-| [utils.zig](../../src/utils.zig) | 42 | 3 | 2 | `stack-only (no heap)` |
+| [utils.zig](../../src/utils.zig) | 120 | 13 | 2 | `stack-only (no heap)` |
 
 ## Static Security & Memory Gates
 
 | Gate | Bug Ref | Result |
 | :--- | :--- | :--- |
 | No page_allocator in src/ | BUG-002 | **PASS** |
-| GPA leak check enforced in main.zig | BUG-002 | **PASS** |
-| No error.AccessDenied in http.zig | BUG-001 | **PASS** |
+| GPA leak check enforced in main.zig | BUG-002 | **FAIL** |
+| No error.AccessDenied in http.zig | BUG-001 | **FAIL** |
 | std.testing.allocator in heap modules | BUG-002 | **PASS** |
 | validateRequestTarget() in http.zig | BUG-005 | **PASS** |
 | validateIdentifier() in podman_api.zig | BUG-005 | **PASS** |
@@ -553,3 +558,10 @@ flowchart LR
 - **Root Cause**: Reuse `InvalidIdentifier` แทนที่จะนิยาม dedicated `InvalidTimeout` สำหรับ timeout validation domain
 - **Fix**: เพิ่ม `ApiError.InvalidTimeout` ใน `src/podman_types.zig`, คืนจาก `restartContainer` ใน `src/podman_api.zig`, และ map เข้า deny rule `"api.restartContainer"` ใน `src/main.zig`
 - **Prevention**: ห้าม reuse error code ข้าม validation domain — แต่ละขอบเขตการตรวจสอบต้องมี error code และ audit rule ที่สะท้อนสาเหตุที่แท้จริง
+
+### BUG-046 — Zig 0.17 Migration Hazards — Sentinel Free Mismatch & Off-by-One Read Limits
+- **Source**: [docs/vault/Bug-Playbook.md:515](../../docs/vault/Bug-Playbook.md#L515) · **Status**: `Guarded`
+- **Symptom**: หลังย้ายไป Zig 0.17.1 เทส `tarBuildContext`/`buildImage`/`compose up` panic ด้วย `free of [len: 74] mismatches allocation of [len: 75]` และ `saveImage` เทสล้มด้วย `error.StreamTooLong` เมื่อไฟล์มีขนาดเท่ากับ limit พอดี
+- **Root Cause**: `std.Io.Dir.realPathFileAlloc` คืน `[:0]u8` (จองเพิ่ม 1 ไบต์สำหรับ sentinel) แต่ถูก coerce เป็น `[]u8` ผ่าน return type แล้ว free ด้วยความยาวที่ไม่รวม sentinel; และ `readFileAlloc(..., .limited(n))` (unbuffered reader) ถือว่า "อ่านครบ n ไบต์" = เกิน limit ต่างจาก `readToEndAlloc(max)` ของ 0.13
+- **Fix**: เพิ่ม `utils.realpathAlloc` (คืน `[]u8` ความยาวตรง) ใช้ใน `src/podman_build.zig`, `src/compose.zig`, `src/podman_transfer.zig`, `src/podman_validate.zig`; ใช้ `.limited(N + 1)` และ `utils.readFileToEndAlloc` ใน `src/utils.zig`, `src/policy.zig`, `src/log.zig`
+- **Prevention**: ห้ามคืน/เก็บผลจาก `realPathFileAlloc` เป็น `[]u8`; การอ่านไฟล์แบบจำกัดขนาดต้องคง semantics "ไม่เกิน N ไบต์" (`.limited(N + 1)`) — ดู `.agents/rules/zig-0.17-gotchas.md` ข้อ 6

@@ -2,7 +2,7 @@
 
 **ZigPod** เป็นโปรแกรม CLI ภาษา Zig ที่ทำงานในลักษณะเดียวกับ `podman` / `docker` โดยสื่อสารกับ **Podman REST API (Docker-compatible v1.40)** ผ่าน Unix domain socket ด้วย standard library ของ Zig ล้วน ๆ (ไม่พึ่งพา external library)
 
-A minimal Docker/Podman-compatible CLI written in pure Zig (`>= 0.13.0`) that communicates with the Podman REST API over a Unix domain socket.
+A minimal Docker/Podman-compatible CLI written in pure Zig (`>= 0.17.1`) that communicates with the Podman REST API over a Unix domain socket.
 
 ---
 
@@ -71,7 +71,7 @@ zigpodza/
 
 ## Prerequisites
 
-- **Zig** `0.13.0` or newer
+- **Zig** `0.17.1` or newer (the code uses the `std.Io` interface introduced after 0.13; older compilers cannot build it). `make` and `scripts/` locate a suitable toolchain automatically via `scripts/find-zig.sh`, even when an older `zig` is first on `PATH`.
 - **Podman** with the API socket active:
   - Rootless: `systemctl --user enable --now podman.socket`
   - Rootful: `sudo systemctl enable --now podman.socket`

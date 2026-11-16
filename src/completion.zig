@@ -166,34 +166,34 @@ pub fn writeCompletion(shell: Shell, writer: anytype) !void {
 
 test "writeCompletion emits valid scripts for bash, zsh, and fish" {
     const alloc = std.testing.allocator;
-    var out = std.ArrayList(u8).init(alloc);
+    var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
-    try writeCompletion(.bash, out.writer());
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "complete -F _zigpod_completions zigpod") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "events") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "build") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "pod") != null);
+    try writeCompletion(.bash, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "complete -F _zigpod_completions zigpod") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "events") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "build") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "pod") != null);
 
     out.clearRetainingCapacity();
-    try writeCompletion(.zsh, out.writer());
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "#compdef zigpod") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "'build:Build an image from a directory'") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "'pod:Manage pods'") != null);
+    try writeCompletion(.zsh, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "#compdef zigpod") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "'build:Build an image from a directory'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "'pod:Manage pods'") != null);
 
     out.clearRetainingCapacity();
-    try writeCompletion(.fish, out.writer());
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "complete -c zigpod -f") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "__fish_seen_subcommand_from pod") != null);
+    try writeCompletion(.fish, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "complete -c zigpod -f") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "__fish_seen_subcommand_from pod") != null);
 }
 
 test "bash script wires top-level commands, flags, and subcommand branches" {
     const alloc = std.testing.allocator;
-    var out = std.ArrayList(u8).init(alloc);
+    var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
-    try writeCompletion(.bash, out.writer());
-    const s = out.items;
+    try writeCompletion(.bash, &out.writer);
+    const s = out.written();
 
     try std.testing.expect(std.mem.indexOf(u8, s, "# bash completion for zigpod") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "-W \"--socket -v --verbose -h --help --version run ps images") != null);
@@ -213,18 +213,18 @@ test "bash script wires top-level commands, flags, and subcommand branches" {
 
 test "zsh script registers all subcommands and per-command actions" {
     const alloc = std.testing.allocator;
-    var out = std.ArrayList(u8).init(alloc);
+    var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
-    try writeCompletion(.zsh, out.writer());
-    const s = out.items;
+    try writeCompletion(.zsh, &out.writer);
+    const s = out.written();
 
     try std.testing.expect(std.mem.indexOf(u8, s, "#compdef zigpod") != null);
     for ([_][]const u8{ "run", "ps", "images", "pull", "rmi", "tag", "history", "commit", "build", "start", "stop", "restart", "pause", "unpause", "rename", "kill", "rm", "logs", "top", "exec", "attach", "inspect", "stats", "volume", "network", "cp", "pod", "system", "port", "wait", "diff", "events", "policy", "completion", "audit", "demo", "version", "help" }) |cmd| {
-        var line_buf = std.ArrayList(u8).init(alloc);
+        var line_buf: std.Io.Writer.Allocating = .init(alloc);
         defer line_buf.deinit();
-        try line_buf.writer().print("'{s}:", .{cmd});
-        try std.testing.expect(std.mem.indexOf(u8, s, line_buf.items) != null);
+        try line_buf.writer.print("'{s}:", .{cmd});
+        try std.testing.expect(std.mem.indexOf(u8, s, line_buf.written()) != null);
     }
     try std.testing.expect(std.mem.indexOf(u8, s, "(( CURRENT == 2 ))") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "_values 'shell' bash zsh fish") != null);
@@ -234,11 +234,11 @@ test "zsh script registers all subcommands and per-command actions" {
 
 test "fish script lists every subcommand under __fish_use_subcommand" {
     const alloc = std.testing.allocator;
-    var out = std.ArrayList(u8).init(alloc);
+    var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
-    try writeCompletion(.fish, out.writer());
-    const s = out.items;
+    try writeCompletion(.fish, &out.writer);
+    const s = out.written();
 
     try std.testing.expect(std.mem.indexOf(u8, s, "# fish completion for zigpod") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "__fish_use_subcommand") != null);
@@ -250,21 +250,21 @@ test "fish script lists every subcommand under __fish_use_subcommand" {
 
 test "each shell emits a distinct non-empty script" {
     const alloc = std.testing.allocator;
-    var b = std.ArrayList(u8).init(alloc);
+    var b: std.Io.Writer.Allocating = .init(alloc);
     defer b.deinit();
-    var z = std.ArrayList(u8).init(alloc);
+    var z: std.Io.Writer.Allocating = .init(alloc);
     defer z.deinit();
-    var f = std.ArrayList(u8).init(alloc);
+    var f: std.Io.Writer.Allocating = .init(alloc);
     defer f.deinit();
 
-    try writeCompletion(.bash, b.writer());
-    try writeCompletion(.zsh, z.writer());
-    try writeCompletion(.fish, f.writer());
+    try writeCompletion(.bash, &b.writer);
+    try writeCompletion(.zsh, &z.writer);
+    try writeCompletion(.fish, &f.writer);
 
-    try std.testing.expect(b.items.len > 0);
-    try std.testing.expect(z.items.len > 0);
-    try std.testing.expect(f.items.len > 0);
-    try std.testing.expect(!std.mem.eql(u8, b.items, z.items));
-    try std.testing.expect(!std.mem.eql(u8, z.items, f.items));
-    try std.testing.expect(!std.mem.eql(u8, b.items, f.items));
+    try std.testing.expect(b.written().len > 0);
+    try std.testing.expect(z.written().len > 0);
+    try std.testing.expect(f.written().len > 0);
+    try std.testing.expect(!std.mem.eql(u8, b.written(), z.written()));
+    try std.testing.expect(!std.mem.eql(u8, z.written(), f.written()));
+    try std.testing.expect(!std.mem.eql(u8, b.written(), f.written()));
 }

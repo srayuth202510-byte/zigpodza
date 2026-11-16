@@ -137,7 +137,7 @@ pub fn parsePortSpec(spec: []const u8) ParseError!PortMapping {
     var mapping = PortMapping{ .container_port = 0, .proto = proto };
     if (f2) |container| {
         // IP:HOST:CONTAINER — host address must be a valid IPv4 literal.
-        _ = std.net.Address.parseIp4(f0, 0) catch return error.InvalidValue;
+        _ = std.Io.net.IpAddress.parseIp4(f0, 0) catch return error.InvalidValue;
         mapping.host_ip = f0;
         mapping.host_port = try parsePortNumber(f1.?);
         mapping.container_port = try parsePortNumber(container);
@@ -444,6 +444,12 @@ pub fn parseCpEndpoints(src: []const u8, dst: []const u8) ParseError!CpOpts {
 
 // ---------------------------------------------------------------- tests
 
+fn rep(comptime s: []const u8, comptime n: usize) [s.len * n]u8 {
+    var out: [s.len * n]u8 = undefined;
+    for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+    return out;
+}
+
 test "parseMemoryBytes and spec parsers handle valid and invalid inputs" {
     try std.testing.expectEqual(@as(i64, 512 * 1024 * 1024), try parseMemoryBytes("512m"));
     try std.testing.expectError(error.InvalidValue, parseMemoryBytes("0"));
@@ -465,8 +471,8 @@ test "parseProfile accepts only default and sandbox" {
 test "parsePolicyPath rejects empty, oversized, and control characters" {
     try std.testing.expectEqualStrings("/etc/zigpod-policy.json", try parsePolicyPath("/etc/zigpod-policy.json"));
     try std.testing.expectError(error.InvalidValue, parsePolicyPath(""));
-    try std.testing.expectError(error.InvalidValue, parsePolicyPath("a" ** 4097));
-    try std.testing.expectEqualStrings("p" ** 4096, try parsePolicyPath("p" ** 4096));
+    try std.testing.expectError(error.InvalidValue, parsePolicyPath(&rep("a", 4097)));
+    try std.testing.expectEqualStrings(&rep("p", 4096), try parsePolicyPath(&rep("p", 4096)));
     try std.testing.expectError(error.InvalidValue, parsePolicyPath("a\x00b"));
     try std.testing.expectError(error.InvalidValue, parsePolicyPath("a\tb"));
     try std.testing.expectError(error.InvalidValue, parsePolicyPath("a\nb"));
@@ -588,9 +594,9 @@ test "parseUserSpec validates USER and USER:GROUP shapes" {
     try std.testing.expectError(error.InvalidValue, parseUserSpec(".root"));
     try std.testing.expectError(error.InvalidValue, parseUserSpec("ro ot"));
     try std.testing.expectError(error.InvalidValue, parseUserSpec("user:gr oup"));
-    try std.testing.expectError(error.InvalidValue, parseUserSpec("u" ** 129));
-    try std.testing.expectEqualStrings("u" ** 64, try parseUserSpec("u" ** 64));
-    try std.testing.expectError(error.InvalidValue, parseUserSpec("u" ** 65));
+    try std.testing.expectError(error.InvalidValue, parseUserSpec(&rep("u", 129)));
+    try std.testing.expectEqualStrings(&rep("u", 64), try parseUserSpec(&rep("u", 64)));
+    try std.testing.expectError(error.InvalidValue, parseUserSpec(&rep("u", 65)));
 }
 
 test "parseCapName requires ALL or an uppercase token" {
@@ -602,7 +608,7 @@ test "parseCapName requires ALL or an uppercase token" {
     try std.testing.expectError(error.InvalidValue, parseCapName("NET_BIND_SERVICE "));
     try std.testing.expectError(error.InvalidValue, parseCapName("1ABC"));
     try std.testing.expectError(error.InvalidValue, parseCapName("-X"));
-    try std.testing.expectError(error.InvalidValue, parseCapName("X" ** 65));
+    try std.testing.expectError(error.InvalidValue, parseCapName(&rep("X", 65)));
 }
 
 test "parseSignal accepts full names and short aliases only" {
@@ -649,13 +655,13 @@ test "parseLabelSpec, parseHostname, parseEntrypoint, and parseRestartPolicy val
     try std.testing.expectError(error.InvalidValue, parseLabelSpec("k=bad\nval"));
 
     try std.testing.expectEqualStrings("web-1.local", try parseHostname("web-1.local"));
-    try std.testing.expectEqualStrings("h" ** 64, try parseHostname("h" ** 64));
+    try std.testing.expectEqualStrings(&rep("h", 64), try parseHostname(&rep("h", 64)));
     try std.testing.expectError(error.InvalidValue, parseHostname(""));
     try std.testing.expectError(error.InvalidValue, parseHostname("-bad"));
     try std.testing.expectError(error.InvalidValue, parseHostname("bad."));
     try std.testing.expectError(error.InvalidValue, parseHostname("a..b"));
     try std.testing.expectError(error.InvalidValue, parseHostname("bad host"));
-    try std.testing.expectError(error.InvalidValue, parseHostname("h" ** 65));
+    try std.testing.expectError(error.InvalidValue, parseHostname(&rep("h", 65)));
 
     try std.testing.expectEqualStrings("/bin/sh", try parseEntrypoint("/bin/sh"));
     try std.testing.expectError(error.InvalidValue, parseEntrypoint(""));

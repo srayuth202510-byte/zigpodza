@@ -19,7 +19,9 @@ status: active
 
 ## 1. Memory Safety Gates `#memory-safety`
 
-- [ ] `src/main.zig` ตรวจ `gpa.deinit() == .leak` และไม่ละทิ้งด้วย `defer _ = gpa.deinit();`
+- [ ] `src/main.zig` ตรวจ `debug_allocator.deinit() == .leak` (`std.heap.DebugAllocator`) และไม่ละทิ้งด้วย `defer _ = debug_allocator.deinit();`
+- [ ] path ที่ได้จาก `realPathFileAlloc` (`[:0]u8`) ห้ามคืน/เก็บเป็น `[]u8` แล้ว free ภายหลัง — ใช้ `utils.realpathAlloc` แทน
+- [ ] การอ่านไฟล์แบบจำกัดขนาดใช้ `readFileAlloc(..., .limited(N + 1))` หรือ `utils.readFileToEndAlloc` (Zig 0.17 `.limited(N)` ล้มเหลวเมื่ออ่านครบ N ไบต์พอดี)
 - [ ] ห้ามใช้ `std.heap.page_allocator` ใน `src/`
 - [ ] โมดูลที่มีการจอง heap (`main.zig`, `cli.zig`, `config.zig`, `http.zig`, `podman_api.zig`, `log.zig`, `policy.zig`) ต้องมีเทสที่ใช้ `std.testing.allocator`
 - [ ] ห้ามเก็บ slice ที่อ้างอิงข้อมูลใน `std.json.Parsed(T)` ข้ามขอบเขตบล็อกที่มี `defer parsed.deinit()` (BUG-020)

@@ -4,19 +4,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-# Auto-detect Zig binary if not in PATH
-if ! command -v zig >/dev/null 2>&1; then
-    for candidate in \
-        "$HOME/.config/Code - OSS/User/globalStorage/ziglang.vscode-zig/zig/x86_64-linux-0.13.0/zig" \
-        "$HOME/.config/Code/User/globalStorage/ziglang.vscode-zig/zig/x86_64-linux-0.13.0/zig" \
-        "$HOME/.local/opt/zig-0.13.0/zig" \
-        "$HOME/.local/bin/zig" \
-        "/usr/local/bin/zig"; do
-        if [[ -x "$candidate" ]]; then
-            export PATH="$(dirname "$candidate"):$PATH"
-            break
-        fi
-    done
+# Auto-detect a Zig binary that satisfies build.zig.zon minimum_zig_version
+# (a stale older `zig` earlier on PATH is skipped) and put it first on PATH.
+ZIG_FOUND="$(sh scripts/find-zig.sh)"
+if [[ "$ZIG_FOUND" != "zig" ]]; then
+    export PATH="$(dirname "$ZIG_FOUND"):$PATH"
 fi
 
 echo "==> [1/4] Checking Zig test suite (unit, security, mock-socket, leak detection)..."

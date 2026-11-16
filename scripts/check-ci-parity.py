@@ -24,6 +24,7 @@ REQUIRED_FILES = [
     "scripts/knowledge-sync.py",
     "scripts/bug-dashboard.py",
     "scripts/check-ci-parity.py",
+    "scripts/find-zig.sh",
     ".agents/hooks.json",
     ".githooks/pre-commit",
     "docs/vault/00-Index.md",
@@ -41,6 +42,7 @@ REQUIRED_FILES = [
     "src/config.zig",
     "src/demo.zig",
     "src/http.zig",
+    "src/http_socket.zig",
     "src/http_parser.zig",
     "src/http_types.zig",
     "src/log.zig",
@@ -67,6 +69,7 @@ EXECUTABLES = [
     "scripts/knowledge-sync.py",
     "scripts/bug-dashboard.py",
     "scripts/check-ci-parity.py",
+    "scripts/find-zig.sh",
     ".githooks/pre-commit",
 ]
 

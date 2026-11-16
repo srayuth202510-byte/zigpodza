@@ -118,9 +118,9 @@ fn validateHostPathLexical(path: []const u8, readonly: bool) ApiError!void {
 /// Checks symlink targets along `path` (or its deepest existing ancestor when
 /// `path` does not exist yet) so symlinks into blocked roots cannot bypass the
 /// lexical bind-mount deny-list (BUG-025).
-fn validateHostPathSymlinks(path: []const u8, readonly: bool) ApiError!void {
-    var real_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-    if (std.fs.cwd().realpath(path, &real_buf)) |real| {
+fn validateHostPathSymlinks(io: std.Io, path: []const u8, readonly: bool) ApiError!void {
+    var real_buf: [utils.max_path_bytes]u8 = undefined;
+    if (utils.realpath(io, path, &real_buf)) |real| {
         if (!std.mem.eql(u8, real, path)) {
             try validateHostPathLexical(real, readonly);
         }
@@ -134,8 +134,8 @@ fn validateHostPathSymlinks(path: []const u8, readonly: bool) ApiError!void {
     // and re-check the resolved deepest existing ancestor combined with the tail.
     var cur: []const u8 = path;
     while (true) {
-        var link_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-        if (std.fs.cwd().readLink(cur, &link_buf)) |_| {
+        var link_buf: [utils.max_path_bytes]u8 = undefined;
+        if (std.Io.Dir.cwd().readLink(io, cur, &link_buf)) |_| {
             return ApiError.InvalidHostPath; // dangling symlink cannot be safely verified
         } else |lerr| switch (lerr) {
             error.FileNotFound, error.NotLink => {},
@@ -143,9 +143,9 @@ fn validateHostPathSymlinks(path: []const u8, readonly: bool) ApiError!void {
         }
 
         const parent = std.fs.path.dirname(cur) orelse "/";
-        if (std.fs.cwd().realpath(parent, &real_buf)) |real_parent| {
+        if (utils.realpath(io, parent, &real_buf)) |real_parent| {
             const tail = if (std.mem.eql(u8, parent, "/")) path else path[parent.len..];
-            var combined_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            var combined_buf: [utils.max_path_bytes]u8 = undefined;
             const combined = if (std.mem.eql(u8, real_parent, "/"))
                 tail
             else
@@ -165,9 +165,9 @@ fn validateHostPathSymlinks(path: []const u8, readonly: bool) ApiError!void {
 /// Fail-closed host-path policy for bind mounts (BUG-014, BUG-025). Rejects
 /// dangerous system roots, traversal, symlink escapes into blocked prefixes,
 /// dangling symlinks, and read-write mounts of sensitive `/etc` files.
-pub fn validateHostPath(path: []const u8, readonly: bool) ApiError!void {
+pub fn validateHostPath(io: std.Io, path: []const u8, readonly: bool) ApiError!void {
     try validateHostPathLexical(path, readonly);
-    try validateHostPathSymlinks(path, readonly);
+    try validateHostPathSymlinks(io, path, readonly);
 }
 
 /// Validates the in-container mount destination (must be an absolute,
@@ -188,19 +188,19 @@ pub fn validateVolumeName(name: []const u8) ApiError!void {
 
 /// Classifies and validates a `-v` mount: absolute sources become `bind`
 /// mounts (policy-checked), everything else a named `volume`.
-pub fn makeMount(source: []const u8, target: []const u8, readonly: bool) ApiError!Mount {
+pub fn makeMount(io: std.Io, source: []const u8, target: []const u8, readonly: bool) ApiError!Mount {
     try validateContainerPath(target);
     if (std.mem.startsWith(u8, source, "/")) {
-        try validateHostPath(source, readonly);
+        try validateHostPath(io, source, readonly);
         return .{ .Type = "bind", .Source = source, .Target = target, .ReadOnly = readonly };
     }
     try validateVolumeName(source);
     return .{ .Type = "volume", .Source = source, .Target = target, .ReadOnly = readonly };
 }
 
-pub fn validateMount(m: Mount) ApiError!void {
+pub fn validateMount(io: std.Io, m: Mount) ApiError!void {
     if (std.mem.eql(u8, m.Type, "bind")) {
-        try validateHostPath(m.Source, m.ReadOnly);
+        try validateHostPath(io, m.Source, m.ReadOnly);
     } else if (std.mem.eql(u8, m.Type, "volume")) {
         try validateVolumeName(m.Source);
     } else {
@@ -220,7 +220,7 @@ pub fn validatePortMapping(p: PortMapping) ApiError!void {
         return ApiError.InvalidPort;
     }
     if (p.host_ip) |ip| {
-        _ = std.net.Address.parseIp4(ip, 0) catch return ApiError.InvalidPort;
+        _ = std.Io.net.IpAddress.parseIp4(ip, 0) catch return ApiError.InvalidPort;
     }
 }
 
@@ -318,12 +318,12 @@ pub fn validateSignal(sig: []const u8) ApiError!void {
     return ApiError.InvalidSignal;
 }
 
-pub fn appendQueryEncoded(out: *std.ArrayList(u8), s: []const u8) !void {
+pub fn appendQueryEncoded(allocator: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
     for (s) |c| {
         if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
-            try out.append(c);
+            try out.append(allocator, c);
         } else {
-            try out.writer().print("%{X:0>2}", .{c});
+            try out.print(allocator, "%{X:0>2}", .{c});
         }
     }
 }
@@ -337,7 +337,6 @@ pub fn logApiFailure(logger: *log.Logger, method: []const u8, path: []const u8, 
     }
     return ApiError.PodmanApiError;
 }
-
 
 pub fn formatSizeU64(buf: []u8, bytes: u64) []const u8 {
     const clamped: i64 = if (bytes > std.math.maxInt(i64)) std.math.maxInt(i64) else @intCast(bytes);
@@ -440,7 +439,7 @@ pub fn validateTarEntryPath(raw_name: []const u8) ApiError![]const u8 {
 /// Ensures a tar symlink target stays strictly relative and cannot traverse
 /// above the extraction root directory (`..` depth balance check).
 pub fn validateTarSymlinkTarget(entry_rel_path: []const u8, link_target: []const u8) ApiError!void {
-    if (link_target.len == 0 or link_target.len >= std.fs.MAX_PATH_BYTES) return ApiError.InvalidHostPath;
+    if (link_target.len == 0 or link_target.len >= utils.max_path_bytes) return ApiError.InvalidHostPath;
     if (link_target[0] == '/') return ApiError.InvalidHostPath;
     for (link_target) |c| {
         if (c < 0x20 or c == 0x7f or c == '\\') return ApiError.InvalidHostPath;
@@ -482,39 +481,40 @@ pub const MergedEnv = struct {
 /// `validateHostPath` + `realpathAlloc` + regular-file verification) and merges
 /// explicit `-e`/`--env` items afterward.
 pub fn loadAndMergeEnv(
+    io: std.Io,
     allocator: std.mem.Allocator,
     env_files: []const []const u8,
     cli_env: []const []const u8,
 ) !MergedEnv {
-    var owned = std.ArrayList([]u8).init(allocator);
+    var owned: std.ArrayList([]u8) = .empty;
     errdefer {
         for (owned.items) |s| allocator.free(s);
-        owned.deinit();
+        owned.deinit(allocator);
     }
-    var items = std.ArrayList([]const u8).init(allocator);
-    errdefer items.deinit();
+    var items: std.ArrayList([]const u8) = .empty;
+    errdefer items.deinit(allocator);
 
     for (env_files) |raw_path| {
-        try validateHostPath(raw_path, false);
-        const real_path = std.fs.cwd().realpathAlloc(allocator, raw_path) catch |err| switch (err) {
+        try validateHostPath(io, raw_path, false);
+        const real_path = utils.realpathAlloc(io, std.Io.Dir.cwd(), raw_path, allocator) catch |err| switch (err) {
             error.FileNotFound, error.AccessDenied => return err,
             else => return ApiError.InvalidHostPath,
         };
         defer allocator.free(real_path);
-        try validateHostPath(real_path, false);
+        try validateHostPath(io, real_path, false);
 
-        const st = std.fs.cwd().statFile(real_path) catch |err| switch (err) {
+        const st = std.Io.Dir.cwd().statFile(io, real_path, .{}) catch |err| switch (err) {
             error.FileNotFound, error.AccessDenied => return err,
             else => return ApiError.InvalidHostPath,
         };
         if (st.kind != .file) return ApiError.InvalidHostPath;
 
-        const file = try std.fs.openFileAbsolute(real_path, .{});
-        defer file.close();
-        const opened_st = try file.stat();
+        const file = try std.Io.Dir.openFileAbsolute(io, real_path, .{});
+        defer file.close(io);
+        const opened_st = try file.stat(io);
         if (opened_st.kind != .file) return ApiError.InvalidHostPath;
 
-        const content = file.readToEndAlloc(allocator, max_env_file_bytes) catch |err| switch (err) {
+        const content = utils.readFileToEndAlloc(io, file, allocator, max_env_file_bytes) catch |err| switch (err) {
             error.FileTooBig => return ApiError.InvalidEnvFile,
             else => return err,
         };
@@ -539,8 +539,8 @@ pub fn loadAndMergeEnv(
             }
             if (items.items.len >= 4096) return ApiError.InvalidEnvFile;
 
-            try items.ensureUnusedCapacity(1);
-            try owned.ensureUnusedCapacity(1);
+            try items.ensureUnusedCapacity(allocator, 1);
+            try owned.ensureUnusedCapacity(allocator, 1);
             const dup = try allocator.dupe(u8, trimmed);
             owned.appendAssumeCapacity(dup);
             items.appendAssumeCapacity(dup);
@@ -548,15 +548,15 @@ pub fn loadAndMergeEnv(
     }
 
     for (cli_env) |e| {
-        try items.append(e);
+        try items.append(allocator, e);
     }
 
-    const owned_slice = try owned.toOwnedSlice();
+    const owned_slice = try owned.toOwnedSlice(allocator);
     errdefer {
         for (owned_slice) |s| allocator.free(s);
         allocator.free(owned_slice);
     }
-    const items_slice = try items.toOwnedSlice();
+    const items_slice = try items.toOwnedSlice(allocator);
     return .{
         .items = items_slice,
         .owned_strings = owned_slice,
@@ -609,6 +609,12 @@ pub fn validateHealthConfig(hc: types.HealthConfig) ApiError!void {
 
 // ---------------------------------------------------------------- tests
 
+fn rep(comptime s: []const u8, comptime n: usize) [s.len * n]u8 {
+    var out: [s.len * n]u8 = undefined;
+    for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+    return out;
+}
+
 test "validateIdentifier rejects traversal, injection, and invalid sizes" {
     try validateIdentifier("abcdef123456");
     try validateIdentifier("web-1");
@@ -625,56 +631,55 @@ test "validateIdentifier rejects traversal, injection, and invalid sizes" {
     try std.testing.expectError(ApiError.InvalidIdentifier, validateIdentifier("id\r\nX-Evil: 1"));
     try std.testing.expectError(ApiError.InvalidIdentifier, validateIdentifier("has space"));
 
-    const too_long = "a" ** 129;
+    const too_long = &rep("a", 129);
     try std.testing.expectError(ApiError.InvalidIdentifier, validateIdentifier(too_long));
 }
 
 test "validateHostPath enforces the fail-closed bind-mount policy" {
-    try validateHostPath("/home/user/data", true);
-    try validateHostPath("/home/user/data", false);
-    try validateHostPath("/srv/app", false);
-    try validateHostPath("/etc/hosts", true);
-    try validateHostPath("/etc/localtime", true);
+    try validateHostPath(std.testing.io, "/home/user/data", true);
+    try validateHostPath(std.testing.io, "/home/user/data", false);
+    try validateHostPath(std.testing.io, "/srv/app", false);
+    try validateHostPath(std.testing.io, "/etc/hosts", true);
+    try validateHostPath(std.testing.io, "/etc/localtime", true);
 
     const bad = [_][]const u8{
-        "",               "relative/path",        "/",
-        "/etc",           "/etc/passwd",          "/etc/ssh",
-        "/proc",          "/proc/1",              "/sys",
-        "/dev",           "/dev/sda",             "/boot",
-        "/run",           "/run/podman/podman.sock",
-        "/var/run/docker.sock",                    "/root",
-        "/root/.ssh",     "/var/lib/docker",      "/var/lib/containers",
-        "/home/user/../etc", "/home/user/..",     "/home//user",
-        "/srv/data/",     "/etc/../etc/hosts",
+        "",                    "relative/path",           "/",
+        "/etc",                "/etc/passwd",             "/etc/ssh",
+        "/proc",               "/proc/1",                 "/sys",
+        "/dev",                "/dev/sda",                "/boot",
+        "/run",                "/run/podman/podman.sock", "/var/run/docker.sock",
+        "/root",               "/root/.ssh",              "/var/lib/docker",
+        "/var/lib/containers", "/home/user/../etc",       "/home/user/..",
+        "/home//user",         "/srv/data/",              "/etc/../etc/hosts",
     };
     for (bad) |p| {
-        try std.testing.expectError(ApiError.InvalidHostPath, validateHostPath(p, true));
+        try std.testing.expectError(ApiError.InvalidHostPath, validateHostPath(std.testing.io, p, true));
     }
 
     // Sensitive /etc files may only be mounted read-only.
-    try std.testing.expectError(ApiError.InvalidHostPath, validateHostPath("/etc/hosts", false));
-    try std.testing.expectError(ApiError.InvalidHostPath, validateHostPath("/etc/resolv.conf", false));
+    try std.testing.expectError(ApiError.InvalidHostPath, validateHostPath(std.testing.io, "/etc/hosts", false));
+    try std.testing.expectError(ApiError.InvalidHostPath, validateHostPath(std.testing.io, "/etc/resolv.conf", false));
     // Control characters are rejected.
-    try std.testing.expectError(ApiError.InvalidHostPath, validateHostPath("/srv/\x00evil", true));
-    try std.testing.expectError(ApiError.InvalidHostPath, validateHostPath("/srv/a\nb", true));
+    try std.testing.expectError(ApiError.InvalidHostPath, validateHostPath(std.testing.io, "/srv/\x00evil", true));
+    try std.testing.expectError(ApiError.InvalidHostPath, validateHostPath(std.testing.io, "/srv/a\nb", true));
 }
 
 test "makeMount classifies bind vs named volume and validates the target" {
-    const b = try makeMount("/srv/data", "/data", true);
+    const b = try makeMount(std.testing.io, "/srv/data", "/data", true);
     try std.testing.expectEqualStrings("bind", b.Type);
     try std.testing.expectEqualStrings("/srv/data", b.Source);
     try std.testing.expectEqualStrings("/data", b.Target);
     try std.testing.expect(b.ReadOnly);
 
-    const v = try makeMount("myvol", "/var/lib/data", false);
+    const v = try makeMount(std.testing.io, "myvol", "/var/lib/data", false);
     try std.testing.expectEqualStrings("volume", v.Type);
     try std.testing.expect(!v.ReadOnly);
 
-    try std.testing.expectError(ApiError.InvalidHostPath, makeMount("/etc", "/data", true));
-    try std.testing.expectError(ApiError.InvalidHostPath, makeMount("../evil", "/data", true));
-    try std.testing.expectError(ApiError.InvalidHostPath, makeMount("bad/name", "/data", true));
-    try std.testing.expectError(ApiError.InvalidMountTarget, makeMount("/srv/data", "data", true));
-    try std.testing.expectError(ApiError.InvalidMountTarget, makeMount("/srv/data", "/data/../etc", true));
+    try std.testing.expectError(ApiError.InvalidHostPath, makeMount(std.testing.io, "/etc", "/data", true));
+    try std.testing.expectError(ApiError.InvalidHostPath, makeMount(std.testing.io, "../evil", "/data", true));
+    try std.testing.expectError(ApiError.InvalidHostPath, makeMount(std.testing.io, "bad/name", "/data", true));
+    try std.testing.expectError(ApiError.InvalidMountTarget, makeMount(std.testing.io, "/srv/data", "data", true));
+    try std.testing.expectError(ApiError.InvalidMountTarget, makeMount(std.testing.io, "/srv/data", "/data/../etc", true));
 }
 
 test "ContainerCreateRequest serializes bind mounts" {
@@ -684,7 +689,7 @@ test "ContainerCreateRequest serializes bind mounts" {
         .{ .Type = "volume", .Source = "myvol", .Target = "/vol", .ReadOnly = false },
     };
     const req = ContainerCreateRequest{ .Image = "alpine:3.20", .Mounts = &mounts };
-    const json = try std.json.stringifyAlloc(alloc, req, .{ .emit_null_optional_fields = false });
+    const json = try std.json.Stringify.valueAlloc(alloc, req, .{ .emit_null_optional_fields = false });
     defer alloc.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"Mounts\":[") != null);
@@ -725,7 +730,7 @@ test "ExposedPorts and PortBindings serialize to Docker JSON" {
         .ExposedPorts = .{ .ports = &ports },
         .HostConfig = .{ .PortBindings = .{ .ports = &ports } },
     };
-    const json = try std.json.stringifyAlloc(alloc, req, .{ .emit_null_optional_fields = false });
+    const json = try std.json.Stringify.valueAlloc(alloc, req, .{ .emit_null_optional_fields = false });
     defer alloc.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"ExposedPorts\":{\"80/tcp\":{},\"53/udp\":{},\"9000/tcp\":{},\"3000/tcp\":{}}") != null);
@@ -780,7 +785,7 @@ test "ContainerCreateRequest serializes network, workdir, user, and capabilities
             .CapAdd = &cap_add,
         },
     };
-    const json = try std.json.stringifyAlloc(alloc, req, .{ .emit_null_optional_fields = false });
+    const json = try std.json.Stringify.valueAlloc(alloc, req, .{ .emit_null_optional_fields = false });
     defer alloc.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"WorkingDir\":\"/work\"") != null);
@@ -789,7 +794,6 @@ test "ContainerCreateRequest serializes network, workdir, user, and capabilities
     try std.testing.expect(std.mem.indexOf(u8, json, "\"CapDrop\":[\"ALL\"]") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"CapAdd\":[\"NET_BIND_SERVICE\"]") != null);
 }
-
 
 test "validateResourceRef accepts image refs and rejects injection" {
     try validateResourceRef("alpine:3.20");
@@ -804,7 +808,6 @@ test "validateResourceRef accepts image refs and rejects injection" {
     try std.testing.expectError(ApiError.InvalidIdentifier, validateResourceRef("alpine;rm-rf /"));
 }
 
-
 test "validateResourceRef rejects traversal path segments (BUG-021)" {
     try std.testing.expectError(ApiError.InvalidIdentifier, validateResourceRef("a/../b"));
     try std.testing.expectError(ApiError.InvalidIdentifier, validateResourceRef("web/../../etc/shadow"));
@@ -814,27 +817,24 @@ test "validateResourceRef rejects traversal path segments (BUG-021)" {
     try validateResourceRef("reg.mirror/team/name:1.2.3");
 }
 
-
 test "validateResourceRef accepts image refs at the 256-byte boundary and rejects longer" {
-    const ref_256 = "docker.io/library/" ++ ("a" ** 233) ++ ":3.20";
+    const ref_256 = "docker.io/library/" ++ &rep("a", 233) ++ ":3.20";
     try std.testing.expectEqual(@as(usize, 256), ref_256.len);
     try validateResourceRef(ref_256);
 
-    const ref_257 = "docker.io/library/" ++ ("a" ** 234) ++ ":3.20";
+    const ref_257 = "docker.io/library/" ++ &rep("a", 234) ++ ":3.20";
     try std.testing.expectEqual(@as(usize, 257), ref_257.len);
     try std.testing.expectError(ApiError.InvalidIdentifier, validateResourceRef(ref_257));
 
-    const digest_ref = "docker.io/library/alpine@sha256:" ++ ("0123456789abcdef" ** 4);
+    const digest_ref = "docker.io/library/alpine@sha256:" ++ &rep("0123456789abcdef", 4);
     try std.testing.expectEqual(@as(usize, 96), digest_ref.len);
     try validateResourceRef(digest_ref);
 }
 
-
 test "validateIdentifier enforces the 128-byte length boundary" {
-    try validateIdentifier("x" ** 128);
-    try std.testing.expectError(ApiError.InvalidIdentifier, validateIdentifier("x" ** 129));
+    try validateIdentifier(&rep("x", 128));
+    try std.testing.expectError(ApiError.InvalidIdentifier, validateIdentifier(&rep("x", 129)));
 }
-
 
 test "ContainerCreateRequest serializes hardening HostConfig fields" {
     const alloc = std.testing.allocator;
@@ -848,7 +848,7 @@ test "ContainerCreateRequest serializes hardening HostConfig fields" {
             .SecurityOpt = &.{"no-new-privileges"},
         },
     };
-    const json = try std.json.stringifyAlloc(alloc, req, .{ .emit_null_optional_fields = false });
+    const json = try std.json.Stringify.valueAlloc(alloc, req, .{ .emit_null_optional_fields = false });
     defer alloc.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"ReadonlyRootfs\":true") != null);
@@ -932,17 +932,17 @@ test "loadAndMergeEnv parses safe env files, rejects malformed/symlinks, and fre
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(dir_path);
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "app.env",
         .data = "# comment line\r\n\n  FOO=bar\r\nEMPTY=\nSPACED=hello world\n",
     });
     const env_path = try std.fs.path.join(alloc, &.{ dir_path, "app.env" });
     defer alloc.free(env_path);
 
-    var merged = try loadAndMergeEnv(alloc, &.{env_path}, &.{"CLI=override"});
+    var merged = try loadAndMergeEnv(std.testing.io, alloc, &.{env_path}, &.{"CLI=override"});
     defer merged.deinit();
     try std.testing.expectEqual(@as(usize, 4), merged.items.len);
     try std.testing.expectEqualStrings("FOO=bar", merged.items[0]);
@@ -951,19 +951,19 @@ test "loadAndMergeEnv parses safe env files, rejects malformed/symlinks, and fre
     try std.testing.expectEqualStrings("CLI=override", merged.items[3]);
 
     // Symlink into /etc must fail closed.
-    try tmp.dir.symLink("/etc/hosts", "etc_link.env", .{});
+    try tmp.dir.symLink(std.testing.io, "/etc/hosts", "etc_link.env", .{});
     const link_path = try std.fs.path.join(alloc, &.{ dir_path, "etc_link.env" });
     defer alloc.free(link_path);
-    try std.testing.expectError(ApiError.InvalidHostPath, loadAndMergeEnv(alloc, &.{link_path}, &.{}));
+    try std.testing.expectError(ApiError.InvalidHostPath, loadAndMergeEnv(std.testing.io, alloc, &.{link_path}, &.{}));
 
     // Malformed line without '=' must fail closed with no leaks.
-    try tmp.dir.writeFile(.{ .sub_path = "bad.env", .data = "FOO=ok\nMISSING_EQUALS\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "bad.env", .data = "FOO=ok\nMISSING_EQUALS\n" });
     const bad_path = try std.fs.path.join(alloc, &.{ dir_path, "bad.env" });
     defer alloc.free(bad_path);
-    try std.testing.expectError(ApiError.InvalidEnvFile, loadAndMergeEnv(alloc, &.{bad_path}, &.{}));
+    try std.testing.expectError(ApiError.InvalidEnvFile, loadAndMergeEnv(std.testing.io, alloc, &.{bad_path}, &.{}));
 
     // Relative path must fail closed.
-    try std.testing.expectError(ApiError.InvalidHostPath, loadAndMergeEnv(alloc, &.{"relative.env"}, &.{}));
+    try std.testing.expectError(ApiError.InvalidHostPath, loadAndMergeEnv(std.testing.io, alloc, &.{"relative.env"}, &.{}));
 }
 
 test "BUG-025: validateHostPath and makeMount reject symlinks to denied paths" {
@@ -971,17 +971,17 @@ test "BUG-025: validateHostPath and makeMount reject symlinks to denied paths" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(dir_path);
 
-    try tmp.dir.makeDir("safe_dir");
+    try tmp.dir.createDir(std.testing.io, "safe_dir", .default_dir);
     const safe_sub = try std.fs.path.join(alloc, &.{ dir_path, "safe_dir" });
     defer alloc.free(safe_sub);
 
-    try tmp.dir.symLink(safe_sub, "ok_link", .{});
-    try tmp.dir.symLink("/etc", "etc_link", .{});
-    try tmp.dir.symLink("/etc/hosts", "hosts_link", .{});
-    try tmp.dir.symLink("/etc/nonexistent_zigpod_target", "dangling_link", .{});
+    try tmp.dir.symLink(std.testing.io, safe_sub, "ok_link", .{});
+    try tmp.dir.symLink(std.testing.io, "/etc", "etc_link", .{});
+    try tmp.dir.symLink(std.testing.io, "/etc/hosts", "hosts_link", .{});
+    try tmp.dir.symLink(std.testing.io, "/etc/nonexistent_zigpod_target", "dangling_link", .{});
 
     const ok_link = try std.fs.path.join(alloc, &.{ dir_path, "ok_link" });
     defer alloc.free(ok_link);
@@ -995,14 +995,13 @@ test "BUG-025: validateHostPath and makeMount reject symlinks to denied paths" {
     defer alloc.free(dangling_link);
 
     // Safe symlink target inside allowed directory must succeed.
-    const safe_mount = try makeMount(ok_link, "/data", false);
+    const safe_mount = try makeMount(std.testing.io, ok_link, "/data", false);
     try std.testing.expectEqualStrings("bind", safe_mount.Type);
 
     // Symlinks resolving into denied directories or rw /etc files must fail closed.
-    try std.testing.expectError(ApiError.InvalidHostPath, validateHostPath(etc_link, true));
-    try std.testing.expectError(ApiError.InvalidHostPath, makeMount(etc_link, "/data", true));
-    try std.testing.expectError(ApiError.InvalidHostPath, makeMount(etc_link_sub, "/data", true));
-    try std.testing.expectError(ApiError.InvalidHostPath, makeMount(hosts_link, "/data", false));
-    try std.testing.expectError(ApiError.InvalidHostPath, makeMount(dangling_link, "/data", true));
+    try std.testing.expectError(ApiError.InvalidHostPath, validateHostPath(std.testing.io, etc_link, true));
+    try std.testing.expectError(ApiError.InvalidHostPath, makeMount(std.testing.io, etc_link, "/data", true));
+    try std.testing.expectError(ApiError.InvalidHostPath, makeMount(std.testing.io, etc_link_sub, "/data", true));
+    try std.testing.expectError(ApiError.InvalidHostPath, makeMount(std.testing.io, hosts_link, "/data", false));
+    try std.testing.expectError(ApiError.InvalidHostPath, makeMount(std.testing.io, dangling_link, "/data", true));
 }
-

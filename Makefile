@@ -1,7 +1,8 @@
 .PHONY: help build test test-one test-adv demo e2e real-e2e check-ci verify ci query path explain triage debug-logs graph-update knowledge-sync distill-lessons install-hooks bugs dashboard dashboard-serve debug-test clean
 .DEFAULT_GOAL := help
 
-ZIG ?= $(shell command -v zig 2>/dev/null || { for p in "$$HOME/.config/Code - OSS/User/globalStorage/ziglang.vscode-zig/zig/x86_64-linux-0.13.0/zig" "$$HOME/.config/Code/User/globalStorage/ziglang.vscode-zig/zig/x86_64-linux-0.13.0/zig" "$$HOME/.local/opt/zig-0.13.0/zig" "$$HOME/.local/bin/zig"; do if [ -x "$$p" ]; then echo "$$p"; exit 0; fi; done; echo zig; })
+# Version-aware lookup: skips toolchains older than build.zig.zon minimum_zig_version.
+ZIG ?= $(shell sh scripts/find-zig.sh)
 PYTHON ?= python3
 
 help: ## Show available targets

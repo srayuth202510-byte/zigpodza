@@ -1,5 +1,6 @@
 //! Shared HTTP client constants, response/stream/upgrade types, terminal raw-mode guard, and target validator.
 const std = @import("std");
+pub const socket = @import("http_socket.zig");
 
 /// Upper bound on a buffered response body.
 pub const max_response_bytes = 64 * 1024 * 1024;
@@ -62,7 +63,8 @@ pub const ResponseHead = struct {
 /// Active Unix socket after an HTTP `101 Switching Protocols` upgrade.
 /// `initial_data` holds any payload bytes already read past `\r\n\r\n`.
 pub const UpgradedConn = struct {
-    stream: std.net.Stream,
+    stream: std.Io.net.Stream,
+    io: std.Io,
     status: u16,
     initial_data: []u8,
     error_body: []u8,
@@ -71,7 +73,19 @@ pub const UpgradedConn = struct {
     pub fn deinit(self: UpgradedConn) void {
         if (self.initial_data.len > 0) self.allocator.free(self.initial_data);
         if (self.error_body.len > 0) self.allocator.free(self.error_body);
-        self.stream.close();
+        self.stream.close(self.io);
+    }
+
+    /// Reads up to `buf.len` bytes from the upgraded connection, bounded by
+    /// `interactive_timeout_ms` so a silent peer cannot block forever (BUG-032).
+    pub fn read(self: UpgradedConn, buf: []u8) !usize {
+        return socket.readOnce(self.io, self.stream.socket.handle, buf, interactive_timeout_ms);
+    }
+
+    /// Writes all of `data` to the upgraded connection, with every partial
+    /// write bounded by `interactive_timeout_ms` (BUG-037).
+    pub fn writeAll(self: UpgradedConn, data: []const u8) !void {
+        return socket.writeAllWithTimeout(self.io, self.stream.socket.handle, data, interactive_timeout_ms);
     }
 };
 
@@ -83,7 +97,7 @@ pub const RawTermGuard = struct {
     active: bool,
 
     pub fn enter(fd: std.posix.fd_t) RawTermGuard {
-        if (!std.posix.isatty(fd)) return .{ .fd = fd, .orig = undefined, .active = false };
+        // tcgetattr fails with ENOTTY on non-TTY fds, covering the isatty check.
         const orig = std.posix.tcgetattr(fd) catch return .{ .fd = fd, .orig = undefined, .active = false };
         var raw = orig;
         raw.iflag.IGNBRK = false;
@@ -102,8 +116,8 @@ pub const RawTermGuard = struct {
         raw.lflag.IEXTEN = false;
         raw.cflag.CSIZE = .CS8;
         raw.cflag.PARENB = false;
-        raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
-        raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
+        raw.cc[@backingInt(std.posix.V.MIN)] = 1;
+        raw.cc[@backingInt(std.posix.V.TIME)] = 0;
         std.posix.tcsetattr(fd, .NOW, raw) catch return .{ .fd = fd, .orig = undefined, .active = false };
         return .{ .fd = fd, .orig = orig, .active = true };
     }
@@ -196,6 +210,7 @@ test "UpgradedConn holds initial_data and error_body before deinit" {
     const alloc = std.testing.allocator;
     const up = UpgradedConn{
         .stream = undefined,
+        .io = undefined,
         .status = 101,
         .initial_data = try alloc.dupe(u8, "banner:"),
         .error_body = try alloc.dupe(u8, "err"),
@@ -213,6 +228,7 @@ test "UpgradedConn fields are empty when no initial data or error body" {
     const alloc = std.testing.allocator;
     const up = UpgradedConn{
         .stream = undefined,
+        .io = undefined,
         .status = 200,
         .initial_data = &[_]u8{},
         .error_body = &[_]u8{},
@@ -226,10 +242,11 @@ test "UpgradedConn fields are empty when no initial data or error body" {
 
 test "RawTermGuard.enter returns inactive guard for non-TTY fd" {
     // Use a pipe fd which is not a TTY.
-    const pipe_fds = try std.posix.pipe();
+    var pipe_fds: [2]std.posix.fd_t = undefined;
+    if (std.os.linux.pipe(&pipe_fds) != 0) return; // skip if pipe syscall unavailable
     defer {
-        std.posix.close(pipe_fds[0]);
-        std.posix.close(pipe_fds[1]);
+        _ = std.os.linux.close(pipe_fds[0]);
+        _ = std.os.linux.close(pipe_fds[1]);
     }
     var guard = RawTermGuard.enter(pipe_fds[0]);
     try std.testing.expect(!guard.active);
@@ -265,4 +282,3 @@ test "validateRequestTarget accepts valid paths and rejects invalid" {
     // Tab character
     try std.testing.expectError(Error.InvalidRequestPath, validateRequestTarget("/v1.40/\t"));
 }
-

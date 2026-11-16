@@ -53,12 +53,13 @@ TEST_FAIL_RE = re.compile(r"^error:\s*'([^']+)' failed:")
 ERR_VARIANT_RE = re.compile(r"\berror\.([A-Z][A-Za-z0-9_]+)\b")
 
 RULE_SIGNAL_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"switch must handle all possibilities", re.I), ".agents/rules/zig-0.13-gotchas.md"),
-    (re.compile(r"never mutated|shadows declaration|shadows primitive|shadows capture", re.I), ".agents/rules/zig-0.13-gotchas.md"),
-    (re.compile(r"undeclared identifier 'ApiError'", re.I), ".agents/rules/zig-0.13-gotchas.md"),
-    (re.compile(r"expected type 'error\{OutOfMemory\}!void'|jsonStringify|stringify\.zig", re.I), ".agents/rules/zig-0.13-gotchas.md"),
-    (re.compile(r"expected type '\[\]u8', found '\[\]const u8'|GenericWriter|ArrayListAligned", re.I), ".agents/rules/zig-0.13-gotchas.md"),
-    (re.compile(r"\[gpa\].*leaked|memory address leaked|Segmentation fault", re.I), ".agents/rules/memory-and-security.md"),
+    (re.compile(r"switch must handle all possibilities", re.I), ".agents/rules/zig-0.17-gotchas.md"),
+    (re.compile(r"never mutated|shadows declaration|shadows primitive|shadows capture", re.I), ".agents/rules/zig-0.17-gotchas.md"),
+    (re.compile(r"undeclared identifier 'ApiError'", re.I), ".agents/rules/zig-0.17-gotchas.md"),
+    (re.compile(r"expected type 'error\{OutOfMemory\}!void'|jsonStringify|stringify\.zig", re.I), ".agents/rules/zig-0.17-gotchas.md"),
+    (re.compile(r"expected type '\[\]u8', found '\[\]const u8'|GenericWriter|ArrayListAligned", re.I), ".agents/rules/zig-0.17-gotchas.md"),
+    (re.compile(r"\[gpa\].*leaked|memory address leaked|Segmentation fault|mismatches allocation", re.I), ".agents/rules/memory-and-security.md"),
+    (re.compile(r"no member named '(?:net|cwd|getenv|pipe|milliTimestamp|nanoTimestamp|stringify)'|StreamTooLong|testing\.io", re.I), ".agents/rules/zig-0.17-gotchas.md"),
 )
 
 
@@ -588,7 +589,7 @@ def render_lessons_markdown(
         "tags:",
         "  - lessons-learned",
         "  - bug-pattern",
-        "  - zig-0.13",
+        "  - zig-0.17",
         "  - error-analysis",
         "aliases:",
         "  - ZigPod Lessons Learned",

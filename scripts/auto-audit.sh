@@ -43,18 +43,19 @@ else
     pass "No 'page_allocator' usage in src/."
 fi
 
-# 2. Forbid ignoring GeneralPurposeAllocator.deinit() leak checks
-if has_match "defer _ = gpa\.deinit" "src/"; then
+# 2. Forbid ignoring DebugAllocator (formerly GeneralPurposeAllocator) deinit() leak checks
+if has_match "defer _ = (gpa|debug_allocator)\.deinit" "src/"; then
     fail "Found ignored 'gpa.deinit()' in src/main.zig."
 else
     pass "GPA leak check is enforced."
 fi
 
-# 3. Forbid BUG-001 regression (error.AccessDenied on connectUnixSocket)
-if has_match "error\.AccessDenied" "src/http.zig"; then
-    fail "Found 'error.AccessDenied' in src/http.zig (Zig 0.13 connectUnixSocket uses PermissionDenied; see BUG-001)."
+# 3. BUG-001: socket connect permission errors must surface as http.Error.PermissionDenied.
+#    (Zig 0.13 connectUnixSocket lacked AccessDenied; Zig 0.17 UnixAddress.ConnectError has both.)
+if has_match "error\.PermissionDenied, error\.AccessDenied => Error\.PermissionDenied" "src/http.zig"; then
+    pass "Connect PermissionDenied/AccessDenied map to http.Error.PermissionDenied (BUG-001)."
 else
-    pass "No BUG-001 AccessDenied mismatch in src/http.zig."
+    fail "Missing 'error.PermissionDenied, error.AccessDenied => Error.PermissionDenied' connect mapping in src/http.zig (see BUG-001)."
 fi
 
 # 4. Require std.testing.allocator in every heap-allocating module
@@ -134,7 +135,7 @@ else
 fi
 
 # 7. Require socket timeout polling, hardening config, audit verification, and 18-case demo
-if has_match "waitReadable" "src/http.zig" && has_match "verifyAuditFile" "src/log.zig" && has_match "ReadonlyRootfs" "src/podman_api.zig" && has_match "runSelfTest" "src/demo.zig" && has_match "std\.testing\.allocator" "src/demo.zig"; then
+if has_match "waitReadable" "src/http_socket.zig" && has_match "verifyAuditFile" "src/log.zig" && has_match "ReadonlyRootfs" "src/podman_api.zig" && has_match "runSelfTest" "src/demo.zig" && has_match "std\.testing\.allocator" "src/demo.zig"; then
     pass "Timeout poll, HostConfig hardening, audit hash-chain verification, and 18-case demo present."
 else
     fail "Missing timeout, HostConfig hardening, verifyAuditFile, or runSelfTest/testing.allocator in src/demo.zig."
@@ -155,10 +156,10 @@ else
 fi
 
 # 8c. Forbid piping compose output directly to grep -q & enforce Makefile subshell grouping (BUG-039)
-if has_match 'compose .+\|[[:space:]]*grep -q' "scripts/smoke.sh" || has_match 'compose .+\|[[:space:]]*grep -q' "scripts/podman-e2e.sh" || ! has_match '\{ for p in .*echo zig; \}' "Makefile"; then
+if has_match 'compose .+\|[[:space:]]*grep -q' "scripts/smoke.sh" || has_match 'compose .+\|[[:space:]]*grep -q' "scripts/podman-e2e.sh" || ! has_match 'scripts/find-zig\.sh' "Makefile"; then
     fail "Found unsafe direct compose pipe to grep -q in E2E scripts or ungrouped Makefile fallback (see BUG-039)."
 else
-    pass "No unsafe direct compose pipe to grep -q and Makefile ZIG fallback uses { ...; } (BUG-039)."
+    pass "No unsafe direct compose pipe to grep -q and Makefile ZIG lookup goes through scripts/find-zig.sh (BUG-039)."
 fi
 
 # 8d. Forbid silent error swallowing in hardened compose/transfer test modules (BUG-040)
@@ -213,9 +214,9 @@ fi
 # 8k. Require write-path audit tail repair under lock and shared complete-entry verification (BUG-030 / BUG-036)
 REPAIR_CALLS=0
 if command -v rg >/dev/null 2>&1; then
-    REPAIR_CALLS="$(rg -c 'repairAuditTail\(f\);' "src/log.zig" 2>/dev/null || echo 0)"
+    REPAIR_CALLS="$(rg -c 'repairAuditTail\(f, (self\.)?io\);' "src/log.zig" 2>/dev/null || echo 0)"
 else
-    REPAIR_CALLS="$(grep -Ec 'repairAuditTail\(f\);' "src/log.zig" 2>/dev/null || echo 0)"
+    REPAIR_CALLS="$(grep -Ec 'repairAuditTail\(f, (self\.)?io\);' "src/log.zig" 2>/dev/null || echo 0)"
 fi
 if [[ "$REPAIR_CALLS" -ge 2 ]] && has_match 'evaluateAuditContent' "src/log.zig" && has_match 'parseAuditFields\(' "src/log.zig"; then
     pass "Audit write-path tail repair (init+log) and shared complete-entry verification enforced (BUG-030/BUG-036)."
@@ -236,8 +237,8 @@ else
     fail "Inline .name alloc.dupe without errdefer or missing OOM test in src/podman_build.zig (see BUG-035)."
 fi
 
-if has_match 'pub fn writeAllWithTimeout\(' "src/http.zig" && has_match 'try writeAllWithTimeout\(' "src/http.zig" && has_match 'try http\.writeAllWithTimeout\(' "src/podman_api.zig" && ! has_match 'try stream\.writeAll\(' "src/http.zig" && ! has_match 'try stream\.writeAll\(' "src/podman_api.zig"; then
-    pass "Socket writes enforce writeAllWithTimeout across http.zig and podman_api.zig (BUG-037)."
+if has_match 'pub fn writeAllWithTimeout\(' "src/http_socket.zig" && has_match 'pub fn socketWriteAll\(' "src/http_socket.zig" && has_match 'try socket\.socketWriteAll\(' "src/http.zig" && has_match 'try http\.socket\.writeAllWithTimeout\(' "src/podman_api.zig" && ! has_match 'try stream\.writeAll\(' "src/http.zig" && ! has_match 'try stream\.writeAll\(' "src/podman_api.zig"; then
+    pass "Socket writes enforce deadline-bounded socketWriteAll/writeAllWithTimeout across http.zig and podman_api.zig (BUG-037)."
 else
     fail "Missing writeAllWithTimeout guard or unguarded 'try stream.writeAll' remains (see BUG-037)."
 fi
@@ -254,10 +255,10 @@ else
 fi
 
 # 8n. Require pumpBidirectional socket shutdown on stdin EOF (BUG-042)
-if has_match 'std\.posix\.shutdown\(stream\.handle, \.send\)' "src/podman_api.zig"; then
+if has_match 'stream\.shutdown\(io, \.send\)' "src/podman_api.zig"; then
     pass "pumpBidirectional socket shutdown on stdin EOF enforced (BUG-042)."
 else
-    fail "Missing std.posix.shutdown(stream.handle, .send) in src/podman_api.zig (see BUG-042)."
+    fail "Missing stream.shutdown(io, .send) in src/podman_api.zig pumpBidirectional (see BUG-042)."
 fi
 
 # 8o. Require validateResourceRef in pullImage, createContainer, CLI run, and compose (BUG-043)

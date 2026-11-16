@@ -89,7 +89,7 @@ pub fn listImagesJson(client: *const http.Client, logger: *log.Logger, writer: a
     });
     defer parsed.deinit();
 
-    const json_out = try std.json.stringifyAlloc(client.allocator, parsed.value, .{});
+    const json_out = try std.json.Stringify.valueAlloc(client.allocator, parsed.value, .{});
     defer client.allocator.free(json_out);
     try writer.print("{s}\n", .{json_out});
     logger.info("listed {d} image(s) as JSON", .{parsed.value.len});
@@ -97,10 +97,10 @@ pub fn listImagesJson(client: *const http.Client, logger: *log.Logger, writer: a
 
 pub fn pullImage(client: *const http.Client, logger: *log.Logger, image: []const u8, writer: anytype) !void {
     try validateResourceRef(image);
-    var path_buf = std.ArrayList(u8).init(client.allocator);
-    defer path_buf.deinit();
-    try path_buf.appendSlice(api_prefix ++ "/images/create?fromImage=");
-    try appendQueryEncoded(&path_buf, image);
+    var path_buf: std.ArrayList(u8) = .empty;
+    defer path_buf.deinit(client.allocator);
+    try path_buf.appendSlice(client.allocator, api_prefix ++ "/images/create?fromImage=");
+    try appendQueryEncoded(client.allocator, &path_buf, image);
 
     logger.info("pulling image {s}", .{image});
     const WriterType = @TypeOf(writer);
@@ -144,7 +144,7 @@ fn PullStreamCtx(comptime WriterType: type) type {
         logger: *log.Logger,
         image: []const u8,
         writer: WriterType,
-        line_buf: std.ArrayListUnmanaged(u8) = .{},
+        line_buf: std.ArrayList(u8) = .empty,
         had_error: bool = false,
 
         fn deinit(self: *@This()) void {
@@ -225,14 +225,14 @@ pub fn tagImage(
     try validateResourceRef(target_image);
     const rt = splitRepoTag(target_image);
 
-    var path_buf = std.ArrayList(u8).init(client.allocator);
-    defer path_buf.deinit();
-    try path_buf.appendSlice(api_prefix ++ "/images/");
-    try path_buf.appendSlice(src_image);
-    try path_buf.appendSlice("/tag?repo=");
-    try appendQueryEncoded(&path_buf, rt.repo);
-    try path_buf.appendSlice("&tag=");
-    try appendQueryEncoded(&path_buf, rt.tag);
+    var path_buf: std.ArrayList(u8) = .empty;
+    defer path_buf.deinit(client.allocator);
+    try path_buf.appendSlice(client.allocator, api_prefix ++ "/images/");
+    try path_buf.appendSlice(client.allocator, src_image);
+    try path_buf.appendSlice(client.allocator, "/tag?repo=");
+    try appendQueryEncoded(client.allocator, &path_buf, rt.repo);
+    try path_buf.appendSlice(client.allocator, "&tag=");
+    try appendQueryEncoded(client.allocator, &path_buf, rt.tag);
 
     logger.debug("POST {s}", .{path_buf.items});
     const resp = try client.request("POST", path_buf.items, null);
@@ -267,7 +267,7 @@ pub fn imageHistory(
     defer parsed.deinit();
 
     if (json_mode) {
-        const json_out = try std.json.stringifyAlloc(client.allocator, parsed.value, .{});
+        const json_out = try std.json.Stringify.valueAlloc(client.allocator, parsed.value, .{});
         defer client.allocator.free(json_out);
         try writer.print("{s}\n", .{json_out});
         logger.info("fetched JSON history for {s} ({d} layer(s))", .{ image, parsed.value.len });
@@ -301,21 +301,21 @@ pub fn commitContainer(
     try validateResourceRef(target_image);
     const rt = splitRepoTag(target_image);
 
-    var path_buf = std.ArrayList(u8).init(client.allocator);
-    defer path_buf.deinit();
-    try path_buf.appendSlice(api_prefix ++ "/commit?container=");
-    try appendQueryEncoded(&path_buf, container);
-    try path_buf.appendSlice("&repo=");
-    try appendQueryEncoded(&path_buf, rt.repo);
-    try path_buf.appendSlice("&tag=");
-    try appendQueryEncoded(&path_buf, rt.tag);
+    var path_buf: std.ArrayList(u8) = .empty;
+    defer path_buf.deinit(client.allocator);
+    try path_buf.appendSlice(client.allocator, api_prefix ++ "/commit?container=");
+    try appendQueryEncoded(client.allocator, &path_buf, container);
+    try path_buf.appendSlice(client.allocator, "&repo=");
+    try appendQueryEncoded(client.allocator, &path_buf, rt.repo);
+    try path_buf.appendSlice(client.allocator, "&tag=");
+    try appendQueryEncoded(client.allocator, &path_buf, rt.tag);
     if (message) |m| {
-        try path_buf.appendSlice("&comment=");
-        try appendQueryEncoded(&path_buf, m);
+        try path_buf.appendSlice(client.allocator, "&comment=");
+        try appendQueryEncoded(client.allocator, &path_buf, m);
     }
     if (author) |a| {
-        try path_buf.appendSlice("&author=");
-        try appendQueryEncoded(&path_buf, a);
+        try path_buf.appendSlice(client.allocator, "&author=");
+        try appendQueryEncoded(client.allocator, &path_buf, a);
     }
 
     logger.debug("POST {s}", .{path_buf.items});
@@ -354,14 +354,14 @@ test "tagImage, imageHistory, and commitContainer endpoints + validation" {
     const sock_path = try std.fmt.allocPrint(
         alloc,
         "/tmp/zp-img-ops-{d}.sock",
-        .{std.time.nanoTimestamp()},
+        .{std.Io.Clock.awake.now(std.testing.io).nanoseconds},
     );
     defer alloc.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
 
     const hist_json = "[{\"Id\":\"sha256:1234567890abcdef\",\"CreatedBy\":\"/bin/sh -c echo hi\",\"Size\":4096}]";
     const commit_json = "{\"Id\":\"sha256:fedcba9876543210\"}";
@@ -385,7 +385,7 @@ test "tagImage, imageHistory, and commitContainer endpoints + validation" {
         },
     };
 
-    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    var ctx = MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
     const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
     var joined = false;
     defer if (!joined) thread.join();
@@ -393,28 +393,29 @@ test "tagImage, imageHistory, and commitContainer endpoints + validation" {
     const client = http.Client{
         .allocator = alloc,
         .socket_path = sock_path,
+        .io = std.testing.io,
     };
-    var logger = log.Logger{ .echo_stderr = false };
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
     defer logger.deinit();
 
-    var out = std.ArrayList(u8).init(alloc);
+    var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
     try std.testing.expectError(ApiError.InvalidIdentifier, tagImage(&client, &logger, "bad?x=1", "snap:v1"));
-    try std.testing.expectError(ApiError.InvalidIdentifier, commitContainer(&client, &logger, "../bad", "snap:v1", null, null, out.writer()));
+    try std.testing.expectError(ApiError.InvalidIdentifier, commitContainer(&client, &logger, "../bad", "snap:v1", null, null, &out.writer));
 
     try tagImage(&client, &logger, "alpine:3.20", "myrepo/app:v1");
 
-    try imageHistory(&client, &logger, "alpine:3.20", false, out.writer());
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "/bin/sh -c echo hi") != null);
+    try imageHistory(&client, &logger, "alpine:3.20", false, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "/bin/sh -c echo hi") != null);
 
     out.clearRetainingCapacity();
-    try imageHistory(&client, &logger, "alpine:3.20", true, out.writer());
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"CreatedBy\":\"/bin/sh -c echo hi\"") != null);
+    try imageHistory(&client, &logger, "alpine:3.20", true, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"CreatedBy\":\"/bin/sh -c echo hi\"") != null);
 
     out.clearRetainingCapacity();
-    try commitContainer(&client, &logger, "web", "snap:v2", "save", "alice", out.writer());
-    try std.testing.expectEqualStrings("sha256:fedcba9876543210\n", out.items);
+    try commitContainer(&client, &logger, "web", "snap:v2", "save", "alice", &out.writer);
+    try std.testing.expectEqualStrings("sha256:fedcba9876543210\n", out.written());
 
     thread.join();
     joined = true;
@@ -426,14 +427,14 @@ test "listImages and listImagesJson render table and fallback tags over mock Uni
     const sock_path = try std.fmt.allocPrint(
         alloc,
         "/tmp/zp-img-list-{d}.sock",
-        .{std.time.nanoTimestamp()},
+        .{std.Io.Clock.awake.now(std.testing.io).nanoseconds},
     );
     defer alloc.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
 
     const json_body =
         \\[{"Id":"sha256:9988776655443322","RepoTags":["docker.io/library/alpine:3.20"],"Size":7340032,"Created":1700000000},{"Id":"sha256:1111222233334444","Size":1024}]
@@ -454,29 +455,29 @@ test "listImages and listImagesJson render table and fallback tags over mock Uni
         },
     };
 
-    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    var ctx = MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
     const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
     var joined = false;
     defer if (!joined) thread.join();
 
-    const client = http.Client{ .allocator = alloc, .socket_path = sock_path };
-    var logger = log.Logger{ .echo_stderr = false };
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path, .io = std.testing.io };
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
     defer logger.deinit();
 
-    var out = std.ArrayList(u8).init(alloc);
+    var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
-    try listImages(&client, &logger, out.writer());
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "998877665544") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "docker.io/library/alpine:3.20") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "7.0 MB") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "111122223333") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "<none>:<none>") != null);
+    try listImages(&client, &logger, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "998877665544") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "docker.io/library/alpine:3.20") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "7.0 MB") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "111122223333") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "<none>:<none>") != null);
 
     out.clearRetainingCapacity();
-    try listImagesJson(&client, &logger, out.writer());
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "sha256:9988776655443322") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "sha256:1111222233334444") != null);
+    try listImagesJson(&client, &logger, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "sha256:9988776655443322") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "sha256:1111222233334444") != null);
 
     thread.join();
     joined = true;
@@ -488,14 +489,14 @@ test "removeImage succeeds on 204, fails closed on validation and API errors" {
     const sock_path = try std.fmt.allocPrint(
         alloc,
         "/tmp/zp-img-rm-{d}.sock",
-        .{std.time.nanoTimestamp()},
+        .{std.Io.Clock.awake.now(std.testing.io).nanoseconds},
     );
     defer alloc.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
 
     const gone_json = "{\"message\":\"no such image\"}";
     const replies = [_]ScriptedReply{
@@ -512,26 +513,26 @@ test "removeImage succeeds on 204, fails closed on validation and API errors" {
         },
     };
 
-    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    var ctx = MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
     const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
     var joined = false;
     defer if (!joined) thread.join();
 
-    const client = http.Client{ .allocator = alloc, .socket_path = sock_path };
-    var logger = log.Logger{ .echo_stderr = false };
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path, .io = std.testing.io };
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
     defer logger.deinit();
 
-    var sink = std.ArrayList(u8).init(alloc);
+    var sink: std.Io.Writer.Allocating = .init(alloc);
     defer sink.deinit();
 
-    try std.testing.expectError(ApiError.InvalidIdentifier, removeImage(&client, &logger, "bad?x=1", false, sink.writer()));
-    try removeImage(&client, &logger, "alpine:3.20", true, sink.writer());
-    try std.testing.expectError(ApiError.PodmanApiError, removeImage(&client, &logger, "ghost", false, sink.writer()));
+    try std.testing.expectError(ApiError.InvalidIdentifier, removeImage(&client, &logger, "bad?x=1", false, &sink.writer));
+    try removeImage(&client, &logger, "alpine:3.20", true, &sink.writer);
+    try std.testing.expectError(ApiError.PodmanApiError, removeImage(&client, &logger, "ghost", false, &sink.writer));
 
     thread.join();
     joined = true;
     try std.testing.expectEqual(replies.len, ctx.matched);
-    try std.testing.expectEqualStrings("Removed alpine:3.20\n", sink.items);
+    try std.testing.expectEqualStrings("Removed alpine:3.20\n", sink.written());
 }
 
 test "pullImage streams status lines and fails closed on error line and HTTP failure" {
@@ -539,14 +540,14 @@ test "pullImage streams status lines and fails closed on error line and HTTP fai
     const sock_path = try std.fmt.allocPrint(
         alloc,
         "/tmp/zp-img-pull-{d}.sock",
-        .{std.time.nanoTimestamp()},
+        .{std.Io.Clock.awake.now(std.testing.io).nanoseconds},
     );
     defer alloc.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
 
     const stream_out =
         "{\"status\":\"Pulling from library/alpine\"}\n" ++
@@ -579,37 +580,37 @@ test "pullImage streams status lines and fails closed on error line and HTTP fai
         },
     };
 
-    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    var ctx = MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
     const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
     var joined = false;
     defer if (!joined) thread.join();
 
-    const client = http.Client{ .allocator = alloc, .socket_path = sock_path };
-    var logger = log.Logger{ .echo_stderr = false };
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path, .io = std.testing.io };
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
     defer logger.deinit();
 
-    var out = std.ArrayList(u8).init(alloc);
+    var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
     // Pre-flight image validation must reject bad identifiers before touching the socket (BUG-043).
-    try std.testing.expectError(ApiError.InvalidIdentifier, pullImage(&client, &logger, "alpine;rm -rf /", out.writer()));
-    try std.testing.expectError(ApiError.InvalidIdentifier, pullImage(&client, &logger, "web/../../etc/shadow", out.writer()));
-    try std.testing.expectError(ApiError.InvalidIdentifier, pullImage(&client, &logger, "", out.writer()));
+    try std.testing.expectError(ApiError.InvalidIdentifier, pullImage(&client, &logger, "alpine;rm -rf /", &out.writer));
+    try std.testing.expectError(ApiError.InvalidIdentifier, pullImage(&client, &logger, "web/../../etc/shadow", &out.writer));
+    try std.testing.expectError(ApiError.InvalidIdentifier, pullImage(&client, &logger, "", &out.writer));
 
-    try pullImage(&client, &logger, "alpine:3.20", out.writer());
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "Pulling from library/alpine") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "9c6f07244728: Downloading") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "not-json-line") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "Pulled alpine:3.20") != null);
+    try pullImage(&client, &logger, "alpine:3.20", &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "Pulling from library/alpine") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "9c6f07244728: Downloading") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "not-json-line") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "Pulled alpine:3.20") != null);
 
     var got_stream_err = false;
-    pullImage(&client, &logger, "alpine:3.20", out.writer()) catch |e| {
+    pullImage(&client, &logger, "alpine:3.20", &out.writer) catch |e| {
         got_stream_err = e == ApiError.PodmanApiError;
     };
     try std.testing.expect(got_stream_err);
 
     var got_http_err = false;
-    pullImage(&client, &logger, "alpine:3.20", out.writer()) catch |e| {
+    pullImage(&client, &logger, "alpine:3.20", &out.writer) catch |e| {
         got_http_err = e == ApiError.PodmanApiError;
     };
     try std.testing.expect(got_http_err);
@@ -638,30 +639,30 @@ test "splitRepoTag handles registries, ports, and empty tags" {
 
 test "PullStreamCtx buffers partial lines, passes junk through, and caps line size" {
     const alloc = std.testing.allocator;
-    var logger = log.Logger{ .echo_stderr = false };
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
     defer logger.deinit();
-    var out = std.ArrayList(u8).init(alloc);
+    var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
-    var ctx = PullStreamCtx(@TypeOf(out.writer())){
+    var ctx = PullStreamCtx(@TypeOf(&out.writer)){
         .allocator = alloc,
         .logger = &logger,
         .image = "alpine:3.20",
-        .writer = out.writer(),
+        .writer = &out.writer,
     };
     defer ctx.deinit();
 
     // A complete JSON object without a trailing newline stays buffered.
     try ctx.onChunk("{\"status\":\"Pulling\"}");
-    try std.testing.expectEqual(@as(usize, 0), out.items.len);
+    try std.testing.expectEqual(@as(usize, 0), out.written().len);
     // The next read completes the line and delivers a full id-status line.
     try ctx.onChunk("\n{\"id\":\"9c6f07244728\",\"status\":\"Downloading\"}\n");
-    try std.testing.expectEqualStrings("Pulling\n9c6f07244728: Downloading\n", out.items);
+    try std.testing.expectEqualStrings("Pulling\n9c6f07244728: Downloading\n", out.written());
 
     // Non-JSON lines pass through verbatim.
     out.clearRetainingCapacity();
     try ctx.onChunk("plain text line\n");
-    try std.testing.expectEqualStrings("plain text line\n", out.items);
+    try std.testing.expectEqualStrings("plain text line\n", out.written());
 
     // A line larger than the 1 MiB cap is rejected before buffering.
     const big = try alloc.alloc(u8, 1024 * 1024 + 1);

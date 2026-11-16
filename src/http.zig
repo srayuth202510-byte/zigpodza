@@ -1,7 +1,12 @@
 //! Minimal HTTP/1.1 client over a Unix domain socket.
 //! One request per connection ("Connection: close"); supports Content-Length
 //! and chunked transfer encoding. That's all the Podman API needs.
+//! Zig 0.17: all socket I/O goes through an explicit `std.Io` instance with
+//! deadline-based `operateTimeout` so every read/write respects the caller's
+//! timeout (BUG-007/BUG-037 semantics preserved).
 const std = @import("std");
+const Io = std.Io;
+const Clock = Io.Clock;
 pub const types = @import("http_types.zig");
 pub const parser = @import("http_parser.zig");
 
@@ -22,81 +27,37 @@ pub const validateRequestTarget = types.validateRequestTarget;
 pub const parseResponseHead = parser.parseResponseHead;
 pub const parseResponse = parser.parseResponse;
 
-fn waitPollEvent(fd: std.posix.fd_t, events: i16, timeout_ms: i32) !void {
-    var fds = [_]std.posix.pollfd{.{
-        .fd = fd,
-        .events = events,
-        .revents = 0,
-    }};
-    const ready = try std.posix.poll(&fds, timeout_ms);
-    if (ready == 0) return Error.Timeout;
-}
-
-fn waitReadable(fd: std.posix.fd_t, timeout_ms: i32) !void {
-    if (timeout_ms < 0) return;
-    try waitPollEvent(fd, std.posix.POLL.IN, timeout_ms);
-}
-
-fn waitWritable(fd: std.posix.fd_t, timeout_ms: i32) !void {
-    try waitPollEvent(fd, std.posix.POLL.OUT, timeout_ms);
-}
-
-/// Writes all bytes of `data` to `stream` within `timeout_ms` using non-blocking
-/// `send` + `POLL.OUT` polling so a stalled peer cannot block socket writes
-/// indefinitely (BUG-037). Negative `timeout_ms` waits without a deadline.
-pub fn writeAllWithTimeout(stream: std.net.Stream, data: []const u8, timeout_ms: i32) !void {
-    if (data.len == 0) return;
-    const deadline_ms: ?i128 = if (timeout_ms >= 0)
-        std.time.milliTimestamp() + @as(i128, timeout_ms)
-    else
-        null;
-
-    const flags = std.posix.MSG.DONTWAIT | std.posix.MSG.NOSIGNAL;
-    var sent: usize = 0;
-    while (sent < data.len) {
-        const n = std.posix.send(stream.handle, data[sent..], flags) catch |e| switch (e) {
-            error.WouldBlock => {
-                const remaining_ms: i32 = if (deadline_ms) |dl| blk: {
-                    const rem = dl - std.time.milliTimestamp();
-                    if (rem <= 0) return Error.Timeout;
-                    break :blk @intCast(@min(rem, @as(i128, std.math.maxInt(i32))));
-                } else -1;
-                try waitWritable(stream.handle, remaining_ms);
-                continue;
-            },
-            else => return e,
-        };
-        if (n == 0) return error.BrokenPipe;
-        sent += n;
-    }
-}
+pub const socket = @import("http_socket.zig");
+pub const Socket = Io.net.Stream;
+pub const Deadline = socket.Deadline;
 
 /// Reads the full response until EOF, enforcing `timeout_ms` on *every* read
 /// (not just the first byte) so a daemon that stalls mid-response cannot hang
 /// the process forever (BUG-007).
 fn readAllWithTimeout(
-    stream: std.net.Stream,
+    io: Io,
+    handle: Io.net.Socket.Handle,
     allocator: std.mem.Allocator,
     max_size: usize,
-    timeout_ms: i32,
+    deadline: Deadline,
 ) ![]u8 {
-    var out = std.ArrayList(u8).init(allocator);
-    errdefer out.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
     var chunk: [16384]u8 = undefined;
     while (true) {
-        try waitReadable(stream.handle, timeout_ms);
-        const n = try stream.read(&chunk);
+        const n = try socket.socketRead(io, handle, &chunk, deadline);
         if (n == 0) break; // EOF: server honored "Connection: close"
-        try out.appendSlice(chunk[0..n]);
+        try out.appendSlice(allocator, chunk[0..n]);
         if (out.items.len > max_size) return error.StreamTooLong;
     }
-    return out.toOwnedSlice();
+    return out.toOwnedSlice(allocator);
 }
 
 pub const Client = struct {
     allocator: std.mem.Allocator,
     socket_path: []const u8,
     timeout_ms: i32 = default_timeout_ms,
+    io: Io,
 
     pub fn request(self: Client, method: []const u8, path: []const u8, body: ?[]const u8) !Response {
         return self.requestWithTimeout(method, path, body, self.timeout_ms);
@@ -126,9 +87,9 @@ pub const Client = struct {
         timeout_ms: i32,
     ) !Response {
         const stream = try self.connectAndSend(method, path, body, false, content_type, timeout_ms);
-        defer stream.close();
+        defer stream.close(self.io);
 
-        const raw = try readAllWithTimeout(stream, self.allocator, max_response_bytes, timeout_ms);
+        const raw = try readAllWithTimeout(self.io, stream.socket.handle, self.allocator, max_response_bytes, Deadline.fromMs(self.io, timeout_ms));
         defer self.allocator.free(raw);
         return parseResponse(self.allocator, raw);
     }
@@ -146,12 +107,12 @@ pub const Client = struct {
         comptime on_chunk: fn (@TypeOf(ctx), []const u8) anyerror!void,
     ) !StreamResponse {
         const stream = try self.connectAndSend(method, path, body, false, "application/json", timeout_ms);
-        defer stream.close();
+        defer stream.close(self.io);
 
-        var buf = std.ArrayList(u8).init(self.allocator);
-        defer buf.deinit();
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(self.allocator);
 
-        const header_end = try readHeaderBlock(stream, &buf, timeout_ms);
+        const header_end = try readHeaderBlock(self.io, stream.socket.handle, self.allocator, &buf, Deadline.fromMs(self.io, timeout_ms));
         const head = try parseResponseHead(buf.items[0..header_end]);
         const rest_start = header_end + 4;
 
@@ -163,17 +124,17 @@ pub const Client = struct {
         buf.items.len = leftover_len;
 
         if (head.status < 200 or head.status >= 300) {
-            var err_out = std.ArrayList(u8).init(self.allocator);
-            errdefer err_out.deinit();
-            try pumpBody(stream, &buf, head, timeout_ms, &err_out, appendBoundedError);
+            var err_out: std.ArrayList(u8) = .empty;
+            errdefer err_out.deinit(self.allocator);
+            try pumpBody(self.io, stream.socket.handle, self.allocator, &buf, head, Deadline.fromMs(self.io, timeout_ms), BoundedErrorSink{ .allocator = self.allocator, .out = &err_out }, BoundedErrorSink.append);
             return .{
                 .status = head.status,
-                .error_body = try err_out.toOwnedSlice(),
+                .error_body = try err_out.toOwnedSlice(self.allocator),
                 .allocator = self.allocator,
             };
         }
 
-        try pumpBody(stream, &buf, head, timeout_ms, ctx, on_chunk);
+        try pumpBody(self.io, stream.socket.handle, self.allocator, &buf, head, Deadline.fromMs(self.io, timeout_ms), ctx, on_chunk);
         return .{ .status = head.status, .error_body = &.{}, .allocator = self.allocator };
     }
 
@@ -187,12 +148,12 @@ pub const Client = struct {
         timeout_ms: i32,
     ) !UpgradedConn {
         const stream = try self.connectAndSend(method, path, body, true, "application/json", timeout_ms);
-        errdefer stream.close();
+        errdefer stream.close(self.io);
 
-        var buf = std.ArrayList(u8).init(self.allocator);
-        defer buf.deinit();
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(self.allocator);
 
-        const header_end = try readHeaderBlock(stream, &buf, timeout_ms);
+        const header_end = try readHeaderBlock(self.io, stream.socket.handle, self.allocator, &buf, Deadline.fromMs(self.io, timeout_ms));
         const head = try parseResponseHead(buf.items[0..header_end]);
         const rest_start = header_end + 4;
         const leftover = buf.items[rest_start..];
@@ -201,6 +162,7 @@ pub const Client = struct {
             const initial: []u8 = if (leftover.len > 0) try self.allocator.dupe(u8, leftover) else &.{};
             return .{
                 .stream = stream,
+                .io = self.io,
                 .status = head.status,
                 .initial_data = initial,
                 .error_body = &.{},
@@ -212,14 +174,15 @@ pub const Client = struct {
         if (leftover_len > 0) std.mem.copyForwards(u8, buf.items[0..leftover_len], leftover);
         buf.items.len = leftover_len;
 
-        var err_out = std.ArrayList(u8).init(self.allocator);
-        errdefer err_out.deinit();
-        try pumpBody(stream, &buf, head, timeout_ms, &err_out, appendBoundedError);
+        var err_out: std.ArrayList(u8) = .empty;
+        errdefer err_out.deinit(self.allocator);
+        try pumpBody(self.io, stream.socket.handle, self.allocator, &buf, head, Deadline.fromMs(self.io, timeout_ms), BoundedErrorSink{ .allocator = self.allocator, .out = &err_out }, BoundedErrorSink.append);
         return .{
             .stream = stream,
+            .io = self.io,
             .status = head.status,
             .initial_data = &.{},
-            .error_body = try err_out.toOwnedSlice(),
+            .error_body = try err_out.toOwnedSlice(self.allocator),
             .allocator = self.allocator,
         };
     }
@@ -232,20 +195,25 @@ pub const Client = struct {
         is_upgrade: bool,
         content_type: []const u8,
         timeout_ms: i32,
-    ) !std.net.Stream {
+    ) !Socket {
         try validateRequestTarget(path);
 
-        const stream = std.net.connectUnixSocket(self.socket_path) catch |e| return switch (e) {
+        const addr = std.Io.net.UnixAddress.init(self.socket_path) catch |e| switch (e) {
+            error.NameTooLong => return Error.SocketNotFound,
+        };
+        const stream = addr.connect(self.io) catch |e| return switch (e) {
             error.FileNotFound => Error.SocketNotFound,
             error.ConnectionRefused => Error.DaemonNotRunning,
-            error.PermissionDenied => Error.PermissionDenied,
+            error.PermissionDenied, error.AccessDenied => Error.PermissionDenied,
+            error.Canceled => Error.Timeout,
             else => e,
         };
-        errdefer stream.close();
+        errdefer stream.close(self.io);
+        socket.setNonBlocking(stream.socket.handle);
 
-        var req = std.ArrayList(u8).init(self.allocator);
+        var req: Io.Writer.Allocating = .init(self.allocator);
         defer req.deinit();
-        const w = req.writer();
+        const w = &req.writer;
         try w.print("{s} {s} HTTP/1.1\r\n", .{ method, path });
         if (is_upgrade) {
             try w.writeAll("Host: d\r\nUser-Agent: zigpod/0.1\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n");
@@ -258,45 +226,51 @@ pub const Client = struct {
         } else {
             try w.writeAll("Content-Length: 0\r\n\r\n");
         }
-        try writeAllWithTimeout(stream, req.items, timeout_ms);
+        try socket.socketWriteAll(self.io, stream.socket.handle, req.written(), Deadline.fromMs(self.io, timeout_ms));
         return stream;
     }
 };
 
-fn appendBoundedError(out: *std.ArrayList(u8), chunk: []const u8) !void {
-    const projected = std.math.add(usize, out.items.len, chunk.len) catch return Error.InvalidResponse;
-    if (projected > max_response_bytes) return error.StreamTooLong;
-    try out.appendSlice(chunk);
-}
+const BoundedErrorSink = struct {
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
 
-fn readHeaderBlock(stream: std.net.Stream, buf: *std.ArrayList(u8), timeout_ms: i32) !usize {
+    fn append(sink: BoundedErrorSink, chunk: []const u8) !void {
+        const projected = std.math.add(usize, sink.out.items.len, chunk.len) catch return Error.InvalidResponse;
+        if (projected > max_response_bytes) return error.StreamTooLong;
+        try sink.out.appendSlice(sink.allocator, chunk);
+    }
+};
+
+fn readHeaderBlock(io: Io, handle: Io.net.Socket.Handle, allocator: std.mem.Allocator, buf: *std.ArrayList(u8), deadline: Deadline) !usize {
     var tmp: [4096]u8 = undefined;
     while (true) {
         if (std.mem.indexOf(u8, buf.items, "\r\n\r\n")) |idx| return idx;
         if (buf.items.len >= max_header_bytes) return Error.InvalidResponse;
-        try waitReadable(stream.handle, timeout_ms);
-        const n = try stream.read(&tmp);
+        const n = try socket.socketRead(io, handle, &tmp, deadline);
         if (n == 0) return Error.InvalidResponse;
         const projected = std.math.add(usize, buf.items.len, n) catch return Error.InvalidResponse;
         if (projected > max_header_bytes and std.mem.indexOf(u8, tmp[0..n], "\r\n\r\n") == null) {
             // Still allow if \r\n\r\n landed inside this read, otherwise reject oversized headers.
-            try buf.appendSlice(tmp[0..n]);
+            try buf.appendSlice(allocator, tmp[0..n]);
             return std.mem.indexOf(u8, buf.items, "\r\n\r\n") orelse Error.InvalidResponse;
         }
-        try buf.appendSlice(tmp[0..n]);
+        try buf.appendSlice(allocator, tmp[0..n]);
     }
 }
 
 fn pumpBody(
-    stream: std.net.Stream,
+    io: Io,
+    handle: Io.net.Socket.Handle,
+    allocator: std.mem.Allocator,
     buf: *std.ArrayList(u8),
     head: ResponseHead,
-    timeout_ms: i32,
+    deadline: Deadline,
     ctx: anytype,
     comptime on_chunk: fn (@TypeOf(ctx), []const u8) anyerror!void,
 ) !void {
     if (head.chunked) {
-        try streamChunked(stream, buf, timeout_ms, ctx, on_chunk);
+        try streamChunked(io, handle, allocator, buf, deadline, ctx, on_chunk);
         return;
     }
     if (head.content_length) |cl| {
@@ -308,9 +282,8 @@ fn pumpBody(
         }
         var tmp: [16384]u8 = undefined;
         while (remaining > 0) {
-            try waitReadable(stream.handle, timeout_ms);
             const want = @min(remaining, tmp.len);
-            const n = try stream.read(tmp[0..want]);
+            const n = try socket.socketRead(io, handle, tmp[0..want], deadline);
             if (n == 0) return Error.InvalidResponse;
             try on_chunk(ctx, tmp[0..n]);
             remaining -= n;
@@ -323,17 +296,18 @@ fn pumpBody(
     }
     var tmp: [16384]u8 = undefined;
     while (true) {
-        try waitReadable(stream.handle, timeout_ms);
-        const n = try stream.read(&tmp);
+        const n = try socket.socketRead(io, handle, &tmp, deadline);
         if (n == 0) break;
         try on_chunk(ctx, tmp[0..n]);
     }
 }
 
 fn streamChunked(
-    stream: std.net.Stream,
+    io: Io,
+    handle: Io.net.Socket.Handle,
+    allocator: std.mem.Allocator,
     buf: *std.ArrayList(u8),
-    timeout_ms: i32,
+    deadline: Deadline,
     ctx: anytype,
     comptime on_chunk: fn (@TypeOf(ctx), []const u8) anyerror!void,
 ) !void {
@@ -352,10 +326,9 @@ fn streamChunked(
                 pos = 0;
             }
             if (buf.items.len >= 4096) return Error.InvalidResponse;
-            try waitReadable(stream.handle, timeout_ms);
-            const n = try stream.read(&tmp);
+            const n = try socket.socketRead(io, handle, &tmp, deadline);
             if (n == 0) return Error.InvalidResponse;
-            try buf.appendSlice(tmp[0..n]);
+            try buf.appendSlice(allocator, tmp[0..n]);
         };
 
         var size_str = buf.items[pos..line_end];
@@ -375,10 +348,9 @@ fn streamChunked(
                     return;
                 }
                 if (buf.items.len - pos >= max_header_bytes) return Error.InvalidResponse;
-                try waitReadable(stream.handle, timeout_ms);
-                const n = try stream.read(&tmp);
+                const n = try socket.socketRead(io, handle, &tmp, deadline);
                 if (n == 0) return Error.InvalidResponse;
-                try buf.appendSlice(tmp[0..n]);
+                try buf.appendSlice(allocator, tmp[0..n]);
             }
         }
 
@@ -392,9 +364,8 @@ fn streamChunked(
             remaining -= take;
         }
         while (remaining > 0) {
-            try waitReadable(stream.handle, timeout_ms);
             const want = @min(remaining, tmp.len);
-            const n = try stream.read(tmp[0..want]);
+            const n = try socket.socketRead(io, handle, tmp[0..want], deadline);
             if (n == 0) return Error.InvalidResponse;
             try on_chunk(ctx, tmp[0..n]);
             remaining -= n;
@@ -406,10 +377,9 @@ fn streamChunked(
                 buf.items.len = 0;
                 pos = 0;
             }
-            try waitReadable(stream.handle, timeout_ms);
-            const n = try stream.read(&tmp);
+            const n = try socket.socketRead(io, handle, &tmp, deadline);
             if (n == 0) return Error.InvalidResponse;
-            try buf.appendSlice(tmp[0..n]);
+            try buf.appendSlice(allocator, tmp[0..n]);
         }
         const trailer_end = std.math.add(usize, pos, 2) catch return Error.InvalidResponse;
         if (!std.mem.eql(u8, buf.items[pos..trailer_end], "\r\n")) return Error.InvalidResponse;
@@ -424,40 +394,40 @@ test {
     _ = parser;
 }
 
+const test_io = std.testing.io;
+
 const MockHttpCtx = struct {
-    server: *std.net.Server,
+    server: *Io.net.Server,
     response: []const u8,
     captured_req: [1024]u8 = undefined,
     captured_len: usize = 0,
 };
 
 fn runMockHttpServer(ctx: *MockHttpCtx) void {
-    const conn = ctx.server.accept() catch return;
-    defer conn.stream.close();
+    const conn = ctx.server.accept(test_io) catch return;
+    defer conn.close(test_io);
 
     var total: usize = 0;
     while (total < ctx.captured_req.len) {
-        const n = conn.stream.read(ctx.captured_req[total..]) catch return;
+        var data = [_][]u8{ctx.captured_req[total..]};
+        const n = conn.read(test_io, &data) catch return;
         if (n == 0) break;
         total += n;
         if (std.mem.indexOf(u8, ctx.captured_req[0..total], "\r\n\r\n") != null) break;
     }
     ctx.captured_len = total;
-    conn.stream.writeAll(ctx.response) catch {};
+    socket.socketWriteAll(test_io, conn.socket.handle, ctx.response, .{ .ts = null }) catch {};
 }
 
 test "Client.request round-trip over mock Unix socket with chunked response" {
-    const sock_path = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "/tmp/zp-http-{d}.sock",
-        .{std.time.nanoTimestamp()},
-    );
-    defer std.testing.allocator.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(alloc, "/tmp/zp-http-{d}.sock", .{Io.Clock.awake.now(test_io).nanoseconds});
+    defer alloc.free(sock_path);
+    Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
+    defer Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try Io.net.UnixAddress.init(sock_path)).listen(test_io, .{});
+    defer server.deinit(test_io);
 
     var ctx = MockHttpCtx{
         .server = &server,
@@ -468,8 +438,9 @@ test "Client.request round-trip over mock Unix socket with chunked response" {
     defer if (!joined) thread.join();
 
     const client = Client{
-        .allocator = std.testing.allocator,
+        .allocator = alloc,
         .socket_path = sock_path,
+        .io = test_io,
     };
     const resp = try client.request("GET", "/v1.40/_ping", null);
     defer resp.deinit();
@@ -482,66 +453,61 @@ test "Client.request round-trip over mock Unix socket with chunked response" {
     try std.testing.expect(std.mem.startsWith(u8, ctx.captured_req[0..ctx.captured_len], "GET /v1.40/_ping HTTP/1.1\r\n"));
 }
 
-fn runSlowMockServer(server: *std.net.Server) void {
-    const conn = server.accept() catch return;
-    defer conn.stream.close();
-    std.time.sleep(100 * std.time.ns_per_ms);
+fn runSlowMockServer(server: *Io.net.Server) void {
+    const conn = server.accept(test_io) catch return;
+    defer conn.close(test_io);
+    test_io.sleep(.fromNanoseconds(100 * std.time.ns_per_ms), .awake) catch {};
 }
 
 test "Client.request returns Error.Timeout when server does not respond" {
-    const sock_path = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "/tmp/zp-http-timeout-{d}.sock",
-        .{std.time.nanoTimestamp()},
-    );
-    defer std.testing.allocator.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(alloc, "/tmp/zp-http-timeout-{d}.sock", .{Io.Clock.awake.now(test_io).nanoseconds});
+    defer alloc.free(sock_path);
+    Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
+    defer Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try Io.net.UnixAddress.init(sock_path)).listen(test_io, .{});
+    defer server.deinit(test_io);
 
     const thread = try std.Thread.spawn(.{}, runSlowMockServer, .{&server});
     defer thread.join();
 
     const client = Client{
-        .allocator = std.testing.allocator,
+        .allocator = alloc,
         .socket_path = sock_path,
         .timeout_ms = 20,
+        .io = test_io,
     };
     try std.testing.expectError(Error.Timeout, client.request("GET", "/v1.40/_ping", null));
 }
 
 const PartialStallCtx = struct {
-    server: *std.net.Server,
+    server: *Io.net.Server,
     done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 };
 
 /// BUG-007 regression: sends a complete header plus a partial body, then
 /// stalls without closing the connection. The old implementation blocked
 /// forever inside `readAllAlloc` because the timeout only covered the first
-/// byte; the new per-read poll must raise `Error.Timeout`.
+/// byte; the new per-read deadline must raise `Error.Timeout`.
 fn runPartialStallServer(ctx: *PartialStallCtx) void {
-    const conn = ctx.server.accept() catch return;
-    defer conn.stream.close();
-    conn.stream.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nabcd") catch return;
+    const conn = ctx.server.accept(test_io) catch return;
+    defer conn.close(test_io);
+    socket.socketWriteAll(test_io, conn.socket.handle, "HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nabcd", .{ .ts = null }) catch return;
     while (!ctx.done.load(.acquire)) {
-        std.time.sleep(2 * std.time.ns_per_ms);
+        test_io.sleep(.fromNanoseconds(2 * std.time.ns_per_ms), .awake) catch {};
     }
 }
 
 test "Client.request times out when response stream stalls mid-body" {
-    const sock_path = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "/tmp/zp-http-stall-{d}.sock",
-        .{std.time.nanoTimestamp()},
-    );
-    defer std.testing.allocator.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(alloc, "/tmp/zp-http-stall-{d}.sock", .{Io.Clock.awake.now(test_io).nanoseconds});
+    defer alloc.free(sock_path);
+    Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
+    defer Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try Io.net.UnixAddress.init(sock_path)).listen(test_io, .{});
+    defer server.deinit(test_io);
 
     var ctx = PartialStallCtx{ .server = &server };
     const thread = try std.Thread.spawn(.{}, runPartialStallServer, .{&ctx});
@@ -552,9 +518,10 @@ test "Client.request times out when response stream stalls mid-body" {
     }
 
     const client = Client{
-        .allocator = std.testing.allocator,
+        .allocator = alloc,
         .socket_path = sock_path,
         .timeout_ms = 30,
+        .io = test_io,
     };
     try std.testing.expectError(Error.Timeout, client.request("GET", "/v1.40/_ping", null));
 
@@ -563,44 +530,43 @@ test "Client.request times out when response stream stalls mid-body" {
     joined = true;
 }
 
-fn runDelayedServer(server: *std.net.Server) void {
-    const conn = server.accept() catch return;
-    defer conn.stream.close();
+fn runDelayedServer(server: *Io.net.Server) void {
+    const conn = server.accept(test_io) catch return;
+    defer conn.close(test_io);
     // Drain the request first: closing with unread data pending makes the
     // kernel send RST instead of a clean FIN.
     var buf: [4096]u8 = undefined;
     var total: usize = 0;
     while (total < buf.len) {
-        const n = conn.stream.read(buf[total..]) catch return;
+        var data = [_][]u8{buf[total..]};
+        const n = conn.read(test_io, &data) catch return;
         if (n == 0) break;
         total += n;
         if (std.mem.indexOf(u8, buf[0..total], "\r\n\r\n") != null) break;
     }
-    std.time.sleep(150 * std.time.ns_per_ms);
-    conn.stream.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") catch {};
+    test_io.sleep(.fromNanoseconds(150 * std.time.ns_per_ms), .awake) catch {};
+    socket.socketWriteAll(test_io, conn.socket.handle, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", .{ .ts = null }) catch {};
 }
 
 test "requestWithTimeout overrides short client default for blocking endpoints" {
-    const sock_path = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "/tmp/zp-http-delayed-{d}.sock",
-        .{std.time.nanoTimestamp()},
-    );
-    defer std.testing.allocator.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(alloc, "/tmp/zp-http-delayed-{d}.sock", .{Io.Clock.awake.now(test_io).nanoseconds});
+    defer alloc.free(sock_path);
+    Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
+    defer Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try Io.net.UnixAddress.init(sock_path)).listen(test_io, .{});
+    defer server.deinit(test_io);
 
     const thread = try std.Thread.spawn(.{}, runDelayedServer, .{&server});
     var joined = false;
     defer if (!joined) thread.join();
 
     const client = Client{
-        .allocator = std.testing.allocator,
+        .allocator = alloc,
         .socket_path = sock_path,
         .timeout_ms = 30,
+        .io = test_io,
     };
     // Default timeout would fail; the explicit long timeout must succeed.
     const resp = try client.requestWithTimeout("GET", "/v1.40/_ping", null, 10_000);
@@ -613,75 +579,77 @@ test "requestWithTimeout overrides short client default for blocking endpoints" 
     try std.testing.expectEqualStrings("ok", resp.body);
 }
 
-fn runStreamMockServer(server: *std.net.Server) void {
+fn runStreamMockServer(server: *Io.net.Server) void {
     // 1) Chunked response sent in multiple parts
-    if (server.accept()) |conn| {
-        defer conn.stream.close();
+    if (server.accept(test_io)) |conn| {
+        defer conn.close(test_io);
         var req_buf: [512]u8 = undefined;
-        _ = conn.stream.read(&req_buf) catch {};
-        conn.stream.writeAll("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello") catch {};
-        std.time.sleep(10 * std.time.ns_per_ms);
-        conn.stream.writeAll("\r\n6\r\n world\r\n0\r\n\r\n") catch {};
+        var data = [_][]u8{&req_buf};
+        _ = conn.read(test_io, &data) catch {};
+        socket.socketWriteAll(test_io, conn.socket.handle, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello", .{ .ts = null }) catch {};
+        test_io.sleep(.fromNanoseconds(10 * std.time.ns_per_ms), .awake) catch {};
+        socket.socketWriteAll(test_io, conn.socket.handle, "\r\n6\r\n world\r\n0\r\n\r\n", .{ .ts = null }) catch {};
     } else |_| {}
 
     // 2) 404 error body
-    if (server.accept()) |conn| {
-        defer conn.stream.close();
+    if (server.accept(test_io)) |conn| {
+        defer conn.close(test_io);
         var req_buf: [512]u8 = undefined;
-        _ = conn.stream.read(&req_buf) catch {};
-        conn.stream.writeAll("HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nnot found") catch {};
+        var data = [_][]u8{&req_buf};
+        _ = conn.read(test_io, &data) catch {};
+        socket.socketWriteAll(test_io, conn.socket.handle, "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nnot found", .{ .ts = null }) catch {};
     } else |_| {}
 
     // 3) HTTP 101 upgrade with initial payload and echo
-    if (server.accept()) |conn| {
-        defer conn.stream.close();
+    if (server.accept(test_io)) |conn| {
+        defer conn.close(test_io);
         var req_buf: [512]u8 = undefined;
-        _ = conn.stream.read(&req_buf) catch {};
-        conn.stream.writeAll("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\nbanner:") catch {};
+        var data = [_][]u8{&req_buf};
+        _ = conn.read(test_io, &data) catch {};
+        socket.socketWriteAll(test_io, conn.socket.handle, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\nbanner:", .{ .ts = null }) catch {};
         var in_buf: [64]u8 = undefined;
-        const n = conn.stream.read(&in_buf) catch 0;
-        if (n > 0) conn.stream.writeAll(in_buf[0..n]) catch {};
+        var echo_data = [_][]u8{&in_buf};
+        const n = conn.read(test_io, &echo_data) catch 0;
+        if (n > 0) socket.socketWriteAll(test_io, conn.socket.handle, in_buf[0..n], .{ .ts = null }) catch {};
     } else |_| {}
 }
 
 fn collectStreamChunk(out: *std.ArrayList(u8), slice: []const u8) !void {
-    try out.appendSlice(slice);
+    try out.appendSlice(std.testing.allocator, slice);
 }
 
 test "streamRequest handles chunked streaming, error bodies, and 101 upgrade" {
-    const sock_path = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "/tmp/zp-http-stream-{d}.sock",
-        .{std.time.nanoTimestamp()},
-    );
-    defer std.testing.allocator.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(alloc, "/tmp/zp-http-stream-{d}.sock", .{Io.Clock.awake.now(test_io).nanoseconds});
+    defer alloc.free(sock_path);
+    Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
+    defer Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try Io.net.UnixAddress.init(sock_path)).listen(test_io, .{});
+    defer server.deinit(test_io);
 
     const thread = try std.Thread.spawn(.{}, runStreamMockServer, .{&server});
     var joined = false;
     defer if (!joined) thread.join();
 
     const client = Client{
-        .allocator = std.testing.allocator,
+        .allocator = alloc,
         .socket_path = sock_path,
         .timeout_ms = 5_000,
+        .io = test_io,
     };
 
     // 1) Chunked stream
-    var out = std.ArrayList(u8).init(std.testing.allocator);
-    defer out.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
     const sresp = try client.streamRequest("GET", "/v1.40/containers/c1/logs?follow=1", null, 5_000, &out, collectStreamChunk);
     defer sresp.deinit();
     try std.testing.expect(sresp.ok());
     try std.testing.expectEqualStrings("hello world", out.items);
 
     // 2) Error body
-    var err_out = std.ArrayList(u8).init(std.testing.allocator);
-    defer err_out.deinit();
+    var err_out: std.ArrayList(u8) = .empty;
+    defer err_out.deinit(alloc);
     const eresp = try client.streamRequest("GET", "/v1.40/containers/missing/logs", null, 5_000, &err_out, collectStreamChunk);
     defer eresp.deinit();
     try std.testing.expectEqual(@as(u16, 404), eresp.status);
@@ -693,27 +661,29 @@ test "streamRequest handles chunked streaming, error bodies, and 101 upgrade" {
     defer up.deinit();
     try std.testing.expectEqual(@as(u16, 101), up.status);
     try std.testing.expectEqualStrings("banner:", up.initial_data);
-    try up.stream.writeAll("ping");
+    try up.writeAll("ping");
     var echo_buf: [16]u8 = undefined;
-    const n = try up.stream.read(&echo_buf);
+    const n = try up.read(&echo_buf);
     try std.testing.expectEqualStrings("ping", echo_buf[0..n]);
 
     // RawTermGuard on a non-TTY pipe must be a safe no-op.
-    const pipe_fds = try std.posix.pipe();
-    defer {
-        std.posix.close(pipe_fds[0]);
-        std.posix.close(pipe_fds[1]);
+    var pipe_fds: [2]std.posix.fd_t = undefined;
+    if (std.os.linux.pipe(&pipe_fds) == 0) {
+        defer {
+            _ = std.os.linux.close(pipe_fds[0]);
+            _ = std.os.linux.close(pipe_fds[1]);
+        }
+        var guard = RawTermGuard.enter(pipe_fds[0]);
+        try std.testing.expect(!guard.active);
+        guard.restore();
     }
-    var guard = RawTermGuard.enter(pipe_fds[0]);
-    try std.testing.expect(!guard.active);
-    guard.restore();
 
     thread.join();
     joined = true;
 }
 
 const WriteStallCtx = struct {
-    server: *std.net.Server,
+    server: *Io.net.Server,
     done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     bytes_per_tick: usize = 0,
     tick_ms: u64 = 2,
@@ -723,31 +693,32 @@ const WriteStallCtx = struct {
 };
 
 fn runWriteStallServer(ctx: *WriteStallCtx) void {
-    var accept_fds = [_]std.posix.pollfd{.{
-        .fd = ctx.server.stream.handle,
-        .events = std.posix.POLL.IN,
-        .revents = 0,
-    }};
-    while (!ctx.done.load(.acquire)) {
-        const ready = std.posix.poll(&accept_fds, 5) catch return;
-        if (ready > 0) break;
-    }
-    if (ctx.done.load(.acquire)) return;
-
-    const conn = ctx.server.accept() catch return;
-    defer conn.stream.close();
+    const conn = blk: {
+        var fds = [_]std.posix.pollfd{.{
+            .fd = ctx.server.socket.handle,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        }};
+        while (!ctx.done.load(.acquire)) {
+            const ready = std.posix.poll(&fds, 5) catch return;
+            if (ready > 0) break;
+        }
+        if (ctx.done.load(.acquire)) return;
+        break :blk ctx.server.accept(test_io) catch return;
+    };
+    defer conn.close(test_io);
 
     if (ctx.bytes_per_tick == 0) {
-        // Accept without ever draining socket buffer so writer hits EAGAIN + POLL.OUT timeout.
+        // Accept without ever draining socket buffer so writer hits the write deadline.
         while (!ctx.done.load(.acquire)) {
-            std.time.sleep(2 * std.time.ns_per_ms);
+            test_io.sleep(.fromNanoseconds(2 * std.time.ns_per_ms), .awake) catch {};
         }
         return;
     }
 
     var discard: [65536]u8 = undefined;
     var read_fds = [_]std.posix.pollfd{.{
-        .fd = conn.stream.handle,
+        .fd = conn.socket.handle,
         .events = std.posix.POLL.IN,
         .revents = 0,
     }};
@@ -760,7 +731,8 @@ fn runWriteStallServer(ctx: *WriteStallCtx) void {
         if (ready == 0) continue;
         if ((read_fds[0].revents & std.posix.POLL.IN) != 0) {
             const want = @min(ctx.bytes_per_tick, discard.len);
-            const n = conn.stream.read(discard[0..want]) catch break;
+            var data = [_][]u8{discard[0..want]};
+            const n = conn.read(test_io, &data) catch break;
             if (n == 0) break;
             if (expected_total == null) {
                 const take = @min(n, hdr_buf.len - hdr_len);
@@ -776,7 +748,7 @@ fn runWriteStallServer(ctx: *WriteStallCtx) void {
                     if (ctx.received >= exp) break;
                 }
             }
-            if (ctx.tick_ms > 0) std.time.sleep(ctx.tick_ms * std.time.ns_per_ms);
+            if (ctx.tick_ms > 0) test_io.sleep(.fromNanoseconds(@as(i96, @intCast(ctx.tick_ms)) * std.time.ns_per_ms), .awake) catch {};
         } else if ((read_fds[0].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR)) != 0) {
             break;
         }
@@ -784,7 +756,7 @@ fn runWriteStallServer(ctx: *WriteStallCtx) void {
     if (ctx.reply_on_done and !ctx.done.load(.acquire)) {
         const ok_body = "{\"ok\":true}";
         const resp = std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ ok_body.len, ok_body });
-        conn.stream.writeAll(resp) catch {};
+        socket.socketWriteAll(test_io, conn.socket.handle, resp, .{ .ts = null }) catch {};
     }
 }
 
@@ -797,13 +769,13 @@ fn runWriteStallCase(
     tick_ms: u64,
     expect_timeout: bool,
 ) !void {
-    const sock_path = try std.fmt.allocPrint(alloc, "/tmp/zp-http-{s}-{d}.sock", .{ sock_tag, std.time.nanoTimestamp() });
+    const sock_path = try std.fmt.allocPrint(alloc, "/tmp/zp-http-{s}-{d}.sock", .{ sock_tag, Io.Clock.awake.now(test_io).nanoseconds });
     defer alloc.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
+    defer Io.Dir.deleteFileAbsolute(test_io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try Io.net.UnixAddress.init(sock_path)).listen(test_io, .{});
+    defer server.deinit(test_io);
 
     var ctx = WriteStallCtx{
         .server = &server,
@@ -819,7 +791,7 @@ fn runWriteStallCase(
         if (!joined) thread.join();
     }
 
-    const client = Client{ .allocator = alloc, .socket_path = sock_path, .timeout_ms = timeout_ms };
+    const client = Client{ .allocator = alloc, .socket_path = sock_path, .timeout_ms = timeout_ms, .io = test_io };
     if (expect_timeout) {
         try std.testing.expectError(Error.Timeout, client.request("POST", "/v1.40/build", payload));
         ctx.done.store(true, .release);
@@ -836,7 +808,7 @@ fn runWriteStallCase(
     }
 }
 
-test "BUG-037 regression: writeAllWithTimeout bounds stalled and slow-draining request writes" {
+test "BUG-037 regression: write deadlines bound stalled and slow-draining request writes" {
     const alloc = std.testing.allocator;
     const payload = try alloc.alloc(u8, 4 * 1024 * 1024);
     defer alloc.free(payload);
@@ -846,6 +818,6 @@ test "BUG-037 regression: writeAllWithTimeout bounds stalled and slow-draining r
     try runWriteStallCase(alloc, "wstall", payload, 25, 0, 2, true);
     // 2) Slow-draining peer (1 byte / 15ms) still hits the write deadline.
     try runWriteStallCase(alloc, "wslow", payload, 35, 1, 15, true);
-    // 3) Normal draining peer completes multi-chunk non-blocking write without timeout.
+    // 3) Normal draining peer completes multi-chunk write without timeout.
     try runWriteStallCase(alloc, "wok", payload, 5_000, 65536, 0, false);
 }

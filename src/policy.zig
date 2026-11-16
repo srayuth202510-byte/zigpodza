@@ -95,13 +95,13 @@ pub fn applySandboxDefaults(r: *cli.RunOpts) void {
 }
 
 /// Loads and validates a `zigpod-policy.json` file from disk.
-pub fn loadPolicyFile(allocator: std.mem.Allocator, path: []const u8) !std.json.Parsed(Policy) {
+pub fn loadPolicyFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !std.json.Parsed(Policy) {
     if (path.len == 0 or path.len > 4096) return ApiError.InvalidPolicyFile;
     for (path) |c| {
         if (c < 0x20 or c == 0x7f) return ApiError.InvalidPolicyFile;
     }
 
-    const raw = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch return ApiError.InvalidPolicyFile;
+    const raw = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024 + 1)) catch return ApiError.InvalidPolicyFile;
     defer allocator.free(raw);
 
     const parsed = std.json.parseFromSlice(Policy, allocator, raw, .{
@@ -187,12 +187,12 @@ pub fn enforceRunPolicy(r: cli.RunOpts, pol: Policy) ApiError!void {
 }
 
 /// Renders a policy JSON file (or `default_sandbox_policy` if `path` is null) for `zigpod policy show`.
-pub fn showPolicy(allocator: std.mem.Allocator, path_opt: ?[]const u8, json_mode: bool, writer: anytype) !void {
+pub fn showPolicy(io: std.Io, allocator: std.mem.Allocator, path_opt: ?[]const u8, json_mode: bool, writer: anytype) !void {
     if (path_opt) |p| {
-        const parsed = try loadPolicyFile(allocator, p);
+        const parsed = try loadPolicyFile(io, allocator, p);
         defer parsed.deinit();
         if (json_mode) {
-            const out = try std.json.stringifyAlloc(allocator, parsed.value, .{ .whitespace = .indent_2 });
+            const out = try std.json.Stringify.valueAlloc(allocator, parsed.value, .{ .whitespace = .indent_2 });
             defer allocator.free(out);
             try writer.print("{s}\n", .{out});
             return;
@@ -202,7 +202,7 @@ pub fn showPolicy(allocator: std.mem.Allocator, path_opt: ?[]const u8, json_mode
     }
 
     if (json_mode) {
-        const out = try std.json.stringifyAlloc(allocator, default_sandbox_policy, .{ .whitespace = .indent_2 });
+        const out = try std.json.Stringify.valueAlloc(allocator, default_sandbox_policy, .{ .whitespace = .indent_2 });
         defer allocator.free(out);
         try writer.print("{s}\n", .{out});
         return;
@@ -211,11 +211,11 @@ pub fn showPolicy(allocator: std.mem.Allocator, path_opt: ?[]const u8, json_mode
 }
 
 /// Validates a policy file schema and prints a pass/fail summary for `zigpod policy check`.
-pub fn checkPolicyFile(allocator: std.mem.Allocator, path: []const u8, json_mode: bool, writer: anytype) !void {
-    const parsed = try loadPolicyFile(allocator, path);
+pub fn checkPolicyFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8, json_mode: bool, writer: anytype) !void {
+    const parsed = try loadPolicyFile(io, allocator, path);
     defer parsed.deinit();
     if (json_mode) {
-        try std.json.stringify(.{
+        try std.json.Stringify.value(.{
             .valid = true,
             .path = path,
             .profile = parsed.value.profile,
@@ -229,9 +229,9 @@ pub fn checkPolicyFile(allocator: std.mem.Allocator, path: []const u8, json_mode
 fn printPolicyHuman(writer: anytype, source: []const u8, pol: Policy) !void {
     try writer.print("Source:                  {s}\n", .{source});
     try writer.print("Profile:                 {s}\n", .{pol.profile});
-    try writer.print("Max Memory (bytes):      {?d}\n", .{pol.max_memory_bytes});
-    try writer.print("Max PIDs Limit:          {?d}\n", .{pol.max_pids_limit});
-    try writer.print("Max CPU (nanocpus):      {?d}\n", .{pol.max_nano_cpus});
+    try writer.print("Max Memory (bytes):      {d}\n", .{pol.max_memory_bytes});
+    try writer.print("Max PIDs Limit:          {d}\n", .{pol.max_pids_limit});
+    try writer.print("Max CPU (nanocpus):      {d}\n", .{pol.max_nano_cpus});
     try writer.print("Require Read-Only:       {}\n", .{pol.require_read_only});
     try writer.print("Require No-New-Privs:    {}\n", .{pol.require_no_new_privileges});
     try writer.print("Require CapDrop=ALL:     {}\n", .{pol.require_cap_drop_all});
@@ -339,20 +339,20 @@ test "forbid_secret_env fail-closed blocks credential-bearing env" {
 
 test "showPolicy and checkPolicyFile render and validate policy JSON without leaks" {
     const alloc = std.testing.allocator;
-    var out = std.ArrayList(u8).init(alloc);
+    var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
-    try showPolicy(alloc, null, true, out.writer());
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"profile\": \"sandbox\"") != null);
+    try showPolicy(std.testing.io, alloc, null, true, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"profile\": \"sandbox\"") != null);
 
     out.clearRetainingCapacity();
-    try checkPolicyFile(alloc, "zigpod-policy.json", false, out.writer());
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "valid") != null);
+    try checkPolicyFile(std.testing.io, alloc, "zigpod-policy.json", false, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "valid") != null);
 
     out.clearRetainingCapacity();
-    try checkPolicyFile(alloc, "zigpod-policy.json", true, out.writer());
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"valid\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"profile\":\"sandbox\"") != null);
+    try checkPolicyFile(std.testing.io, alloc, "zigpod-policy.json", true, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"valid\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"profile\":\"sandbox\"") != null);
 }
 
 test "loadPolicyFile parses valid zigpod-policy.json and rejects malformed files" {
@@ -360,19 +360,19 @@ test "loadPolicyFile parses valid zigpod-policy.json and rejects malformed files
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(dir_path);
 
     const ok_path = try std.fs.path.join(alloc, &.{ dir_path, "ok-policy.json" });
     defer alloc.free(ok_path);
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "ok-policy.json",
         .data =
         \\{"max_memory_bytes":134217728,"max_pids_limit":32,"allowed_networks":["none","pasta"]}
         ,
     });
 
-    const parsed = try loadPolicyFile(alloc, ok_path);
+    const parsed = try loadPolicyFile(std.testing.io, alloc, ok_path);
     defer parsed.deinit();
     try std.testing.expectEqual(@as(i64, 134_217_728), parsed.value.max_memory_bytes);
     try std.testing.expectEqual(@as(i64, 32), parsed.value.max_pids_limit);
@@ -380,10 +380,10 @@ test "loadPolicyFile parses valid zigpod-policy.json and rejects malformed files
 
     const bad_path = try std.fs.path.join(alloc, &.{ dir_path, "bad-policy.json" });
     defer alloc.free(bad_path);
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "bad-policy.json",
         .data = "{\"max_memory_bytes\":0}",
     });
-    try std.testing.expectError(ApiError.InvalidPolicyFile, loadPolicyFile(alloc, bad_path));
-    try std.testing.expectError(ApiError.InvalidPolicyFile, loadPolicyFile(alloc, "/nonexistent/zigpod-policy.json"));
+    try std.testing.expectError(ApiError.InvalidPolicyFile, loadPolicyFile(std.testing.io, alloc, bad_path));
+    try std.testing.expectError(ApiError.InvalidPolicyFile, loadPolicyFile(std.testing.io, alloc, "/nonexistent/zigpod-policy.json"));
 }

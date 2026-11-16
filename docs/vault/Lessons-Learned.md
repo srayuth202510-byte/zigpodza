@@ -2,7 +2,7 @@
 tags:
   - lessons-learned
   - bug-pattern
-  - zig-0.13
+  - zig-0.17
   - error-analysis
 aliases:
   - ZigPod Lessons Learned
@@ -40,18 +40,18 @@ status: active
 
 | Hits | Normalized Diagnostic | Coverage |
 | ---: | :--- | :--- |
-| 168 | `error: switch must handle all possibilities` | Covered ([zig-0.13-gotchas.md](../../.agents/rules/zig-0.13-gotchas.md)) |
-| 75 | `error: local variable is never mutated` | Covered ([zig-0.13-gotchas.md](../../.agents/rules/zig-0.13-gotchas.md)) |
-| 66 | `error: use of undeclared identifier 'ApiError'` | Covered ([zig-0.13-gotchas.md](../../.agents/rules/zig-0.13-gotchas.md)) |
-| 64 | `error: capture shadows declaration of 'v'` | Covered ([zig-0.13-gotchas.md](../../.agents/rules/zig-0.13-gotchas.md)) |
-| 64 | `error: local constant shadows declaration of 'v'` | Covered ([zig-0.13-gotchas.md](../../.agents/rules/zig-0.13-gotchas.md)) |
-| 35 | `error: name shadows primitive 'u1'` | Covered ([zig-0.13-gotchas.md](../../.agents/rules/zig-0.13-gotchas.md)) |
-| 25 | `error: expected type '[]u8', found '[]const u8'` | Covered ([zig-0.13-gotchas.md](../../.agents/rules/zig-0.13-gotchas.md)) |
-| 23 | `<zig-stdlib>/json/stringify.zig: error: expected type 'error{OutOfMemory}!void', found '@typeInfo(@typeInfo(@TypeOf(podman_types.ExposedPort` | Covered ([zig-0.13-gotchas.md](../../.agents/rules/zig-0.13-gotchas.md)) |
-| 23 | `<zig-stdlib>/json/stringify.zig: error: expected type 'error{OutOfMemory}!void', found '@typeInfo(@typeInfo(@TypeOf(podman_types.PortBinding` | Covered ([zig-0.13-gotchas.md](../../.agents/rules/zig-0.13-gotchas.md)) |
+| 168 | `error: switch must handle all possibilities` | Covered ([zig-0.17-gotchas.md](../../.agents/rules/zig-0.17-gotchas.md)) |
+| 75 | `error: local variable is never mutated` | Covered ([zig-0.17-gotchas.md](../../.agents/rules/zig-0.17-gotchas.md)) |
+| 66 | `error: use of undeclared identifier 'ApiError'` | Covered ([zig-0.17-gotchas.md](../../.agents/rules/zig-0.17-gotchas.md)) |
+| 64 | `error: capture shadows declaration of 'v'` | Covered ([zig-0.17-gotchas.md](../../.agents/rules/zig-0.17-gotchas.md)) |
+| 64 | `error: local constant shadows declaration of 'v'` | Covered ([zig-0.17-gotchas.md](../../.agents/rules/zig-0.17-gotchas.md)) |
+| 35 | `error: name shadows primitive 'u1'` | Covered ([zig-0.17-gotchas.md](../../.agents/rules/zig-0.17-gotchas.md)) |
+| 25 | `error: expected type '[]u8', found '[]const u8'` | Covered ([zig-0.17-gotchas.md](../../.agents/rules/zig-0.17-gotchas.md)) |
+| 23 | `<zig-stdlib>/json/stringify.zig: error: expected type 'error{OutOfMemory}!void', found '@typeInfo(@typeInfo(@TypeOf(podman_types.ExposedPort` | Covered ([zig-0.17-gotchas.md](../../.agents/rules/zig-0.17-gotchas.md)) |
+| 23 | `<zig-stdlib>/json/stringify.zig: error: expected type 'error{OutOfMemory}!void', found '@typeInfo(@typeInfo(@TypeOf(podman_types.PortBinding` | Covered ([zig-0.17-gotchas.md](../../.agents/rules/zig-0.17-gotchas.md)) |
 | 21 | `error: expected 5 argument(s), found 4` | Candidate for `/learn` |
-| 20 | `error: capture 'f' shadows capture from outer scope` | Covered ([zig-0.13-gotchas.md](../../.agents/rules/zig-0.13-gotchas.md)) |
-| 16 | `error: expected type '*array_list.ArrayListAligned(u8,null)', found 'io.GenericWriter(*array_list.ArrayListAligned(u8,null),error{OutOfMemor` | Covered ([zig-0.13-gotchas.md](../../.agents/rules/zig-0.13-gotchas.md)) |
+| 20 | `error: capture 'f' shadows capture from outer scope` | Covered ([zig-0.17-gotchas.md](../../.agents/rules/zig-0.17-gotchas.md)) |
+| 16 | `error: expected type '*array_list.ArrayListAligned(u8,null)', found 'io.GenericWriter(*array_list.ArrayListAligned(u8,null),error{OutOfMemor` | Covered ([zig-0.17-gotchas.md](../../.agents/rules/zig-0.17-gotchas.md)) |
 | 10 | `[gpa] memory address leaked` | Covered ([memory-and-security.md](../../.agents/rules/memory-and-security.md)) |
 | 6 | `Segmentation fault` | Covered ([memory-and-security.md](../../.agents/rules/memory-and-security.md)) |
 | 1 | `thread 27678 panic: reached unreachable code` | Candidate for `/learn` |

@@ -15,33 +15,49 @@ const policy = @import("policy.zig");
 
 pub const version = "0.1.0";
 
-pub fn main() u8 {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var code = run(gpa.allocator());
-    if (gpa.deinit() == .leak) {
-        std.io.getStdErr().writer().writeAll("zigpod: internal error: memory leak detected\n") catch {};
+pub fn main(init: std.process.Init.Minimal) u8 {
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    const gpa = debug_allocator.allocator();
+    var threaded: std.Io.Threaded = .init(gpa, .{
+        .argv0 = .init(init.args),
+        .environ = init.environ,
+    });
+    var code = run(gpa, threaded.io(), init);
+    threaded.deinit();
+    if (debug_allocator.deinit() == .leak) {
+        std.Io.File.stderr().writeStreamingAll(threaded_fallback_io(), "zigpod: internal error: memory leak detected\n") catch {};
         if (code == 0) code = 1;
     }
     return code;
 }
 
-fn run(gpa_allocator: std.mem.Allocator) u8 {
+/// After the main `Io.Threaded` is torn down, the single-threaded global
+/// instance is still usable for a final best-effort stderr write.
+fn threaded_fallback_io() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+fn run(gpa_allocator: std.mem.Allocator, io: std.Io, init: std.process.Init.Minimal) u8 {
     var arena_state = std.heap.ArenaAllocator.init(gpa_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const stdout = std.io.getStdOut().writer();
-    const stderr = std.io.getStdErr().writer();
+    // Unbuffered: interactive/streaming commands (logs -f, attach, stats)
+    // must surface output immediately, exactly like the 0.13 writers did.
+    var stdout_fw: std.Io.File.Writer = .initStreaming(std.Io.File.stdout(), io, &.{});
+    var stderr_fw: std.Io.File.Writer = .initStreaming(std.Io.File.stderr(), io, &.{});
+    const stdout = &stdout_fw.interface;
+    const stderr = &stderr_fw.interface;
 
-    var it = std.process.argsWithAllocator(arena) catch |e| {
+    var it = init.args.iterateAllocator(arena) catch |e| {
         stderr.print("zigpod: failed to read process arguments: {s}\n", .{@errorName(e)}) catch {};
         return 1;
     };
     _ = it.next(); // skip program name
 
-    var arg_list = std.ArrayList([]const u8).init(arena);
+    var arg_list: std.ArrayList([]const u8) = .empty;
     while (it.next()) |arg| {
-        arg_list.append(arg) catch {
+        arg_list.append(arena, arg) catch {
             stderr.writeAll("zigpod: out of memory\n") catch {};
             return 1;
         };
@@ -63,7 +79,7 @@ fn run(gpa_allocator: std.mem.Allocator) u8 {
         },
         .demo => |d| {
             if (d.json) {
-                var report = demo.runSelfTestReport(gpa_allocator) catch |e| {
+                var report = demo.runSelfTestReport(gpa_allocator, io) catch |e| {
                     stderr.print("zigpod: demo failed: {s}\n", .{@errorName(e)}) catch {};
                     return 1;
                 };
@@ -74,7 +90,7 @@ fn run(gpa_allocator: std.mem.Allocator) u8 {
                 };
                 if (report.passed != report.total_cases) return 1;
             } else {
-                demo.runSelfTest(gpa_allocator, stdout) catch |e| {
+                demo.runSelfTest(gpa_allocator, io, stdout) catch |e| {
                     stderr.print("zigpod: demo failed: {s}\n", .{@errorName(e)}) catch {};
                     return 1;
                 };
@@ -90,13 +106,13 @@ fn run(gpa_allocator: std.mem.Allocator) u8 {
         },
         .policy => |pol_opts| {
             switch (pol_opts.action) {
-                .show => policy.showPolicy(gpa_allocator, pol_opts.path, pol_opts.json, stdout) catch |e| {
+                .show => policy.showPolicy(io, gpa_allocator, pol_opts.path, pol_opts.json, stdout) catch |e| {
                     stderr.print("zigpod: policy show failed: {s}\n", .{@errorName(e)}) catch {};
                     return 1;
                 },
                 .check => {
                     const p = pol_opts.path orelse "zigpod-policy.json";
-                    policy.checkPolicyFile(gpa_allocator, p, pol_opts.json, stdout) catch |e| {
+                    policy.checkPolicyFile(io, gpa_allocator, p, pol_opts.json, stdout) catch |e| {
                         stderr.print("zigpod: policy check failed for '{s}': {s}\n", .{ p, @errorName(e) }) catch {};
                         return 1;
                     };
@@ -107,7 +123,7 @@ fn run(gpa_allocator: std.mem.Allocator) u8 {
         else => {},
     }
 
-    const cfg = config.Config.load(arena, parsed.global.socket) catch |e| {
+    const cfg = config.Config.load(arena, io, init.environ, parsed.global.socket) catch |e| {
         stderr.print("zigpod: failed to load config: {s}\n", .{@errorName(e)}) catch {};
         return 1;
     };
@@ -122,7 +138,7 @@ fn run(gpa_allocator: std.mem.Allocator) u8 {
                     return 1;
                 };
             if (audit_opts.json) {
-                const ok = log.writeAuditJson(arena, audit_path, stdout) catch |e| {
+                const ok = log.writeAuditJson(io, arena, audit_path, stdout) catch |e| {
                     stderr.print(
                         "zigpod: audit JSON verification failed for '{s}': {s}\n",
                         .{ audit_path, @errorName(e) },
@@ -131,7 +147,7 @@ fn run(gpa_allocator: std.mem.Allocator) u8 {
                 };
                 return if (ok) 0 else 1;
             }
-            const count = log.verifyAuditFile(arena, audit_path) catch |e| {
+            const count = log.verifyAuditFile(io, arena, audit_path) catch |e| {
                 if (e == error.StreamTooLong) {
                     stderr.print(
                         "zigpod: audit file '{s}' exceeds the 64 MiB verification limit\n",
@@ -151,7 +167,7 @@ fn run(gpa_allocator: std.mem.Allocator) u8 {
         else => {},
     }
 
-    var logger = log.Logger.init(cfg.log_dir, parsed.global.verbose or cfg.verbose);
+    var logger = log.Logger.init(io, cfg.log_dir, parsed.global.verbose or cfg.verbose);
     defer logger.deinit();
 
     logger.info("zigpod {s} command={s} socket={s}", .{
@@ -163,12 +179,13 @@ fn run(gpa_allocator: std.mem.Allocator) u8 {
     const client = http.Client{
         .allocator = arena,
         .socket_path = cfg.socket_path,
+        .io = io,
     };
 
     return dispatch(&client, &logger, parsed.command, stdout) catch |e| {
         var trace_addrs: [32]usize = undefined;
         var saved_trace: ?std.builtin.StackTrace = null;
-        if (shouldDumpErrorTrace(logger.verbose)) {
+        if (shouldDumpErrorTrace(init.environ, logger.verbose)) {
             if (@errorReturnTrace()) |t| {
                 const count = @min(t.index, @min(t.instruction_addresses.len, trace_addrs.len));
                 @memcpy(trace_addrs[0..count], t.instruction_addresses[0..count]);
@@ -179,7 +196,7 @@ fn run(gpa_allocator: std.mem.Allocator) u8 {
             }
         }
         reportFailure(&logger, parsed.command, cfg.socket_path, e);
-        if (saved_trace) |t| std.debug.dumpStackTrace(t);
+        if (saved_trace) |*t| std.debug.dumpErrorReturnTrace(t);
         return 1;
     };
 }
@@ -190,6 +207,7 @@ fn dispatch(
     cmd: cli.Command,
     stdout: anytype,
 ) !u8 {
+    const io = client.io;
     switch (cmd) {
         .help, .client_version, .demo, .audit, .completion, .policy => return 0,
         .ps => |opts| if (opts.json)
@@ -236,7 +254,7 @@ fn dispatch(
             .rm => try pod.removeNetwork(client, logger, n.name.?, n.force),
         },
         .attach => |opts| {
-            const stdin_fd: ?std.posix.fd_t = if (opts.interactive or opts.tty) std.io.getStdIn().handle else null;
+            const stdin_fd: ?std.posix.fd_t = if (opts.interactive or opts.tty) std.Io.File.stdin().handle else null;
             try pod.attachContainer(client, logger, opts.container, opts.interactive, opts.tty, stdin_fd, stdout);
         },
         .cp => |opts| switch (opts.direction) {
@@ -290,7 +308,7 @@ fn dispatch(
                 .User = opts.user,
                 .WorkingDir = opts.workdir,
             };
-            const stdin_fd: ?std.posix.fd_t = if (opts.interactive or opts.tty) std.io.getStdIn().handle else null;
+            const stdin_fd: ?std.posix.fd_t = if (opts.interactive or opts.tty) std.Io.File.stdin().handle else null;
             const code = try pod.execCommandWithIo(client, logger, opts.container, req, stdin_fd, stdout);
             return if (code > 0 and code <= 255) @intCast(code) else if (code == 0) 0 else 1;
         },
@@ -300,7 +318,7 @@ fn dispatch(
             var merged_env: ?pod.validate.MergedEnv = null;
             defer if (merged_env) |*me| me.deinit();
             if (r.env_files.len > 0) {
-                merged_env = try pod.loadAndMergeEnv(client.allocator, r.env_files, r.env);
+                merged_env = try pod.loadAndMergeEnv(io, client.allocator, r.env_files, r.env);
                 r.env = merged_env.?.items;
             }
 
@@ -314,12 +332,12 @@ fn dispatch(
                 }
 
                 const active_pol: policy.Policy = if (r.policy_path) |p_path| blk: {
-                    loaded_pol = try policy.loadPolicyFile(client.allocator, p_path);
+                    loaded_pol = try policy.loadPolicyFile(io, client.allocator, p_path);
                     break :blk loaded_pol.?.value;
                 } else blk: {
                     // Use ./zigpod-policy.json when present; otherwise use built-in fail-closed defaults.
-                    if (std.fs.cwd().access("zigpod-policy.json", .{})) |_| {
-                        loaded_pol = try policy.loadPolicyFile(client.allocator, "zigpod-policy.json");
+                    if (std.Io.Dir.cwd().access(io, "zigpod-policy.json", .{})) |_| {
+                        loaded_pol = try policy.loadPolicyFile(io, client.allocator, "zigpod-policy.json");
                         break :blk loaded_pol.?.value;
                     } else |_| {
                         break :blk policy.default_sandbox_policy;
@@ -334,17 +352,17 @@ fn dispatch(
             }
 
             // Validate and classify each -v mount (bind vs named volume).
-            var mount_buf = std.ArrayList(pod.Mount).init(client.allocator);
-            defer mount_buf.deinit();
+            var mount_buf: std.ArrayList(pod.Mount) = .empty;
+            defer mount_buf.deinit(client.allocator);
             for (r.volumes) |v| {
-                try mount_buf.append(try pod.makeMount(v.source, v.destination, v.readonly));
+                try mount_buf.append(client.allocator, try pod.makeMount(io, v.source, v.destination, v.readonly));
             }
 
             // Validate each published port mapping.
-            var port_buf = std.ArrayList(pod.PortMapping).init(client.allocator);
-            defer port_buf.deinit();
+            var port_buf: std.ArrayList(pod.PortMapping) = .empty;
+            defer port_buf.deinit(client.allocator);
             for (r.ports) |p| {
-                try port_buf.append(try pod.makePortMapping(p.host_ip, p.host_port, p.container_port, p.proto));
+                try port_buf.append(client.allocator, try pod.makePortMapping(p.host_ip, p.host_port, p.container_port, p.proto));
             }
             var has_binding = false;
             for (port_buf.items) |p| {
@@ -354,12 +372,12 @@ fn dispatch(
                 }
             }
 
-            var label_buf = std.ArrayList(pod.LabelEntry).init(client.allocator);
-            defer label_buf.deinit();
+            var label_buf: std.ArrayList(pod.LabelEntry) = .empty;
+            defer label_buf.deinit(client.allocator);
             for (r.labels) |lbl| {
                 const entry = pod.LabelEntry{ .key = lbl.key, .value = lbl.value };
                 try pod.validateLabel(entry);
-                try label_buf.append(entry);
+                try label_buf.append(client.allocator, entry);
             }
 
             // Validate identity/network/capability/resource flags before touching the socket.
@@ -382,12 +400,12 @@ fn dispatch(
             for (r.cap_add) |c| try pod.validateCapability(c);
             if (r.shm_size) |shm| try pod.validateShmSize(shm);
 
-            var ulimit_buf = std.ArrayList(pod.Ulimit).init(client.allocator);
-            defer ulimit_buf.deinit();
+            var ulimit_buf: std.ArrayList(pod.Ulimit) = .empty;
+            defer ulimit_buf.deinit(client.allocator);
             for (r.ulimits) |u| {
                 const mapped = pod.Ulimit{ .Name = u.name, .Soft = u.soft, .Hard = u.hard };
                 try pod.validateUlimit(mapped);
-                try ulimit_buf.append(mapped);
+                try ulimit_buf.append(client.allocator, mapped);
             }
 
             var hc_test_buf: [2][]const u8 = undefined;
@@ -477,7 +495,7 @@ fn dispatch(
             }
 
             if (r.interactive or r.tty) {
-                pod.attachContainer(client, logger, id, r.interactive, r.tty, std.io.getStdIn().handle, stdout) catch |e| {
+                pod.attachContainer(client, logger, id, r.interactive, r.tty, std.Io.File.stdin().handle, stdout) catch |e| {
                     if (r.remove) pod.removeContainer(client, logger, id, true) catch {};
                     return e;
                 };
@@ -655,9 +673,9 @@ fn reportFailure(logger: *log.Logger, cmd: cli.Command, socket_path: []const u8,
     }
 }
 
-fn shouldDumpErrorTrace(verbose: bool) bool {
+fn shouldDumpErrorTrace(environ: std.process.Environ, verbose: bool) bool {
     if (verbose) return true;
-    if (std.posix.getenv("ZIGPOD_TRACE")) |val| {
+    if (environ.getPosix("ZIGPOD_TRACE")) |val| {
         return val.len > 0 and !std.mem.eql(u8, val, "0");
     }
     return false;
@@ -681,7 +699,7 @@ test {
 }
 
 const DispatchCleanupMockCtx = struct {
-    server: *std.net.Server,
+    server: *std.Io.net.Server,
     saw_force_delete: bool = false,
     saw_rm_delete: bool = false,
 };
@@ -732,15 +750,15 @@ fn runDispatchCleanupMockServer(ctx: *DispatchCleanupMockCtx) void {
     };
 
     for (steps) |step| {
-        const conn = ctx.server.accept() catch return;
-        defer conn.stream.close();
+        const conn = ctx.server.accept(std.testing.io) catch return;
+        defer conn.close(std.testing.io);
         var req_buf: [1024]u8 = undefined;
-        const n = conn.stream.read(&req_buf) catch 0;
+        const n = http.socket.streamRead(std.testing.io, conn, &req_buf) catch 0;
         if (std.mem.indexOf(u8, req_buf[0..n], step.match) != null) {
             if (step.mark_force) ctx.saw_force_delete = true;
             if (step.mark_rm) ctx.saw_rm_delete = true;
         }
-        conn.stream.writeAll(step.reply) catch return;
+        http.socket.streamWriteAll(conn, step.reply) catch return;
     }
 }
 
@@ -749,14 +767,14 @@ test "dispatch cleans up orphan container when startContainer or fetchLogs fails
     const sock_path = try std.fmt.allocPrint(
         alloc,
         "/tmp/zp-dispatch-bug012-{d}.sock",
-        .{std.time.nanoTimestamp()},
+        .{std.Io.Clock.awake.now(std.testing.io).nanoseconds},
     );
     defer alloc.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
 
     var ctx = DispatchCleanupMockCtx{ .server = &server };
     const thread = try std.Thread.spawn(.{}, runDispatchCleanupMockServer, .{&ctx});
@@ -766,24 +784,25 @@ test "dispatch cleans up orphan container when startContainer or fetchLogs fails
     const client = http.Client{
         .allocator = alloc,
         .socket_path = sock_path,
+        .io = std.testing.io,
     };
-    var logger = log.Logger{ .echo_stderr = false };
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
     defer logger.deinit();
 
-    var out = std.ArrayList(u8).init(alloc);
+    var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
     // 1) startContainer fails -> dispatch must force-remove orphan1234
     try std.testing.expectError(
         pod.ApiError.PodmanApiError,
-        dispatch(&client, &logger, .{ .run = .{ .image = "alpine:3.20", .detach = true } }, out.writer()),
+        dispatch(&client, &logger, .{ .run = .{ .image = "alpine:3.20", .detach = true } }, &out.writer),
     );
     try std.testing.expect(ctx.saw_force_delete);
 
     // 2) run --rm where fetchLogs fails after waitContainer -> dispatch must remove rm1234
     try std.testing.expectError(
         pod.ApiError.PodmanApiError,
-        dispatch(&client, &logger, .{ .run = .{ .image = "alpine:3.20", .remove = true } }, out.writer()),
+        dispatch(&client, &logger, .{ .run = .{ .image = "alpine:3.20", .remove = true } }, &out.writer),
     );
     try std.testing.expect(ctx.saw_rm_delete);
 
@@ -792,27 +811,28 @@ test "dispatch cleans up orphan container when startContainer or fetchLogs fails
 }
 
 const SandboxMockCtx = struct {
-    server: *std.net.Server,
+    server: *std.Io.net.Server,
     create_req_len: usize = 0,
     create_req_buf: [2048]u8 = undefined,
 };
 
 fn runSandboxDispatchMockServer(ctx: *SandboxMockCtx) void {
     // 1) POST /v1.40/containers/create
-    if (ctx.server.accept()) |conn| {
-        defer conn.stream.close();
-        ctx.create_req_len = conn.stream.read(&ctx.create_req_buf) catch 0;
-        conn.stream.writeAll(
+    if (ctx.server.accept(std.testing.io)) |conn| {
+        defer conn.close(std.testing.io);
+        ctx.create_req_len = http.socket.streamRead(std.testing.io, conn, &ctx.create_req_buf) catch 0;
+        http.socket.streamWriteAll(
+            conn,
             "HTTP/1.1 201 Created\r\nContent-Length: 19\r\n\r\n{\"Id\":\"sandbox999\"}",
         ) catch return;
     } else |_| return;
 
     // 2) POST /v1.40/containers/sandbox999/start
-    if (ctx.server.accept()) |conn| {
-        defer conn.stream.close();
+    if (ctx.server.accept(std.testing.io)) |conn| {
+        defer conn.close(std.testing.io);
         var buf: [512]u8 = undefined;
-        _ = conn.stream.read(&buf) catch {};
-        conn.stream.writeAll("HTTP/1.1 204 No Content\r\n\r\n") catch return;
+        _ = http.socket.streamRead(std.testing.io, conn, &buf) catch {};
+        http.socket.streamWriteAll(conn, "HTTP/1.1 204 No Content\r\n\r\n") catch return;
     } else |_| return;
 }
 
@@ -820,20 +840,20 @@ test "dispatch run --profile=sandbox serializes HostConfig.Tmpfs and logs DENY o
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(dir_path);
 
     const sock_path = try std.fmt.allocPrint(
         alloc,
         "/tmp/zp-dispatch-sandbox-{d}.sock",
-        .{std.time.nanoTimestamp()},
+        .{std.Io.Clock.awake.now(std.testing.io).nanoseconds},
     );
     defer alloc.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
 
     var ctx = SandboxMockCtx{ .server = &server };
     const thread = try std.Thread.spawn(.{}, runSandboxDispatchMockServer, .{&ctx});
@@ -843,12 +863,13 @@ test "dispatch run --profile=sandbox serializes HostConfig.Tmpfs and logs DENY o
     const client = http.Client{
         .allocator = alloc,
         .socket_path = sock_path,
+        .io = std.testing.io,
     };
-    var logger = log.Logger.init(dir_path, false);
+    var logger = log.Logger.init(std.testing.io, dir_path, false);
     defer logger.deinit();
     logger.echo_stderr = false;
 
-    var out = std.ArrayList(u8).init(alloc);
+    var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
     // 1) Pre-flight violation: 512 MiB exceeds 256 MiB sandbox ceiling (rejected before socket I/O).
@@ -860,7 +881,7 @@ test "dispatch run --profile=sandbox serializes HostConfig.Tmpfs and logs DENY o
                 .profile = .sandbox,
                 .memory = 512 * 1024 * 1024,
             },
-        }, out.writer()),
+        }, &out.writer),
     );
 
     // 2) Happy-path sandbox run (-d): applies defaults + Tmpfs bounds and starts container.
@@ -870,9 +891,9 @@ test "dispatch run --profile=sandbox serializes HostConfig.Tmpfs and logs DENY o
             .profile = .sandbox,
             .detach = true,
         },
-    }, out.writer());
+    }, &out.writer);
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    try std.testing.expectEqualStrings("sandbox999\n", out.items);
+    try std.testing.expectEqualStrings("sandbox999\n", out.written());
 
     thread.join();
     joined = true;
@@ -890,15 +911,15 @@ test "dispatch run --profile=sandbox serializes HostConfig.Tmpfs and logs DENY o
     // Verify audit.log recorded the DENY event with a valid SHA-256 hash chain.
     const audit_path = try std.fs.path.join(alloc, &.{ dir_path, "audit.log" });
     defer alloc.free(audit_path);
-    var audit_json = std.ArrayList(u8).init(alloc);
+    var audit_json: std.Io.Writer.Allocating = .init(alloc);
     defer audit_json.deinit();
-    try std.testing.expect(try log.writeAuditJson(alloc, audit_path, audit_json.writer()));
-    try std.testing.expect(std.mem.indexOf(u8, audit_json.items, "\"deny_events\":1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, audit_json.items, "\"rule\":\"policy.max_memory_bytes\"") != null);
+    try std.testing.expect(try log.writeAuditJson(std.testing.io, alloc, audit_path, &audit_json.writer));
+    try std.testing.expect(std.mem.indexOf(u8, audit_json.written(), "\"deny_events\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, audit_json.written(), "\"rule\":\"policy.max_memory_bytes\"") != null);
 }
 
 const ExtendedDispatchMockCtx = struct {
-    server: *std.net.Server,
+    server: *std.Io.net.Server,
     stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     create_body: [4096]u8 = undefined,
     create_body_len: usize = 0,
@@ -947,7 +968,7 @@ fn runExtendedDispatchMockServer(ctx: *ExtendedDispatchMockCtx) void {
         var polls: usize = 0;
         while (!ctx.stop.load(.acquire) and polls < 100) : (polls += 1) {
             var pfd = [1]std.posix.pollfd{.{
-                .fd = ctx.server.stream.handle,
+                .fd = ctx.server.socket.handle,
                 .events = std.posix.POLL.IN,
                 .revents = 0,
             }};
@@ -956,18 +977,18 @@ fn runExtendedDispatchMockServer(ctx: *ExtendedDispatchMockCtx) void {
         }
         if (ctx.stop.load(.acquire) or polls >= 100) return;
 
-        const conn = ctx.server.accept() catch return;
-        defer conn.stream.close();
+        const conn = ctx.server.accept(std.testing.io) catch return;
+        defer conn.close(std.testing.io);
         var req_buf: [4096]u8 = undefined;
         var total: usize = 0;
         // Read headers + initial payload; short poll drains split writes (headers then body).
         while (total < req_buf.len) {
-            const n = conn.stream.read(req_buf[total..]) catch break;
+            const n = http.socket.streamRead(std.testing.io, conn, req_buf[total..]) catch break;
             if (n == 0) break;
             total += n;
             if (std.mem.indexOf(u8, req_buf[0..total], "\r\n\r\n") != null) {
                 var dpfd = [1]std.posix.pollfd{.{
-                    .fd = conn.stream.handle,
+                    .fd = conn.socket.handle,
                     .events = std.posix.POLL.IN,
                     .revents = 0,
                 }};
@@ -983,9 +1004,9 @@ fn runExtendedDispatchMockServer(ctx: *ExtendedDispatchMockCtx) void {
                 @memcpy(ctx.create_body[0..copy_len], req_data[0..copy_len]);
                 ctx.create_body_len = copy_len;
             }
-            conn.stream.writeAll(step.reply) catch return;
+            http.socket.streamWriteAll(conn, step.reply) catch return;
         } else {
-            conn.stream.writeAll("HTTP/1.1 500 Unexpected\r\nContent-Length: 0\r\n\r\n") catch return;
+            http.socket.streamWriteAll(conn, "HTTP/1.1 500 Unexpected\r\nContent-Length: 0\r\n\r\n") catch return;
         }
     }
 }
@@ -995,28 +1016,28 @@ test "dispatch handles extended run flags (--cpus, --env-file, --label, --entryp
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(dir_path);
 
-    try tmp.dir.writeFile(.{ .sub_path = "app.env", .data = "# env\nMODE=sandbox\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "app.env", .data = "# env\nMODE=sandbox\n" });
     const env_path = try std.fs.path.join(alloc, &.{ dir_path, "app.env" });
     defer alloc.free(env_path);
 
-    try tmp.dir.writeFile(.{ .sub_path = "secret.env", .data = "API_KEY=sk-1234567890abcdef123456\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "secret.env", .data = "API_KEY=sk-1234567890abcdef123456\n" });
     const secret_env_path = try std.fs.path.join(alloc, &.{ dir_path, "secret.env" });
     defer alloc.free(secret_env_path);
 
-    try tmp.dir.writeFile(.{ .sub_path = "note.txt", .data = "hello" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "note.txt", .data = "hello" });
     const note_path = try std.fs.path.join(alloc, &.{ dir_path, "note.txt" });
     defer alloc.free(note_path);
 
-    const sock_path = try std.fmt.allocPrint(alloc, "/tmp/zp-disp-ext-{d}.sock", .{std.time.nanoTimestamp()});
+    const sock_path = try std.fmt.allocPrint(alloc, "/tmp/zp-disp-ext-{d}.sock", .{std.Io.Clock.awake.now(std.testing.io).nanoseconds});
     defer alloc.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
 
     var ctx = ExtendedDispatchMockCtx{ .server = &server };
     const thread = try std.Thread.spawn(.{}, runExtendedDispatchMockServer, .{&ctx});
@@ -1026,12 +1047,12 @@ test "dispatch handles extended run flags (--cpus, --env-file, --label, --entryp
         if (!joined) thread.join();
     }
 
-    const client = http.Client{ .allocator = alloc, .socket_path = sock_path };
-    var logger = log.Logger.init(dir_path, false);
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path, .io = std.testing.io };
+    var logger = log.Logger.init(std.testing.io, dir_path, false);
     defer logger.deinit();
     logger.echo_stderr = false;
 
-    var out = std.ArrayList(u8).init(alloc);
+    var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
     // Pre-flight secret check must block secrets coming from --env-file in sandbox mode.
@@ -1044,7 +1065,7 @@ test "dispatch handles extended run flags (--cpus, --env-file, --label, --entryp
                 .env_files = &.{secret_env_path},
                 .detach = true,
             },
-        }, out.writer()),
+        }, &out.writer),
     );
 
     // Run with all new flags serialized cleanly.
@@ -1061,25 +1082,25 @@ test "dispatch handles extended run flags (--cpus, --env-file, --label, --entryp
             .hostname = "worker-1.local",
             .restart_policy = .{ .name = "on-failure", .max_retry_count = 2 },
         },
-    }, out.writer());
+    }, &out.writer);
     try std.testing.expectEqual(@as(u8, 0), rc);
-    try std.testing.expectEqualStrings("runnew12\n", out.items);
+    try std.testing.expectEqualStrings("runnew12\n", out.written());
 
     out.clearRetainingCapacity();
     _ = try dispatch(&client, &logger, .{
         .network = .{ .action = .create, .name = "iso", .driver = "bridge", .internal = true },
-    }, out.writer());
-    try std.testing.expectEqualStrings("netabc\n", out.items);
+    }, &out.writer);
+    try std.testing.expectEqualStrings("netabc\n", out.written());
 
     _ = try dispatch(&client, &logger, .{
         .network = .{ .action = .rm, .name = "iso", .force = true },
-    }, out.writer());
+    }, &out.writer);
 
     out.clearRetainingCapacity();
     _ = try dispatch(&client, &logger, .{
         .attach = .{ .container = "web", .tty = true },
-    }, out.writer());
-    try std.testing.expectEqualStrings("attached\n", out.items);
+    }, &out.writer);
+    try std.testing.expectEqualStrings("attached\n", out.written());
 
     out.clearRetainingCapacity();
     _ = try dispatch(&client, &logger, .{
@@ -1089,8 +1110,8 @@ test "dispatch handles extended run flags (--cpus, --env-file, --label, --entryp
             .container_path = "/tmp",
             .host_path = note_path,
         },
-    }, out.writer());
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "web:/tmp") != null);
+    }, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "web:/tmp") != null);
 
     thread.join();
     joined = true;
@@ -1106,8 +1127,8 @@ test "dispatch handles extended run flags (--cpus, --env-file, --label, --entryp
 }
 
 test "shouldDumpErrorTrace honors verbose flag and explicit trace requests" {
-    try std.testing.expect(shouldDumpErrorTrace(true));
-    if (std.posix.getenv("ZIGPOD_TRACE") == null) {
-        try std.testing.expect(!shouldDumpErrorTrace(false));
+    try std.testing.expect(shouldDumpErrorTrace(std.testing.environ, true));
+    if (std.testing.environ.getPosix("ZIGPOD_TRACE") == null) {
+        try std.testing.expect(!shouldDumpErrorTrace(std.testing.environ, false));
     }
 }

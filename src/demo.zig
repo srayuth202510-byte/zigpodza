@@ -46,7 +46,7 @@ const Runner = struct {
 
 /// Runs all 18 deterministic ALLOW/DENY enforcement checks (no live Podman daemon)
 /// and returns a structured report for text rendering or `--json` export.
-pub fn runSelfTestReport(allocator: std.mem.Allocator) !DemoReport {
+pub fn runSelfTestReport(allocator: std.mem.Allocator, io: std.Io) !DemoReport {
     const cases = try allocator.alloc(DemoCase, total_cases);
     errdefer allocator.free(cases);
 
@@ -64,17 +64,17 @@ pub fn runSelfTestReport(allocator: std.mem.Allocator) !DemoReport {
     runner.record("DENY", "reject non-absolute HTTP request target", expectTargetDenied("v1.40/version"));
     runner.record("DENY", "reject malformed HTTP response status line", expectMalformedResponseDenied(allocator));
 
-    runner.record("DENY", "enforce socket poll timeout on stalled daemon", try testSocketTimeout(allocator));
+    runner.record("DENY", "enforce socket poll timeout on stalled daemon", try testSocketTimeout(allocator, io));
     runner.record("ALLOW", "serialize hardened HostConfig JSON fields", try testHostConfigJson(allocator));
-    runner.record("ALLOW", "end-to-end hardened mock Podman container lifecycle", try testHardenedLifecycle(allocator));
+    runner.record("ALLOW", "end-to-end hardened mock Podman container lifecycle", try testHardenedLifecycle(allocator, io));
 
-    const audit_res = try testAuditChainAndTamper(allocator);
+    const audit_res = try testAuditChainAndTamper(allocator, io);
     runner.record("ALLOW", "verify intact SHA-256 hash-chained audit.log", audit_res.chain_ok);
     runner.record("DENY", "detect single-byte tampering in audit.log", audit_res.tamper_denied);
 
     runner.record("DENY", "red-team: image-ref shell injection payload (alpine;rm -rf /)", expectResourceRefDenied("alpine;rm -rf /"));
     runner.record("DENY", "red-team: inspect URL traversal (web/../../etc/shadow)", expectResourceRefDenied("web/../../etc/shadow"));
-    runner.record("DENY", "red-team: bind-mount /etc/shadow into container", expectHostPathDenied("/etc/shadow"));
+    runner.record("DENY", "red-team: bind-mount /etc/shadow into container", expectHostPathDenied(io, "/etc/shadow"));
     runner.record("DENY", "red-team: sandbox policy denies --network=host run", testSandboxPolicyDeniesHostNetwork());
 
     const status = if (runner.passed == total_cases) "pass" else "fail";
@@ -88,8 +88,8 @@ pub fn runSelfTestReport(allocator: std.mem.Allocator) !DemoReport {
 }
 
 /// Renders the human-readable ALLOW/DENY summary (unchanged text contract).
-pub fn runSelfTest(allocator: std.mem.Allocator, writer: anytype) !void {
-    var report = try runSelfTestReport(allocator);
+pub fn runSelfTest(allocator: std.mem.Allocator, io: std.Io, writer: anytype) !void {
+    var report = try runSelfTestReport(allocator, io);
     defer report.deinit(allocator);
 
     try writer.print("zigpod security & reliability self-test ({d} cases)\n", .{total_cases});
@@ -102,7 +102,7 @@ pub fn runSelfTest(allocator: std.mem.Allocator, writer: anytype) !void {
 
 /// Renders the structured JSON security report for `zigpod demo --json`.
 pub fn renderJsonReport(allocator: std.mem.Allocator, report: DemoReport, writer: anytype) !void {
-    const out = try std.json.stringifyAlloc(allocator, report, .{ .whitespace = .indent_2 });
+    const out = try std.json.Stringify.valueAlloc(allocator, report, .{ .whitespace = .indent_2 });
     defer allocator.free(out);
     try writer.writeAll(out);
     try writer.writeAll("\n");
@@ -152,8 +152,8 @@ fn expectResourceRefDenied(ref: []const u8) bool {
     return false;
 }
 
-fn expectHostPathDenied(path: []const u8) bool {
-    pod.validateHostPath(path, false) catch |e| return e == pod.ApiError.InvalidHostPath;
+fn expectHostPathDenied(io: std.Io, path: []const u8) bool {
+    pod.validateHostPath(io, path, false) catch |e| return e == pod.ApiError.InvalidHostPath;
     return false;
 }
 
@@ -188,32 +188,33 @@ fn expectMalformedResponseDenied(allocator: std.mem.Allocator) bool {
 }
 
 const TimeoutCtx = struct {
-    server: *std.net.Server,
+    io: std.Io,
+    server: *std.Io.net.Server,
     done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 };
 
 fn runSilentServer(ctx: *TimeoutCtx) void {
-    const conn = ctx.server.accept() catch return;
-    defer conn.stream.close();
+    const conn = ctx.server.accept(ctx.io) catch return;
+    defer conn.close(ctx.io);
     while (!ctx.done.load(.acquire)) {
-        std.time.sleep(2 * std.time.ns_per_ms);
+        std.Io.sleep(ctx.io, .fromNanoseconds(2 * std.time.ns_per_ms), .awake) catch {};
     }
 }
 
-fn testSocketTimeout(allocator: std.mem.Allocator) !bool {
+fn testSocketTimeout(allocator: std.mem.Allocator, io: std.Io) !bool {
     const sock_path = try std.fmt.allocPrint(
         allocator,
         "/tmp/zp-demo-to-{x:0>16}.sock",
-        .{std.crypto.random.int(u64)},
+        .{randomU64(io)},
     );
     defer allocator.free(sock_path);
-    std.fs.cwd().deleteFile(sock_path) catch {};
-    defer std.fs.cwd().deleteFile(sock_path) catch {};
+    std.Io.Dir.cwd().deleteFile(io, sock_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(io, .{});
+    defer server.deinit(io);
 
-    var ctx = TimeoutCtx{ .server = &server };
+    var ctx = TimeoutCtx{ .io = io, .server = &server };
     const thread = try std.Thread.spawn(.{}, runSilentServer, .{&ctx});
     var joined = false;
     defer {
@@ -225,6 +226,7 @@ fn testSocketTimeout(allocator: std.mem.Allocator) !bool {
         .allocator = allocator,
         .socket_path = sock_path,
         .timeout_ms = 25,
+        .io = io,
     };
     const timed_out = if (client.request("GET", "/v1.40/_ping", null)) |resp| blk: {
         resp.deinit();
@@ -248,7 +250,7 @@ fn testHostConfigJson(allocator: std.mem.Allocator) !bool {
             .SecurityOpt = &.{"no-new-privileges"},
         },
     };
-    const json = try std.json.stringifyAlloc(allocator, req, .{ .emit_null_optional_fields = false });
+    const json = try std.json.Stringify.valueAlloc(allocator, req, .{ .emit_null_optional_fields = false });
     defer allocator.free(json);
 
     return std.mem.indexOf(u8, json, "\"ReadonlyRootfs\":true") != null and
@@ -264,24 +266,25 @@ const ScriptedReply = struct {
 };
 
 const MockServerCtx = struct {
-    server: *std.net.Server,
+    io: std.Io,
+    server: *std.Io.net.Server,
     replies: []const ScriptedReply,
     matched: usize = 0,
 };
 
-fn readHttpRequest(stream: std.net.Stream, buf: []u8) ![]const u8 {
+fn readHttpRequest(io: std.Io, stream: std.Io.net.Stream, buf: []u8) ![]const u8 {
     var total: usize = 0;
     var header_end: ?usize = null;
     var expected_total: ?usize = null;
     while (total < buf.len) {
-        const n = try stream.read(buf[total..]);
+        const n = try http.socket.streamRead(io, stream, buf[total..]);
         if (n == 0) break;
         total += n;
         if (header_end == null) {
             if (std.mem.indexOf(u8, buf[0..total], "\r\n\r\n")) |idx| {
                 header_end = idx;
                 var cl: usize = 0;
-                if (std.ascii.indexOfIgnoreCase(buf[0..idx], "content-length:")) |cl_pos| {
+                if (std.ascii.findIgnoreCase(buf[0..idx], "content-length:")) |cl_pos| {
                     const after = buf[cl_pos + "content-length:".len .. idx];
                     const eol = std.mem.indexOfScalar(u8, after, '\r') orelse after.len;
                     cl = std.fmt.parseInt(usize, std.mem.trim(u8, after[0..eol], " \t"), 10) catch 0;
@@ -299,9 +302,9 @@ fn readHttpRequest(stream: std.net.Stream, buf: []u8) ![]const u8 {
 fn runMockPodmanServer(ctx: *MockServerCtx) void {
     var buf: [4096]u8 = undefined;
     for (ctx.replies) |reply| {
-        const conn = ctx.server.accept() catch return;
-        defer conn.stream.close();
-        const req = readHttpRequest(conn.stream, &buf) catch return;
+        const conn = ctx.server.accept(ctx.io) catch return;
+        defer conn.close(ctx.io);
+        const req = readHttpRequest(ctx.io, conn, &buf) catch return;
         if (std.mem.startsWith(u8, req, reply.expected_prefix)) {
             if (reply.must_contain) |needle| {
                 if (std.mem.indexOf(u8, req, needle) != null) ctx.matched += 1;
@@ -309,22 +312,22 @@ fn runMockPodmanServer(ctx: *MockServerCtx) void {
                 ctx.matched += 1;
             }
         }
-        conn.stream.writeAll(reply.raw_response) catch return;
+        http.socket.streamWriteAll(conn, reply.raw_response) catch return;
     }
 }
 
-fn testHardenedLifecycle(allocator: std.mem.Allocator) !bool {
+fn testHardenedLifecycle(allocator: std.mem.Allocator, io: std.Io) !bool {
     const sock_path = try std.fmt.allocPrint(
         allocator,
         "/tmp/zp-demo-lc-{x:0>16}.sock",
-        .{std.crypto.random.int(u64)},
+        .{randomU64(io)},
     );
     defer allocator.free(sock_path);
-    std.fs.cwd().deleteFile(sock_path) catch {};
-    defer std.fs.cwd().deleteFile(sock_path) catch {};
+    std.Io.Dir.cwd().deleteFile(io, sock_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(io, .{});
+    defer server.deinit(io);
 
     const create_body = "{\"Id\":\"demo1234567890abcd\"}";
     const wait_body = "{\"StatusCode\":0}";
@@ -355,7 +358,7 @@ fn testHardenedLifecycle(allocator: std.mem.Allocator) !bool {
         },
     };
 
-    var ctx = MockServerCtx{ .server = &server, .replies = &replies };
+    var ctx = MockServerCtx{ .io = io, .server = &server, .replies = &replies };
     const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
     var joined = false;
     defer if (!joined) thread.join();
@@ -363,8 +366,9 @@ fn testHardenedLifecycle(allocator: std.mem.Allocator) !bool {
     const client = http.Client{
         .allocator = allocator,
         .socket_path = sock_path,
+        .io = io,
     };
-    var logger = log.Logger{ .echo_stderr = false };
+    var logger = log.Logger{ .io = io, .echo_stderr = false };
     defer logger.deinit();
 
     const req = pod.ContainerCreateRequest{
@@ -384,22 +388,22 @@ fn testHardenedLifecycle(allocator: std.mem.Allocator) !bool {
     try pod.startContainer(&client, &logger, id);
     const exit_code = try pod.waitContainer(&client, &logger, id);
 
-    var logs_out = std.ArrayList(u8).init(allocator);
+    var logs_out: std.Io.Writer.Allocating = .init(allocator);
     defer logs_out.deinit();
-    try pod.fetchLogs(&client, &logger, id, false, logs_out.writer());
+    try pod.fetchLogs(&client, &logger, id, false, &logs_out.writer);
 
-    var ps_out = std.ArrayList(u8).init(allocator);
+    var ps_out: std.Io.Writer.Allocating = .init(allocator);
     defer ps_out.deinit();
-    try pod.listContainers(&client, &logger, true, ps_out.writer());
+    try pod.listContainers(&client, &logger, true, &ps_out.writer);
 
     thread.join();
     joined = true;
 
     return ctx.matched == replies.len and
         exit_code == 0 and
-        std.mem.eql(u8, logs_out.items, "hi\n") and
-        std.mem.indexOf(u8, ps_out.items, "demo12345678") != null and
-        std.mem.indexOf(u8, ps_out.items, "demo-box") != null;
+        std.mem.eql(u8, logs_out.written(), "hi\n") and
+        std.mem.indexOf(u8, ps_out.written(), "demo12345678") != null and
+        std.mem.indexOf(u8, ps_out.written(), "demo-box") != null;
 }
 
 const AuditCheckResult = struct {
@@ -407,19 +411,19 @@ const AuditCheckResult = struct {
     tamper_denied: bool,
 };
 
-fn testAuditChainAndTamper(allocator: std.mem.Allocator) !AuditCheckResult {
+fn testAuditChainAndTamper(allocator: std.mem.Allocator, io: std.Io) !AuditCheckResult {
     const demo_dir = try std.fmt.allocPrint(
         allocator,
         "/tmp/zp-demo-audit-{x:0>16}",
-        .{std.crypto.random.int(u64)},
+        .{randomU64(io)},
     );
     defer allocator.free(demo_dir);
-    std.fs.cwd().deleteTree(demo_dir) catch {};
-    defer std.fs.cwd().deleteTree(demo_dir) catch {};
-    try std.fs.cwd().makePath(demo_dir);
+    std.Io.Dir.cwd().deleteTree(io, demo_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, demo_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, demo_dir);
 
     {
-        var logger = log.Logger.init(demo_dir, false);
+        var logger = log.Logger.init(io, demo_dir, false);
         logger.echo_stderr = false;
         defer logger.deinit();
         logger.info("demo audit entry one", .{});
@@ -429,23 +433,21 @@ fn testAuditChainAndTamper(allocator: std.mem.Allocator) !AuditCheckResult {
     const audit_path = try std.fs.path.join(allocator, &.{ demo_dir, "audit.log" });
     defer allocator.free(audit_path);
 
-    const count = log.verifyAuditFile(allocator, audit_path) catch 0;
+    const count = log.verifyAuditFile(io, allocator, audit_path) catch 0;
     const chain_ok = (count == 2);
 
     {
-        const f = try std.fs.cwd().openFile(audit_path, .{ .mode = .read_write });
-        defer f.close();
-        const stat = try f.stat();
+        const f = try std.Io.Dir.cwd().openFile(io, audit_path, .{ .mode = .read_write });
+        defer f.close(io);
+        const stat = try f.stat(io);
         if (stat.size < 4) return .{ .chain_ok = chain_ok, .tamper_denied = false };
         var b: [1]u8 = undefined;
-        try f.seekTo(stat.size - 2);
-        _ = try f.readAll(&b);
+        _ = try f.readPositionalAll(io, &b, stat.size - 2);
         b[0] ^= 0x01;
-        try f.seekTo(stat.size - 2);
-        try f.writeAll(&b);
+        try f.writePositionalAll(io, &b, stat.size - 2);
     }
 
-    const tamper_denied = if (log.verifyAuditFile(allocator, audit_path)) |_|
+    const tamper_denied = if (log.verifyAuditFile(io, allocator, audit_path)) |_|
         false
     else |e|
         e == log.AuditError.AuditTampered;
@@ -453,17 +455,23 @@ fn testAuditChainAndTamper(allocator: std.mem.Allocator) !AuditCheckResult {
     return .{ .chain_ok = chain_ok, .tamper_denied = tamper_denied };
 }
 
+fn randomU64(io: std.Io) u64 {
+    var bytes: [8]u8 = undefined;
+    io.random(&bytes);
+    return std.mem.readInt(u64, &bytes, .little);
+}
+
 test "demo self-test suite passes with zero memory leaks" {
-    var out = std.ArrayList(u8).init(std.testing.allocator);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
 
-    try runSelfTest(std.testing.allocator, out.writer());
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "18/18 cases passed") != null);
+    try runSelfTest(std.testing.allocator, std.testing.io, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "18/18 cases passed") != null);
 }
 
 test "demo report includes red-team vectors and serializes to JSON" {
     const alloc = std.testing.allocator;
-    var report = try runSelfTestReport(alloc);
+    var report = try runSelfTestReport(alloc, std.testing.io);
     defer report.deinit(alloc);
 
     try std.testing.expectEqual(@as(usize, 18), report.total_cases);
@@ -479,7 +487,7 @@ test "demo report includes red-team vectors and serializes to JSON" {
     }
     try std.testing.expectEqual(@as(usize, 4), red_team_hits);
 
-    const json = try std.json.stringifyAlloc(alloc, report, .{ .whitespace = .indent_2 });
+    const json = try std.json.Stringify.valueAlloc(alloc, report, .{ .whitespace = .indent_2 });
     defer alloc.free(json);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"tool\": \"zigpod-demo\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"status\": \"pass\"") != null);

@@ -543,8 +543,8 @@ test "PortMapping struct defaults" {
 }
 
 test "Profile enum values" {
-    try std.testing.expect(@intFromEnum(Profile.default) == 0);
-    try std.testing.expect(@intFromEnum(Profile.sandbox) == 1);
+    try std.testing.expect(@backingInt(Profile.default) == 0);
+    try std.testing.expect(@backingInt(Profile.sandbox) == 1);
     try std.testing.expect(std.mem.eql(u8, @tagName(Profile.default), "default"));
     try std.testing.expect(std.mem.eql(u8, @tagName(Profile.sandbox), "sandbox"));
 }
@@ -626,7 +626,7 @@ test "Parsed.deinit frees owned slices for exec command" {
             .exec = .{
                 .container = "web",
                 .env = env_arr,
-                .cmd = &.{ "sh" },
+                .cmd = &.{"sh"},
             },
         },
     };
@@ -708,7 +708,7 @@ test "takeValue advances index and returns value, errors when missing" {
     try std.testing.expectEqual(@as(usize, 1), i);
     try std.testing.expectEqualStrings("/tmp/x.sock", val);
 
-    var args2 = [_][]const u8{ "--socket" };
+    var args2 = [_][]const u8{"--socket"};
     var idx2: usize = 0;
     try std.testing.expectError(error.MissingValue, takeValue(&args2, &idx2));
 }

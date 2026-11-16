@@ -49,7 +49,7 @@ pub fn listVolumes(client: *const http.Client, logger: *log.Logger, writer: anyt
 
     try writer.print("{s:<20} {s}\n", .{ "DRIVER", "VOLUME NAME" });
 
-    const trimmed = std.mem.trimLeft(u8, resp.body, " \t\r\n");
+    const trimmed = std.mem.trimStart(u8, resp.body, " \t\r\n");
     if (trimmed.len > 0 and trimmed[0] == '[') {
         const parsed_arr = try std.json.parseFromSlice([]VolumeInfo, client.allocator, resp.body, .{
             .ignore_unknown_fields = true,
@@ -79,7 +79,7 @@ pub fn createVolume(client: *const http.Client, logger: *log.Logger, name: []con
     try validateVolumeName(name);
 
     const path = api_prefix ++ "/volumes/create";
-    const req_body = try std.json.stringifyAlloc(client.allocator, VolumeCreateRequest{ .Name = name }, .{});
+    const req_body = try std.json.Stringify.valueAlloc(client.allocator, VolumeCreateRequest{ .Name = name }, .{});
     defer client.allocator.free(req_body);
 
     logger.debug("POST {s} (volume={s}, body_len={d})", .{ path, name, req_body.len });
@@ -212,7 +212,7 @@ pub fn createNetwork(
     try validateNetworkDriver(driver);
 
     const path = api_prefix ++ "/networks/create";
-    const req_body = try std.json.stringifyAlloc(client.allocator, NetworkCreateRequest{
+    const req_body = try std.json.Stringify.valueAlloc(client.allocator, NetworkCreateRequest{
         .Name = name,
         .Driver = driver,
         .Internal = internal,
@@ -507,7 +507,7 @@ fn printJoined(writer: anytype, label: []const u8, items: []const []const u8) !v
     try writer.writeByte('\n');
 }
 
-fn resolveInspectIp(ns: ?ContainerInspect.NetworkSettings) []const u8 {
+fn resolveInspectIp(ns: ?ContainerInspect.ContainerInspectNetworkSettings) []const u8 {
     const settings = ns orelse return "";
     if (settings.IPAddress.len > 0) return settings.IPAddress;
     const networks = settings.Networks orelse return "";
@@ -528,7 +528,7 @@ fn resolveInspectIp(ns: ?ContainerInspect.NetworkSettings) []const u8 {
 
 fn printContainerInspect(writer: anytype, c: ContainerInspect) !void {
     try writer.print("{s:<15}{s}\n", .{ "Id:", c.Id });
-    if (c.Name.len > 0) try writer.print("{s:<15}{s}\n", .{ "Name:", std.mem.trimLeft(u8, c.Name, "/") });
+    if (c.Name.len > 0) try writer.print("{s:<15}{s}\n", .{ "Name:", std.mem.trimStart(u8, c.Name, "/") });
     if (c.Image.len > 0) try writer.print("{s:<15}{s}\n", .{ "Image:", c.Image });
     if (c.Created.len > 0) try writer.print("{s:<15}{s}\n", .{ "Created:", c.Created });
 
@@ -685,7 +685,7 @@ fn EventsStreamCtx(comptime WriterType: type) type {
         allocator: std.mem.Allocator,
         writer: WriterType,
         json_mode: bool,
-        line_buf: std.ArrayListUnmanaged(u8) = .{},
+        line_buf: std.ArrayList(u8) = .empty,
         count: usize = 0,
 
         fn deinit(self: *@This()) void {
@@ -749,19 +749,19 @@ pub fn fetchEvents(
     json_mode: bool,
     writer: anytype,
 ) !void {
-    var path_buf = std.ArrayList(u8).init(client.allocator);
-    defer path_buf.deinit();
-    try path_buf.appendSlice(api_prefix ++ "/events");
+    var path_buf: std.ArrayList(u8) = .empty;
+    defer path_buf.deinit(client.allocator);
+    try path_buf.appendSlice(client.allocator, api_prefix ++ "/events");
 
     var has_q = false;
     if (since) |s| {
-        try path_buf.appendSlice("?since=");
-        try appendQueryEncoded(&path_buf, s);
+        try path_buf.appendSlice(client.allocator, "?since=");
+        try appendQueryEncoded(client.allocator, &path_buf, s);
         has_q = true;
     }
     if (until) |u| {
-        try path_buf.appendSlice(if (has_q) "&until=" else "?until=");
-        try appendQueryEncoded(&path_buf, u);
+        try path_buf.appendSlice(client.allocator, if (has_q) "&until=" else "?until=");
+        try appendQueryEncoded(client.allocator, &path_buf, u);
     }
 
     logger.debug("STREAM GET {s}", .{path_buf.items});
@@ -810,11 +810,11 @@ test "inspect renders container state, network, mounts, and hardening" {
     const parsed = try std.json.parseFromSlice(ContainerInspect, alloc, json, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
 
-    var out = std.ArrayList(u8).init(alloc);
+    var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
-    try printContainerInspect(out.writer(), parsed.value);
+    try printContainerInspect(&out.writer, parsed.value);
 
-    const s = out.items;
+    const s = out.written();
     try std.testing.expect(std.mem.indexOf(u8, s, "running (running=true, exit=0)") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "10.88.0.2") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "1000:1000") != null);
@@ -828,14 +828,14 @@ test "inspect falls back from container to image over mock Unix socket" {
     const sock_path = try std.fmt.allocPrint(
         std.testing.allocator,
         "/tmp/zp-api-inspect-{d}.sock",
-        .{std.time.nanoTimestamp()},
+        .{std.Io.Clock.awake.now(std.testing.io).nanoseconds},
     );
     defer std.testing.allocator.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
 
     const image_json = "{\"Id\":\"sha256:deadbeef\",\"RepoTags\":[\"alpine:3.20\"],\"Size\":7700000,\"Os\":\"linux\",\"Architecture\":\"amd64\"}";
     const image_resp = std.fmt.comptimePrint(
@@ -854,7 +854,7 @@ test "inspect falls back from container to image over mock Unix socket" {
         },
     };
 
-    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    var ctx = MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
     const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
     var joined = false;
     defer if (!joined) thread.join();
@@ -862,35 +862,35 @@ test "inspect falls back from container to image over mock Unix socket" {
     const client = http.Client{
         .allocator = std.testing.allocator,
         .socket_path = sock_path,
+        .io = std.testing.io,
     };
-    var logger = log.Logger{ .echo_stderr = false };
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
     defer logger.deinit();
 
-    var out = std.ArrayList(u8).init(std.testing.allocator);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
-    try inspect(&client, &logger, "alpine:3.20", out.writer());
+    try inspect(&client, &logger, "alpine:3.20", &out.writer);
 
     thread.join();
     joined = true;
     try std.testing.expectEqual(@as(usize, 2), ctx.matched);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "sha256:deadbeef") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "alpine:3.20") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "sha256:deadbeef") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "alpine:3.20") != null);
 }
-
 
 test "systemPing, systemDf, and systemPrune endpoints" {
     const alloc = std.testing.allocator;
     const sock_path = try std.fmt.allocPrint(
         alloc,
         "/tmp/zp-system-api-{d}.sock",
-        .{std.time.nanoTimestamp()},
+        .{std.Io.Clock.awake.now(std.testing.io).nanoseconds},
     );
     defer alloc.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
 
     const df_json =
         "{\"LayersSize\":8388608," ++
@@ -919,7 +919,7 @@ test "systemPing, systemDf, and systemPrune endpoints" {
         },
     };
 
-    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    var ctx = MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
     const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
     var joined = false;
     defer if (!joined) thread.join();
@@ -927,26 +927,27 @@ test "systemPing, systemDf, and systemPrune endpoints" {
     const client = http.Client{
         .allocator = alloc,
         .socket_path = sock_path,
+        .io = std.testing.io,
     };
-    var logger = log.Logger{ .echo_stderr = false };
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
     defer logger.deinit();
 
-    var out = std.ArrayList(u8).init(alloc);
+    var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
-    try systemPing(&client, &logger, out.writer());
-    try std.testing.expectEqualStrings("OK\n", out.items);
+    try systemPing(&client, &logger, &out.writer);
+    try std.testing.expectEqualStrings("OK\n", out.written());
 
     out.clearRetainingCapacity();
-    try systemDf(&client, &logger, out.writer());
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "Images") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "8.0 MB") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "64.0 MB") != null);
+    try systemDf(&client, &logger, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "Images") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "8.0 MB") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "64.0 MB") != null);
 
     out.clearRetainingCapacity();
-    try systemPrune(&client, &logger, out.writer());
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "deadbeef1234") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "Total reclaimed space: 4.0 MB") != null);
+    try systemPrune(&client, &logger, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "deadbeef1234") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "Total reclaimed space: 4.0 MB") != null);
 
     thread.join();
     joined = true;
@@ -958,14 +959,14 @@ test "portContainer, diffContainer, and fetchEvents endpoints + validation" {
     const sock_path = try std.fmt.allocPrint(
         alloc,
         "/tmp/zp-observe-api-{d}.sock",
-        .{std.time.nanoTimestamp()},
+        .{std.Io.Clock.awake.now(std.testing.io).nanoseconds},
     );
     defer alloc.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
 
     const insp_json =
         "{\"Id\":\"web1234567890\",\"NetworkSettings\":{\"Ports\":{\"80/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"8080\"}],\"443/tcp\":[{\"HostIp\":\"0.0.0.0\",\"HostPort\":\"8443\"}]}}}";
@@ -987,7 +988,7 @@ test "portContainer, diffContainer, and fetchEvents endpoints + validation" {
         },
     };
 
-    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    var ctx = MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
     const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
     var joined = false;
     defer if (!joined) thread.join();
@@ -995,26 +996,27 @@ test "portContainer, diffContainer, and fetchEvents endpoints + validation" {
     const client = http.Client{
         .allocator = alloc,
         .socket_path = sock_path,
+        .io = std.testing.io,
     };
-    var logger = log.Logger{ .echo_stderr = false };
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
     defer logger.deinit();
 
-    var out = std.ArrayList(u8).init(alloc);
+    var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
-    try std.testing.expectError(ApiError.InvalidIdentifier, portContainer(&client, &logger, "../bad", null, out.writer()));
-    try std.testing.expectError(ApiError.InvalidIdentifier, diffContainer(&client, &logger, "../bad", out.writer()));
+    try std.testing.expectError(ApiError.InvalidIdentifier, portContainer(&client, &logger, "../bad", null, &out.writer));
+    try std.testing.expectError(ApiError.InvalidIdentifier, diffContainer(&client, &logger, "../bad", &out.writer));
 
-    try portContainer(&client, &logger, "web", "80", out.writer());
-    try std.testing.expectEqualStrings("80/tcp -> 127.0.0.1:8080\n", out.items);
-
-    out.clearRetainingCapacity();
-    try diffContainer(&client, &logger, "web", out.writer());
-    try std.testing.expectEqualStrings("C /etc/hosts\nA /tmp/new\nD /tmp/old\n", out.items);
+    try portContainer(&client, &logger, "web", "80", &out.writer);
+    try std.testing.expectEqualStrings("80/tcp -> 127.0.0.1:8080\n", out.written());
 
     out.clearRetainingCapacity();
-    try fetchEvents(&client, &logger, "10", "20", false, out.writer());
-    try std.testing.expectEqualStrings("1700000000 container start web123456789\n", out.items);
+    try diffContainer(&client, &logger, "web", &out.writer);
+    try std.testing.expectEqualStrings("C /etc/hosts\nA /tmp/new\nD /tmp/old\n", out.written());
+
+    out.clearRetainingCapacity();
+    try fetchEvents(&client, &logger, "10", "20", false, &out.writer);
+    try std.testing.expectEqualStrings("1700000000 container start web123456789\n", out.written());
 
     thread.join();
     joined = true;
@@ -1026,14 +1028,14 @@ test "portContainer, diffContainer, and fetchEvents edge, json, and error paths"
     const sock_path = try std.fmt.allocPrint(
         alloc,
         "/tmp/zp-observe-edge-{d}.sock",
-        .{std.time.nanoTimestamp()},
+        .{std.Io.Clock.awake.now(std.testing.io).nanoseconds},
     );
     defer alloc.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
 
     const insp_json =
         "{\"Id\":\"web1234567890\",\"NetworkSettings\":{\"Ports\":{\"80/tcp\":[{\"HostIp\":\"\",\"HostPort\":\"8080\"}]}}}";
@@ -1060,7 +1062,7 @@ test "portContainer, diffContainer, and fetchEvents edge, json, and error paths"
         },
     };
 
-    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    var ctx = MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
     const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
     var joined = false;
     defer if (!joined) thread.join();
@@ -1068,30 +1070,31 @@ test "portContainer, diffContainer, and fetchEvents edge, json, and error paths"
     const client = http.Client{
         .allocator = alloc,
         .socket_path = sock_path,
+        .io = std.testing.io,
     };
-    var logger = log.Logger{ .echo_stderr = false };
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
     defer logger.deinit();
 
-    var out = std.ArrayList(u8).init(alloc);
+    var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
     // filter_port == null should list all ports and default empty HostIp to 0.0.0.0
-    try portContainer(&client, &logger, "web", null, out.writer());
-    try std.testing.expectEqualStrings("80/tcp -> 0.0.0.0:8080\n", out.items);
+    try portContainer(&client, &logger, "web", null, &out.writer);
+    try std.testing.expectEqualStrings("80/tcp -> 0.0.0.0:8080\n", out.written());
 
     // null changes response should succeed with empty output
     out.clearRetainingCapacity();
-    try diffContainer(&client, &logger, "web", out.writer());
-    try std.testing.expectEqual(@as(usize, 0), out.items.len);
+    try diffContainer(&client, &logger, "web", &out.writer);
+    try std.testing.expectEqual(@as(usize, 0), out.written().len);
 
     // 404 from daemon should return PodmanApiError
-    try std.testing.expectError(ApiError.PodmanApiError, diffContainer(&client, &logger, "missing", out.writer()));
+    try std.testing.expectError(ApiError.PodmanApiError, diffContainer(&client, &logger, "missing", &out.writer));
 
     // json_mode skips malformed lines and emits valid JSON lines
     out.clearRetainingCapacity();
-    try fetchEvents(&client, &logger, null, null, true, out.writer());
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"Action\":\"die\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "not-json-line") == null);
+    try fetchEvents(&client, &logger, null, null, true, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"Action\":\"die\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "not-json-line") == null);
 
     thread.join();
     joined = true;
@@ -1103,14 +1106,14 @@ test "createNetwork and removeNetwork validate inputs and call API endpoints" {
     const sock_path = try std.fmt.allocPrint(
         alloc,
         "/tmp/zp-net-crud-{d}.sock",
-        .{std.time.nanoTimestamp()},
+        .{std.Io.Clock.awake.now(std.testing.io).nanoseconds},
     );
     defer alloc.free(sock_path);
-    std.fs.deleteFileAbsolute(sock_path) catch {};
-    defer std.fs.deleteFileAbsolute(sock_path) catch {};
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
 
-    var server = try (try std.net.Address.initUnix(sock_path)).listen(.{ .reuse_address = false });
-    defer server.deinit();
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
 
     const created_json = "{\"Id\":\"net1234567890\",\"Warning\":\"\"}";
     const replies = [_]ScriptedReply{
@@ -1129,7 +1132,7 @@ test "createNetwork and removeNetwork validate inputs and call API endpoints" {
         },
     };
 
-    var ctx = MockApiCtx{ .server = &server, .replies = &replies };
+    var ctx = MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
     const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
     var joined = false;
     defer if (!joined) thread.join();
@@ -1137,19 +1140,20 @@ test "createNetwork and removeNetwork validate inputs and call API endpoints" {
     const client = http.Client{
         .allocator = alloc,
         .socket_path = sock_path,
+        .io = std.testing.io,
     };
-    var logger = log.Logger{ .echo_stderr = false };
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
     defer logger.deinit();
 
-    var out = std.ArrayList(u8).init(alloc);
+    var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
-    try std.testing.expectError(ApiError.InvalidIdentifier, createNetwork(&client, &logger, "../bad", "bridge", false, out.writer()));
-    try std.testing.expectError(ApiError.InvalidNetworkDriver, createNetwork(&client, &logger, "iso-net", "bogus", false, out.writer()));
+    try std.testing.expectError(ApiError.InvalidIdentifier, createNetwork(&client, &logger, "../bad", "bridge", false, &out.writer));
+    try std.testing.expectError(ApiError.InvalidNetworkDriver, createNetwork(&client, &logger, "iso-net", "bogus", false, &out.writer));
     try std.testing.expectError(ApiError.InvalidIdentifier, removeNetwork(&client, &logger, "../bad", false));
 
-    try createNetwork(&client, &logger, "iso-net", "bridge", true, out.writer());
-    try std.testing.expectEqualStrings("net1234567890\n", out.items);
+    try createNetwork(&client, &logger, "iso-net", "bridge", true, &out.writer);
+    try std.testing.expectEqualStrings("net1234567890\n", out.written());
 
     try removeNetwork(&client, &logger, "iso-net", true);
     try std.testing.expectError(ApiError.PodmanApiError, removeNetwork(&client, &logger, "iso-net", false));
@@ -1158,4 +1162,3 @@ test "createNetwork and removeNetwork validate inputs and call API endpoints" {
     joined = true;
     try std.testing.expectEqual(replies.len, ctx.matched);
 }
-

@@ -8,6 +8,17 @@ const Response = t.Response;
 const ResponseHead = t.ResponseHead;
 const validateRequestTarget = t.validateRequestTarget;
 
+/// Case-insensitive substring search (replacement for removed `std.ascii.indexOfIgnoreCase`).
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i..][0..needle.len], needle)) return true;
+    }
+    return false;
+}
+
 /// Parses an HTTP/1.1 response header block (excluding `\r\n\r\n`).
 pub fn parseResponseHead(head: []const u8) !ResponseHead {
     var lines = std.mem.splitSequence(u8, head, "\r\n");
@@ -25,7 +36,7 @@ pub fn parseResponseHead(head: []const u8) !ResponseHead {
         const name = std.mem.trim(u8, line[0..colon], " \t");
         const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
         if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
-            if (std.ascii.indexOfIgnoreCase(value, "chunked") != null) chunked = true;
+            if (containsIgnoreCase(value, "chunked")) chunked = true;
         } else if (std.ascii.eqlIgnoreCase(name, "content-length")) {
             content_length = std.fmt.parseInt(usize, value, 10) catch return Error.InvalidResponse;
         }
@@ -51,8 +62,8 @@ pub fn parseResponse(allocator: std.mem.Allocator, raw: []const u8) !Response {
 }
 
 fn decodeChunked(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
-    var out = std.ArrayList(u8).init(allocator);
-    errdefer out.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
     var pos: usize = 0;
     while (true) {
         const line_end = std.mem.indexOfPos(u8, data, pos, "\r\n") orelse return Error.InvalidResponse;
@@ -80,10 +91,10 @@ fn decodeChunked(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
         const after_data = std.math.add(usize, data_end, 2) catch return Error.InvalidResponse;
         if (after_data > data.len) return Error.InvalidResponse;
         if (!std.mem.eql(u8, data[data_end..after_data], "\r\n")) return Error.InvalidResponse;
-        try out.appendSlice(data[pos..data_end]);
+        try out.appendSlice(allocator, data[pos..data_end]);
         pos = after_data;
     }
-    return out.toOwnedSlice();
+    return out.toOwnedSlice(allocator);
 }
 
 // ---------------------------------------------------------------- tests
@@ -189,9 +200,10 @@ test "fuzz parseResponse and decodeChunked with deterministic PRNG" {
         defer alloc.free(payload);
         rng.bytes(payload);
 
-        var wire = std.ArrayList(u8).init(alloc);
+        var wire: std.Io.Writer.Allocating = .init(alloc);
         defer wire.deinit();
-        try wire.appendSlice("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+        const w = &wire.writer;
+        try w.writeAll("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
 
         var pos: usize = 0;
         while (pos < payload.len) {
@@ -199,17 +211,17 @@ test "fuzz parseResponse and decodeChunked with deterministic PRNG" {
             const end = @min(payload.len, pos + chunk_len);
             const slice = payload[pos..end];
             if (rng.boolean()) {
-                try wire.writer().print("{x};ext=val\r\n", .{slice.len});
+                try w.print("{x};ext=val\r\n", .{slice.len});
             } else {
-                try wire.writer().print("{X}\r\n", .{slice.len});
+                try w.print("{X}\r\n", .{slice.len});
             }
-            try wire.appendSlice(slice);
-            try wire.appendSlice("\r\n");
+            try w.writeAll(slice);
+            try w.writeAll("\r\n");
             pos = end;
         }
-        try wire.appendSlice("0\r\n\r\n");
+        try w.writeAll("0\r\n\r\n");
 
-        const resp = try parseResponse(alloc, wire.items);
+        const resp = try parseResponse(alloc, wire.written());
         defer resp.deinit();
         try std.testing.expectEqual(@as(u16, 200), resp.status);
         try std.testing.expectEqualSlices(u8, payload, resp.body);
@@ -218,36 +230,38 @@ test "fuzz parseResponse and decodeChunked with deterministic PRNG" {
     // Part B: Mutated and random raw inputs must never panic, overflow, or leak.
     var fuzz_i: usize = 0;
     while (fuzz_i < 200) : (fuzz_i += 1) {
-        var raw = std.ArrayList(u8).init(alloc);
-        defer raw.deinit();
+        var raw: std.ArrayList(u8) = .empty;
+        defer raw.deinit(alloc);
 
         switch (fuzz_i % 4) {
             0 => {
                 // Completely random bytes
                 const n = rng.intRangeAtMost(usize, 0, 96);
-                try raw.resize(n);
+                try raw.resize(alloc, n);
                 rng.bytes(raw.items);
             },
             1 => {
                 // Chunked header with random/corrupted body
-                try raw.appendSlice("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+                try raw.appendSlice(alloc, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
                 const n = rng.intRangeAtMost(usize, 0, 64);
                 const start = raw.items.len;
-                try raw.resize(start + n);
+                try raw.resize(alloc, start + n);
                 rng.bytes(raw.items[start..]);
             },
             2 => {
                 // Content-Length header with random length & body
                 const fake_len = rng.int(u32);
-                try raw.writer().print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n", .{fake_len});
+                var tmp: [64]u8 = undefined;
+                const header = try std.fmt.bufPrint(&tmp, "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n", .{fake_len});
+                try raw.appendSlice(alloc, header);
                 const n = rng.intRangeAtMost(usize, 0, 48);
                 const start = raw.items.len;
-                try raw.resize(start + n);
+                try raw.resize(alloc, start + n);
                 rng.bytes(raw.items[start..]);
             },
             else => {
                 // Valid chunked frame with a single random byte mutation in the body
-                try raw.appendSlice("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n");
+                try raw.appendSlice(alloc, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n");
                 const mutate_idx = rng.intRangeLessThan(usize, 0, raw.items.len);
                 raw.items[mutate_idx] ^= @as(u8, 1) << rng.int(u3);
             },
