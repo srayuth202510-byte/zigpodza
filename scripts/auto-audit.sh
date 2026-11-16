@@ -282,6 +282,14 @@ else
     fail "Missing InvalidTimeout variant or api.restartContainer deny rule (see BUG-045)."
 fi
 
+# 8r. Require dedicated InvalidFilter / InvalidFormat variants and their deny rules (BUG-041 class)
+if has_match 'InvalidFilter' "src/podman_types.zig" && has_match 'return ApiError\.InvalidFilter' "src/podman_api.zig" && has_match 'api\.validateContainerFilter' "src/main.zig" \
+    && has_match 'InvalidFormat' "src/podman_types.zig" && has_match 'return ApiError\.InvalidFormat' "src/podman_system.zig" && has_match 'api\.validateFormat' "src/main.zig"; then
+    pass "Dedicated ApiError.InvalidFilter/InvalidFormat and their deny telemetry enforced (BUG-041)."
+else
+    fail "Missing InvalidFilter/InvalidFormat variant or deny rule (see BUG-041)."
+fi
+
 # 9. Run security-check.sh (includes zig build test & ELF hardening when zig is installed)
 SEC_OUT=""
 if SEC_OUT="$("$ROOT_DIR/scripts/security-check.sh" 2>&1)"; then

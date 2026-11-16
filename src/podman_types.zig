@@ -23,6 +23,8 @@ pub const ApiError = error{
     InvalidUlimit,
     InvalidHealthcheck,
     InvalidTimeout,
+    InvalidFilter,
+    InvalidFormat,
     PolicyViolation,
     InvalidPolicyFile,
     BuildFailed,

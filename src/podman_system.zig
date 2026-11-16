@@ -566,6 +566,136 @@ pub fn inspectJson(client: *const http.Client, logger: *log.Logger, target: []co
     logger.info("inspected image {s} as JSON", .{target});
 }
 
+/// Inspects a container (falling back to an image) and renders `format`, a
+/// subset of Go templates: literal text plus `{{.A.B}}` and `{{json .A.B}}`.
+pub fn inspectFormat(client: *const http.Client, logger: *log.Logger, target: []const u8, format: []const u8, writer: anytype) !void {
+    try validateResourceRef(target);
+    // Reject a malformed template before any socket traffic.
+    try validateFormat(format);
+
+    const cpath = try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/json", .{ api_prefix, target });
+    defer client.allocator.free(cpath);
+
+    logger.debug("GET {s}", .{cpath});
+    const cresp = try client.request("GET", cpath, null);
+    defer cresp.deinit();
+    if (cresp.ok()) {
+        try renderFormatBody(client.allocator, format, cresp.body, writer);
+        logger.info("inspected container {s} with format", .{target});
+        return;
+    }
+    if (cresp.status != 404) return logApiFailure(logger, "GET", cpath, cresp);
+
+    const ipath = try std.fmt.allocPrint(client.allocator, "{s}/images/{s}/json", .{ api_prefix, target });
+    defer client.allocator.free(ipath);
+
+    logger.debug("GET {s}", .{ipath});
+    const iresp = try client.request("GET", ipath, null);
+    defer iresp.deinit();
+    if (!iresp.ok()) {
+        logger.err("no such container or image: {s}", .{target});
+        return ApiError.NotFound;
+    }
+    try renderFormatBody(client.allocator, format, iresp.body, writer);
+    logger.info("inspected image {s} with format", .{target});
+}
+
+fn renderFormatBody(allocator: std.mem.Allocator, format: []const u8, body: []const u8, writer: anytype) !void {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch |e| switch (e) {
+        error.OutOfMemory => return e,
+        else => return http.Error.InvalidResponse,
+    };
+    defer parsed.deinit();
+    try renderFormat(allocator, format, parsed.value, writer);
+    try writer.writeByte('\n');
+}
+
+const FormatAction = struct {
+    as_json: bool,
+    /// Dotted path without the leading dot; empty means the whole document.
+    path: []const u8,
+};
+
+/// Parses the text between `{{` and `}}`. Only `.A.B` and `json .A.B` are
+/// supported; anything else (pipes, `range`, `index`, ...) fails closed.
+fn parseFormatAction(raw: []const u8) ApiError!FormatAction {
+    var text = std.mem.trim(u8, raw, " \t");
+    var as_json = false;
+    if (std.mem.startsWith(u8, text, "json ") or std.mem.startsWith(u8, text, "json\t")) {
+        as_json = true;
+        text = std.mem.trim(u8, text[4..], " \t");
+    }
+    if (text.len == 0 or text[0] != '.') return ApiError.InvalidFormat;
+    const path = text[1..];
+    if (path.len > 0) {
+        var it = std.mem.splitScalar(u8, path, '.');
+        while (it.next()) |seg| {
+            if (seg.len == 0) return ApiError.InvalidFormat;
+            for (seg) |c| {
+                if (!std.ascii.isAlphanumeric(c) and c != '_') return ApiError.InvalidFormat;
+            }
+        }
+    }
+    return .{ .as_json = as_json, .path = path };
+}
+
+fn validateFormat(format: []const u8) ApiError!void {
+    if (format.len == 0 or format.len > 1024) return ApiError.InvalidFormat;
+    var rest = format;
+    while (std.mem.indexOf(u8, rest, "{{")) |open| {
+        const after = rest[open + 2 ..];
+        const close = std.mem.indexOf(u8, after, "}}") orelse return ApiError.InvalidFormat;
+        _ = try parseFormatAction(after[0..close]);
+        rest = after[close + 2 ..];
+    }
+    if (std.mem.indexOf(u8, rest, "}}") != null) return ApiError.InvalidFormat;
+}
+
+fn lookupPath(root: std.json.Value, path: []const u8) ?std.json.Value {
+    var cur = root;
+    if (path.len == 0) return cur;
+    var it = std.mem.splitScalar(u8, path, '.');
+    while (it.next()) |seg| {
+        switch (cur) {
+            .object => |obj| cur = obj.get(seg) orelse return null,
+            else => return null,
+        }
+    }
+    return cur;
+}
+
+fn renderFormat(allocator: std.mem.Allocator, format: []const u8, root: std.json.Value, writer: anytype) !void {
+    try validateFormat(format);
+    var rest = format;
+    while (std.mem.indexOf(u8, rest, "{{")) |open| {
+        try writer.writeAll(rest[0..open]);
+        const after = rest[open + 2 ..];
+        const close = std.mem.indexOf(u8, after, "}}") orelse return ApiError.InvalidFormat;
+        const action = try parseFormatAction(after[0..close]);
+        rest = after[close + 2 ..];
+
+        const value = lookupPath(root, action.path) orelse {
+            try writer.writeAll("<no value>");
+            continue;
+        };
+        const scalar_text: ?[]const u8 = if (action.as_json) null else switch (value) {
+            .string => |s| s,
+            .number_string => |s| s,
+            .null => "<nil>",
+            else => null,
+        };
+        if (scalar_text) |t| {
+            try writer.writeAll(t);
+        } else {
+            // Numbers, booleans, objects and arrays are rendered as JSON.
+            const out = try std.json.Stringify.valueAlloc(allocator, value, .{});
+            defer allocator.free(out);
+            try writer.writeAll(out);
+        }
+    }
+    try writer.writeAll(rest);
+}
+
 fn printJoined(writer: anytype, label: []const u8, items: []const []const u8) !void {
     if (items.len == 0) return;
     try writer.print("{s:<15}", .{label});
@@ -945,6 +1075,100 @@ test "inspect falls back from container to image over mock Unix socket" {
     try std.testing.expectEqual(@as(usize, 2), ctx.matched);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "sha256:deadbeef") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "alpine:3.20") != null);
+}
+
+test "renderFormat supports field paths and json, rejects other template syntax" {
+    const alloc = std.testing.allocator;
+    const doc =
+        \\{"Id":"abc123","State":{"Status":"running","Running":true,"ExitCode":0,"Error":null},
+        \\ "Config":{"Env":["A=1","B=2"],"Labels":{"app":"web"}},"Size":7700000}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, doc, .{});
+    defer parsed.deinit();
+
+    const cases = [_]struct { fmt: []const u8, want: []const u8 }{
+        .{ .fmt = "{{.State.Status}}", .want = "running" },
+        .{ .fmt = "id={{ .Id }} run={{.State.Running}} code={{.State.ExitCode}}", .want = "id=abc123 run=true code=0" },
+        .{ .fmt = "{{.State.Error}}", .want = "<nil>" },
+        .{ .fmt = "{{.Missing.Field}}", .want = "<no value>" },
+        .{ .fmt = "{{.Id.Sub}}", .want = "<no value>" },
+        .{ .fmt = "{{json .Config.Env}}", .want = "[\"A=1\",\"B=2\"]" },
+        .{ .fmt = "{{json .Id}}", .want = "\"abc123\"" },
+        .{ .fmt = "{{.Config.Labels}}", .want = "{\"app\":\"web\"}" },
+        .{ .fmt = "{{.Size}}", .want = "7700000" },
+        .{ .fmt = "plain text", .want = "plain text" },
+    };
+    for (cases) |c| {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        try renderFormat(alloc, c.fmt, parsed.value, &out.writer);
+        try std.testing.expectEqualStrings(c.want, out.written());
+    }
+
+    const bad = [_][]const u8{
+        "", "{{.Id", "{{.Id}} }}", "{{Id}}", "{{range .Config.Env}}", "{{.Id | upper}}",
+        "{{index .Config.Env 0}}", "{{..Id}}", "{{.Id.}}", "{{.a-b}}", "{{json}}", "{{}}",
+    };
+    for (bad) |f| {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        try std.testing.expectError(ApiError.InvalidFormat, renderFormat(alloc, f, parsed.value, &out.writer));
+        try std.testing.expectEqualStrings("", out.written());
+    }
+    const too_long: [1025]u8 = @splat('x');
+    try std.testing.expectError(ApiError.InvalidFormat, validateFormat(&too_long));
+}
+
+test "inspectFormat renders container then falls back to image" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-inspfmt-{d}.sock",
+        .{std.Io.Clock.awake.now(std.testing.io).nanoseconds},
+    );
+    defer alloc.free(sock_path);
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
+
+    const c_json = "{\"Id\":\"c1\",\"State\":{\"Status\":\"exited\",\"ExitCode\":3}}";
+    const i_json = "{\"Id\":\"sha256:deadbeef\",\"Os\":\"linux\"}";
+    const nf = "{\"message\":\"no such\"}";
+    const hdr = "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}";
+    const nf_resp = std.fmt.comptimePrint("HTTP/1.1 404 Not Found\r\nContent-Length: {d}\r\n\r\n{s}", .{ nf.len, nf });
+    const replies = [_]ScriptedReply{
+        .{ .expected_prefix = "GET /v1.40/containers/web/json HTTP/1.1\r\n", .raw_response = std.fmt.comptimePrint(hdr, .{ c_json.len, c_json }) },
+        .{ .expected_prefix = "GET /v1.40/containers/alpine:3.20/json HTTP/1.1\r\n", .raw_response = nf_resp },
+        .{ .expected_prefix = "GET /v1.40/images/alpine:3.20/json HTTP/1.1\r\n", .raw_response = std.fmt.comptimePrint(hdr, .{ i_json.len, i_json }) },
+        .{ .expected_prefix = "GET /v1.40/containers/gone/json HTTP/1.1\r\n", .raw_response = nf_resp },
+        .{ .expected_prefix = "GET /v1.40/images/gone/json HTTP/1.1\r\n", .raw_response = nf_resp },
+    };
+
+    var ctx = MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path, .io = std.testing.io };
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
+    defer logger.deinit();
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+
+    // Bad template / target are rejected before any request is sent.
+    try std.testing.expectError(ApiError.InvalidFormat, inspectFormat(&client, &logger, "web", "{{range .X}}", &out.writer));
+    try std.testing.expect(std.meta.isError(inspectFormat(&client, &logger, "a?b", "{{.Id}}", &out.writer)));
+
+    try inspectFormat(&client, &logger, "web", "{{.State.Status}}:{{.State.ExitCode}}", &out.writer);
+    try inspectFormat(&client, &logger, "alpine:3.20", "{{.Os}}", &out.writer);
+    try std.testing.expectEqualStrings("exited:3\nlinux\n", out.written());
+    try std.testing.expectError(ApiError.NotFound, inspectFormat(&client, &logger, "gone", "{{.Id}}", &out.writer));
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
 }
 
 test "pruneResource handles each resource class" {

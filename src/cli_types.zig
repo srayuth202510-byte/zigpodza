@@ -40,8 +40,8 @@ pub const usage =
     \\      --health-cmd CMD           Command to run to check container health
     \\      --health-interval DUR      Time between running the health check (e.g., 30s, 500ms)
     \\  compose up|down|ps [-f FILE] [-d] [--json]  Manage multi-container stacks from compose.yaml
-    \\  ps [-a] [--json]               List containers (-a: include stopped, --json: JSON output)
-    \\  images [--json]                List local images (--json: JSON output)
+    \\  ps [-a] [-q] [--filter KEY=VALUE] [--json]  List containers (-a: include stopped, -q: IDs only)
+    \\  images [-a] [-q] [--json]      List local images (-a: include intermediate, -q: IDs only)
     \\  pull IMAGE                     Pull an image from a registry
     \\  rmi [-f] IMAGE                 Remove a local image (-f: force)
     \\  start CONTAINER                Start a created or stopped container
@@ -61,7 +61,8 @@ pub const usage =
     \\      -e, --env KEY=VALUE        Set an environment variable (repeatable)
     \\      -u, --user USER[:GROUP]    Run as user (and optional group)
     \\      -w, --workdir PATH         Working directory inside the container
-    \\  inspect [--json] TARGET        Show container or image details (state, IP, mounts, limits)
+    \\  inspect [--json|--format TEMPLATE] TARGET  Show container or image details
+    \\                                 (--format: {{.Field.Path}} or {{json .Field}})
     \\  stats [--no-stream] [-a] [--json] [CONTAINER...]  Display CPU, memory, and PIDs metrics
     \\  volume ls|create|rm|inspect [NAME]       Manage named volumes
     \\  network ls|inspect|create|rm ...         Manage container networks
@@ -214,18 +215,39 @@ pub const StatsOpts = struct {
     containers: []const []const u8 = &.{},
 };
 
+pub const Filter = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
+pub const max_ps_filters = 8;
+
 pub const PsOpts = struct {
     all: bool = false,
     json: bool = false,
+    /// `-q`: print only container IDs.
+    quiet: bool = false,
+    filter_buf: [max_ps_filters]Filter = undefined,
+    filter_len: usize = 0,
+
+    pub fn filters(self: *const PsOpts) []const Filter {
+        return self.filter_buf[0..self.filter_len];
+    }
 };
 
 pub const ImagesOpts = struct {
     json: bool = false,
+    /// `-q`: print only image IDs.
+    quiet: bool = false,
+    /// `-a`: include intermediate images.
+    all: bool = false,
 };
 
 pub const InspectOpts = struct {
     target: []const u8,
     json: bool = false,
+    /// `--format '{{.Path.To.Field}}'` template (subset of Go templates).
+    format: ?[]const u8 = null,
 };
 
 pub const AuditOpts = struct {

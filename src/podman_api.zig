@@ -91,6 +91,8 @@ pub const demuxLogs = logs.demuxLogs;
 pub const removeImage = images.removeImage;
 pub const listImages = images.listImages;
 pub const listImagesJson = images.listImagesJson;
+pub const listImagesWithOptions = images.listImagesWithOptions;
+pub const ImageListOptions = images.ImageListOptions;
 pub const pullImage = images.pullImage;
 pub const tagImage = images.tagImage;
 pub const imageHistory = images.imageHistory;
@@ -113,6 +115,7 @@ pub const PruneTarget = system.PruneTarget;
 pub const showVersion = system.showVersion;
 pub const inspect = system.inspect;
 pub const inspectJson = system.inspectJson;
+pub const inspectFormat = system.inspectFormat;
 pub const portContainer = system.portContainer;
 pub const diffContainer = system.diffContainer;
 pub const fetchEvents = system.fetchEvents;
@@ -484,12 +487,77 @@ pub fn fetchLogsWithOptions(client: *const http.Client, logger: *log.Logger, id:
     try demuxer.flush();
 }
 
+pub const ContainerFilter = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
+pub const ListContainersOptions = struct {
+    all: bool = false,
+    /// Print only (short) container IDs.
+    quiet: bool = false,
+    filters: []const ContainerFilter = &.{},
+};
+
+/// Filter keys accepted by `GET /containers/json?filters=...` (allow-list).
+pub const container_filter_keys = [_][]const u8{ "status", "name", "label", "id", "ancestor", "network", "volume", "health", "exited" };
+
+fn validateContainerFilter(f: ContainerFilter) ApiError!void {
+    const known = for (container_filter_keys) |k| {
+        if (std.mem.eql(u8, k, f.key)) break true;
+    } else false;
+    if (!known) return ApiError.InvalidFilter;
+    if (f.value.len == 0 or f.value.len > 256) return ApiError.InvalidFilter;
+    for (f.value) |c| {
+        if (c < 0x20 or c == 0x7f) return ApiError.InvalidFilter;
+    }
+}
+
+/// Builds `/containers/json?all=..[&filters=<percent-encoded JSON>]`. Values are
+/// JSON-escaped and then percent-encoded, so they can never alter the query.
+fn buildContainerListPath(allocator: std.mem.Allocator, opts: ListContainersOptions) ![]u8 {
+    for (opts.filters) |f| try validateContainerFilter(f);
+
+    var path: std.ArrayList(u8) = .empty;
+    errdefer path.deinit(allocator);
+    try path.print(allocator, "{s}/containers/json?all={s}", .{ api_prefix, if (opts.all) "true" else "false" });
+    if (opts.filters.len == 0) return path.toOwnedSlice(allocator);
+
+    var json: std.ArrayList(u8) = .empty;
+    defer json.deinit(allocator);
+    try json.append(allocator, '{');
+    var first_key = true;
+    for (container_filter_keys) |key| {
+        var first_val = true;
+        for (opts.filters) |f| {
+            if (!std.mem.eql(u8, f.key, key)) continue;
+            if (first_val) {
+                if (!first_key) try json.append(allocator, ',');
+                first_key = false;
+                try json.print(allocator, "\"{s}\":[", .{key});
+            } else {
+                try json.append(allocator, ',');
+            }
+            first_val = false;
+            const quoted = try std.json.Stringify.valueAlloc(allocator, f.value, .{});
+            defer allocator.free(quoted);
+            try json.appendSlice(allocator, quoted);
+        }
+        if (!first_val) try json.append(allocator, ']');
+    }
+    try json.append(allocator, '}');
+
+    try path.appendSlice(allocator, "&filters=");
+    try appendQueryEncoded(allocator, &path, json.items);
+    return path.toOwnedSlice(allocator);
+}
+
 pub fn listContainers(client: *const http.Client, logger: *log.Logger, all: bool, writer: anytype) !void {
-    const path = try std.fmt.allocPrint(
-        client.allocator,
-        "{s}/containers/json?all={s}",
-        .{ api_prefix, if (all) "true" else "false" },
-    );
+    return listContainersWithOptions(client, logger, .{ .all = all }, writer);
+}
+
+pub fn listContainersWithOptions(client: *const http.Client, logger: *log.Logger, opts: ListContainersOptions, writer: anytype) !void {
+    const path = try buildContainerListPath(client.allocator, opts);
     defer client.allocator.free(path);
 
     logger.debug("GET {s}", .{path});
@@ -502,6 +570,12 @@ pub fn listContainers(client: *const http.Client, logger: *log.Logger, all: bool
         .ignore_unknown_fields = true,
     });
     defer parsed.deinit();
+
+    if (opts.quiet) {
+        for (parsed.value) |c| try writer.print("{s}\n", .{utils.shortId(c.Id)});
+        logger.info("listed {d} container id(s) (all={})", .{ parsed.value.len, opts.all });
+        return;
+    }
 
     try writer.print("{s:<14} {s:<28} {s:<22} {s}\n", .{ "CONTAINER ID", "IMAGE", "STATUS", "NAME" });
     for (parsed.value) |c| {
@@ -517,16 +591,16 @@ pub fn listContainers(client: *const http.Client, logger: *log.Logger, all: bool
             name,
         });
     }
-    logger.info("listed {d} container(s) (all={})", .{ parsed.value.len, all });
+    logger.info("listed {d} container(s) (all={})", .{ parsed.value.len, opts.all });
 }
 
 /// Emits validated JSON array for `zigpod ps [--json]` (`GET /containers/json?all={true|false}`).
 pub fn listContainersJson(client: *const http.Client, logger: *log.Logger, all: bool, writer: anytype) !void {
-    const path = try std.fmt.allocPrint(
-        client.allocator,
-        "{s}/containers/json?all={s}",
-        .{ api_prefix, if (all) "true" else "false" },
-    );
+    return listContainersJsonWithOptions(client, logger, .{ .all = all }, writer);
+}
+
+pub fn listContainersJsonWithOptions(client: *const http.Client, logger: *log.Logger, opts: ListContainersOptions, writer: anytype) !void {
+    const path = try buildContainerListPath(client.allocator, opts);
     defer client.allocator.free(path);
 
     logger.debug("GET {s}", .{path});
@@ -543,7 +617,7 @@ pub fn listContainersJson(client: *const http.Client, logger: *log.Logger, all: 
     const json_out = try std.json.Stringify.valueAlloc(client.allocator, parsed.value, .{});
     defer client.allocator.free(json_out);
     try writer.print("{s}\n", .{json_out});
-    logger.info("listed {d} container(s) as JSON (all={})", .{ parsed.value.len, all });
+    logger.info("listed {d} container(s) as JSON (all={})", .{ parsed.value.len, opts.all });
 }
 
 /// `POST /containers/{id}/exec`: validates the container and identity fields,
@@ -1594,6 +1668,87 @@ test "restart, pause, unpause, rename, and removeImage endpoints + validation" {
     try renameContainer(&client, &logger, "web", "web2");
     try removeImage(&client, &logger, "alpine:3.20", true, &out.writer);
     try std.testing.expectEqualStrings("Removed alpine:3.20\n", out.written());
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
+}
+
+test "buildContainerListPath encodes filters and rejects unknown keys" {
+    const alloc = std.testing.allocator;
+
+    const plain = try buildContainerListPath(alloc, .{ .all = true });
+    defer alloc.free(plain);
+    try std.testing.expectEqualStrings("/v1.40/containers/json?all=true", plain);
+
+    // Two values for one key are grouped; quotes/ampersands cannot escape the query.
+    const filtered = try buildContainerListPath(alloc, .{ .filters = &.{
+        .{ .key = "name", .value = "web" },
+        .{ .key = "status", .value = "running" },
+        .{ .key = "name", .value = "a\"&all=true" },
+    } });
+    defer alloc.free(filtered);
+    try std.testing.expectEqualStrings(
+        "/v1.40/containers/json?all=false&filters=%7B%22status%22%3A%5B%22running%22%5D%2C%22name%22%3A%5B%22web%22%2C%22a%5C%22%26all%3Dtrue%22%5D%7D",
+        filtered,
+    );
+
+    try std.testing.expectError(ApiError.InvalidFilter, buildContainerListPath(alloc, .{ .filters = &.{.{ .key = "bogus", .value = "x" }} }));
+    try std.testing.expectError(ApiError.InvalidFilter, buildContainerListPath(alloc, .{ .filters = &.{.{ .key = "name", .value = "" }} }));
+    try std.testing.expectError(ApiError.InvalidFilter, buildContainerListPath(alloc, .{ .filters = &.{.{ .key = "name", .value = "a\r\nb" }} }));
+
+    // OOM at every allocation point must not leak.
+    try std.testing.checkAllAllocationFailures(alloc, struct {
+        fn run(a: std.mem.Allocator) !void {
+            const p = try buildContainerListPath(a, .{ .filters = &.{
+                .{ .key = "label", .value = "app=web" },
+                .{ .key = "id", .value = "abc" },
+            } });
+            a.free(p);
+        }
+    }.run, .{});
+}
+
+test "ps -q with filters and images -a -q over mock socket" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-psq-{d}.sock",
+        .{std.Io.Clock.awake.now(std.testing.io).nanoseconds},
+    );
+    defer alloc.free(sock_path);
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
+
+    const ps_json = "[{\"Id\":\"c1234567890abcdef\",\"Image\":\"alpine:3.20\",\"Status\":\"Up\",\"State\":\"running\",\"Names\":[\"/web\"]}]";
+    const img_json = "[{\"Id\":\"sha256:1111222233334444\",\"RepoTags\":[\"alpine:3.20\"],\"Size\":7700000}]";
+    const hdr = "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}";
+    const replies = [_]ScriptedReply{
+        .{ .expected_prefix = "GET /v1.40/containers/json?all=false&filters=%7B%22status%22%3A%5B%22running%22%5D%7D HTTP/1.1\r\n", .raw_response = std.fmt.comptimePrint(hdr, .{ ps_json.len, ps_json }) },
+        .{ .expected_prefix = "GET /v1.40/images/json?all=true HTTP/1.1\r\n", .raw_response = std.fmt.comptimePrint(hdr, .{ img_json.len, img_json }) },
+    };
+
+    var ctx = MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path, .io = std.testing.io };
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
+    defer logger.deinit();
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+
+    try listContainersWithOptions(&client, &logger, .{ .quiet = true, .filters = &.{.{ .key = "status", .value = "running" }} }, &out.writer);
+    try listImagesWithOptions(&client, &logger, .{ .all = true, .quiet = true }, &out.writer);
+
+    const want_img = utils.shortId("sha256:1111222233334444");
+    const expected = try std.fmt.allocPrint(alloc, "c1234567890a\n{s}\n", .{want_img});
+    defer alloc.free(expected);
+    try std.testing.expectEqualStrings(expected, out.written());
 
     thread.join();
     joined = true;

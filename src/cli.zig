@@ -22,6 +22,7 @@ pub const LogsOpts = types.LogsOpts;
 pub const ExecOpts = types.ExecOpts;
 pub const StatsOpts = types.StatsOpts;
 pub const PsOpts = types.PsOpts;
+pub const max_ps_filters = types.max_ps_filters;
 pub const ImagesOpts = types.ImagesOpts;
 pub const InspectOpts = types.InspectOpts;
 pub const AuditOpts = types.AuditOpts;
@@ -379,18 +380,47 @@ fn single(args: []const []const u8) ParseError![]const u8 {
 
 fn parsePs(args: []const []const u8) ParseError!Command {
     var opts = PsOpts{};
-    for (args) |a| {
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
         if (eql(a, "-a") or eql(a, "--all")) {
             opts.all = true;
+        } else if (eql(a, "-q") or eql(a, "--quiet")) {
+            opts.quiet = true;
         } else if (eql(a, "--json")) {
             opts.json = true;
+        } else if (eql(a, "-f") or eql(a, "--filter")) {
+            try addPsFilter(&opts, try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--filter=")) {
+            try addPsFilter(&opts, a["--filter=".len..]);
         } else if (isFlag(a)) {
             return error.UnknownFlag;
         } else {
             return error.TooManyArguments;
         }
     }
+    if (opts.quiet and opts.json) return error.InvalidValue;
     return .{ .ps = opts };
+}
+
+pub const ps_filter_keys = [_][]const u8{ "status", "name", "label", "id", "ancestor", "network", "volume", "health", "exited" };
+
+/// Parses `KEY=VALUE` for `ps --filter`; unknown keys are rejected (fail-closed).
+fn addPsFilter(opts: *PsOpts, raw: []const u8) ParseError!void {
+    const eq = std.mem.indexOfScalar(u8, raw, '=') orelse return error.InvalidValue;
+    const key = raw[0..eq];
+    const value = raw[eq + 1 ..];
+    if (value.len == 0 or value.len > 256) return error.InvalidValue;
+    for (value) |c| {
+        if (c < 0x20 or c == 0x7f) return error.InvalidValue;
+    }
+    const known = for (ps_filter_keys) |k| {
+        if (eql(k, key)) break true;
+    } else false;
+    if (!known) return error.InvalidValue;
+    if (opts.filter_len >= opts.filter_buf.len) return error.TooManyArguments;
+    opts.filter_buf[opts.filter_len] = .{ .key = key, .value = value };
+    opts.filter_len += 1;
 }
 
 fn parseImages(args: []const []const u8) ParseError!Command {
@@ -398,21 +428,33 @@ fn parseImages(args: []const []const u8) ParseError!Command {
     for (args) |a| {
         if (eql(a, "--json")) {
             opts.json = true;
+        } else if (eql(a, "-q") or eql(a, "--quiet")) {
+            opts.quiet = true;
+        } else if (eql(a, "-a") or eql(a, "--all")) {
+            opts.all = true;
         } else if (isFlag(a)) {
             return error.UnknownFlag;
         } else {
             return error.TooManyArguments;
         }
     }
+    if (opts.quiet and opts.json) return error.InvalidValue;
     return .{ .images = opts };
 }
 
 fn parseInspect(args: []const []const u8) ParseError!Command {
     var json = false;
+    var format: ?[]const u8 = null;
     var target: ?[]const u8 = null;
-    for (args) |a| {
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
         if (eql(a, "--json")) {
             json = true;
+        } else if (eql(a, "-f") or eql(a, "--format")) {
+            format = try takeValue(args, &i);
+        } else if (std.mem.startsWith(u8, a, "--format=")) {
+            format = a["--format=".len..];
         } else if (isFlag(a)) {
             return error.UnknownFlag;
         } else if (target == null) {
@@ -421,9 +463,13 @@ fn parseInspect(args: []const []const u8) ParseError!Command {
             return error.TooManyArguments;
         }
     }
+    if (format) |f| {
+        if (json or f.len == 0 or f.len > 1024) return error.InvalidValue;
+    }
     return .{ .inspect = .{
         .target = target orelse return error.MissingArgument,
         .json = json,
+        .format = format,
     } };
 }
 
@@ -1390,6 +1436,40 @@ test "parse create and prune groups" {
     try std.testing.expectError(error.TooManyArguments, testParse(&.{ "volume", "prune", "x" }));
 }
 
+test "parse ps --filter/-q, images -a/-q, inspect --format" {
+    const ps = (try testParse(&.{ "ps", "-a", "-q", "--filter", "status=running", "--filter=label=app=web" })).command.ps;
+    try std.testing.expect(ps.all and ps.quiet and !ps.json);
+    try std.testing.expectEqual(@as(usize, 2), ps.filters().len);
+    try std.testing.expectEqualStrings("status", ps.filters()[0].key);
+    try std.testing.expectEqualStrings("running", ps.filters()[0].value);
+    try std.testing.expectEqualStrings("label", ps.filters()[1].key);
+    try std.testing.expectEqualStrings("app=web", ps.filters()[1].value);
+    try std.testing.expectEqual(@as(usize, 0), (try testParse(&.{"ps"})).command.ps.filters().len);
+    try std.testing.expectError(error.InvalidValue, testParse(&.{ "ps", "--filter", "bogus=1" }));
+    try std.testing.expectError(error.InvalidValue, testParse(&.{ "ps", "--filter", "status" }));
+    try std.testing.expectError(error.InvalidValue, testParse(&.{ "ps", "--filter", "status=" }));
+    try std.testing.expectError(error.InvalidValue, testParse(&.{ "ps", "--filter", "name=a\nb" }));
+    try std.testing.expectError(error.MissingValue, testParse(&.{ "ps", "--filter" }));
+    try std.testing.expectError(error.InvalidValue, testParse(&.{ "ps", "-q", "--json" }));
+    try std.testing.expectError(error.TooManyArguments, testParse(&.{
+        "ps",       "-f", "name=1", "-f", "name=2", "-f", "name=3", "-f", "name=4", "-f", "name=5",
+        "-f",       "name=6", "-f", "name=7", "-f", "name=8", "-f", "name=9",
+    }));
+
+    const im = (try testParse(&.{ "images", "-a", "-q" })).command.images;
+    try std.testing.expect(im.all and im.quiet and !im.json);
+    try std.testing.expectError(error.InvalidValue, testParse(&.{ "images", "-q", "--json" }));
+
+    const insp = (try testParse(&.{ "inspect", "--format", "{{.State.Status}}", "web" })).command.inspect;
+    try std.testing.expectEqualStrings("{{.State.Status}}", insp.format.?);
+    try std.testing.expectEqualStrings("web", insp.target);
+    try std.testing.expectEqualStrings("{{.Id}}", (try testParse(&.{ "inspect", "--format={{.Id}}", "web" })).command.inspect.format.?);
+    try std.testing.expect((try testParse(&.{ "inspect", "web" })).command.inspect.format == null);
+    try std.testing.expectError(error.InvalidValue, testParse(&.{ "inspect", "--json", "--format", "{{.Id}}", "web" }));
+    try std.testing.expectError(error.InvalidValue, testParse(&.{ "inspect", "--format", "", "web" }));
+    try std.testing.expectError(error.MissingValue, testParse(&.{ "inspect", "web", "--format" }));
+}
+
 test "parse errors" {
     try std.testing.expectError(error.UnknownCommand, testParse(&.{"frobnicate"}));
     try std.testing.expectError(error.UnknownFlag, testParse(&.{"--bogus"}));
@@ -1407,7 +1487,7 @@ test "parse errors" {
     try std.testing.expectError(error.UnknownFlag, testParse(&.{ "inspect", "--bad" }));
     try std.testing.expectError(error.TooManyArguments, testParse(&.{ "inspect", "a", "b" }));
     try std.testing.expectError(error.TooManyArguments, testParse(&.{ "images", "extra" }));
-    try std.testing.expectError(error.UnknownFlag, testParse(&.{ "images", "--all" }));
+    try std.testing.expectError(error.UnknownFlag, testParse(&.{ "images", "--bogus" }));
     try std.testing.expectError(error.TooManyArguments, testParse(&.{ "version", "extra" }));
     try std.testing.expectError(error.UnknownFlag, testParse(&.{ "ps", "--bogus" }));
     try std.testing.expectError(error.TooManyArguments, testParse(&.{ "ps", "extra" }));

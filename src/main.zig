@@ -210,14 +210,25 @@ fn dispatch(
     const io = client.io;
     switch (cmd) {
         .help, .client_version, .demo, .audit, .completion, .policy => return 0,
-        .ps => |opts| if (opts.json)
-            try pod.listContainersJson(client, logger, opts.all, stdout)
-        else
-            try pod.listContainers(client, logger, opts.all, stdout),
-        .images => |opts| if (opts.json)
-            try pod.listImagesJson(client, logger, stdout)
-        else
-            try pod.listImages(client, logger, stdout),
+        .ps => |opts| {
+            var filter_buf: [cli.max_ps_filters]pod.ContainerFilter = undefined;
+            const src = opts.filters();
+            for (src, 0..) |f, idx| filter_buf[idx] = .{ .key = f.key, .value = f.value };
+            const list_opts = pod.ListContainersOptions{
+                .all = opts.all,
+                .quiet = opts.quiet,
+                .filters = filter_buf[0..src.len],
+            };
+            if (opts.json)
+                try pod.listContainersJsonWithOptions(client, logger, list_opts, stdout)
+            else
+                try pod.listContainersWithOptions(client, logger, list_opts, stdout);
+        },
+        .images => |opts| try pod.listImagesWithOptions(client, logger, .{
+            .all = opts.all,
+            .quiet = opts.quiet,
+            .json = opts.json,
+        }, stdout),
         .pull => |image| try pod.pullImage(client, logger, image, stdout),
         .rmi => |opts| try pod.removeImage(client, logger, opts.image, opts.force, stdout),
         .start => |container| try pod.startContainer(client, logger, container),
@@ -235,7 +246,9 @@ fn dispatch(
             .since = opts.since,
         }, stdout),
         .top => |container| try pod.topContainer(client, logger, container, stdout),
-        .inspect => |opts| if (opts.json)
+        .inspect => |opts| if (opts.format) |fmt|
+            try pod.inspectFormat(client, logger, opts.target, fmt, stdout)
+        else if (opts.json)
             try pod.inspectJson(client, logger, opts.target, stdout)
         else
             try pod.inspect(client, logger, opts.target, stdout),
@@ -644,6 +657,14 @@ fn reportFailure(logger: *log.Logger, cmd: cli.Command, socket_path: []const u8,
             "api.restartContainer",
             "Rejected invalid container restart timeout (must be <= 3600 seconds).",
         ),
+        pod.ApiError.InvalidFilter => logger.deny(
+            "api.validateContainerFilter",
+            "Rejected invalid ps --filter (unknown key or unsafe value).",
+        ),
+        pod.ApiError.InvalidFormat => logger.deny(
+            "api.validateFormat",
+            "Rejected unsupported inspect --format template (only {{.A.B}} and {{json .A.B}}).",
+        ),
         compose.ComposeError.CyclicDependency,
         compose.ComposeError.UnknownDependency,
         => logger.deny(
@@ -774,6 +795,13 @@ fn runDispatchCleanupMockServer(ctx: *DispatchCleanupMockCtx) void {
             if (step.mark_rm) ctx.saw_rm_delete = true;
         }
         http.socket.streamWriteAll(conn, step.reply) catch return;
+    }
+}
+
+test "ps --filter allow-lists stay in sync between CLI and API" {
+    try std.testing.expectEqual(cli.ps_filter_keys.len, pod.container_filter_keys.len);
+    for (cli.ps_filter_keys, pod.container_filter_keys) |a, b| {
+        try std.testing.expectEqualStrings(a, b);
     }
 }
 

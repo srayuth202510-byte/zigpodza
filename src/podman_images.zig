@@ -44,8 +44,25 @@ pub fn removeImage(client: *const http.Client, logger: *log.Logger, image: []con
     logger.info("removed image {s} (force={})", .{ image, force });
 }
 
+pub const ImageListOptions = struct {
+    /// Include intermediate images (`?all=true`).
+    all: bool = false,
+    /// Print only (short) image IDs.
+    quiet: bool = false,
+    json: bool = false,
+};
+
 pub fn listImages(client: *const http.Client, logger: *log.Logger, writer: anytype) !void {
-    const path = api_prefix ++ "/images/json";
+    return listImagesWithOptions(client, logger, .{}, writer);
+}
+
+/// Emits validated JSON array for `zigpod images --json` (`GET /images/json`).
+pub fn listImagesJson(client: *const http.Client, logger: *log.Logger, writer: anytype) !void {
+    return listImagesWithOptions(client, logger, .{ .json = true }, writer);
+}
+
+pub fn listImagesWithOptions(client: *const http.Client, logger: *log.Logger, opts: ImageListOptions, writer: anytype) !void {
+    const path = if (opts.all) api_prefix ++ "/images/json?all=true" else api_prefix ++ "/images/json";
 
     logger.debug("GET {s}", .{path});
     const resp = try client.request("GET", path, null);
@@ -57,6 +74,19 @@ pub fn listImages(client: *const http.Client, logger: *log.Logger, writer: anyty
         .ignore_unknown_fields = true,
     });
     defer parsed.deinit();
+
+    if (opts.json) {
+        const json_out = try std.json.Stringify.valueAlloc(client.allocator, parsed.value, .{});
+        defer client.allocator.free(json_out);
+        try writer.print("{s}\n", .{json_out});
+        logger.info("listed {d} image(s) as JSON", .{parsed.value.len});
+        return;
+    }
+    if (opts.quiet) {
+        for (parsed.value) |img| try writer.print("{s}\n", .{utils.shortId(img.Id)});
+        logger.info("listed {d} image id(s)", .{parsed.value.len});
+        return;
+    }
 
     try writer.print("{s:<14} {s:<38} {s}\n", .{ "IMAGE ID", "REPOSITORY:TAG", "SIZE" });
     var size_buf: [32]u8 = undefined;
@@ -72,27 +102,6 @@ pub fn listImages(client: *const http.Client, logger: *log.Logger, writer: anyty
         });
     }
     logger.info("listed {d} image(s)", .{parsed.value.len});
-}
-
-/// Emits validated JSON array for `zigpod images --json` (`GET /images/json`).
-pub fn listImagesJson(client: *const http.Client, logger: *log.Logger, writer: anytype) !void {
-    const path = api_prefix ++ "/images/json";
-
-    logger.debug("GET {s}", .{path});
-    const resp = try client.request("GET", path, null);
-    defer resp.deinit();
-
-    if (!resp.ok()) return logApiFailure(logger, "GET", path, resp);
-
-    const parsed = try std.json.parseFromSlice([]ImageSummary, client.allocator, resp.body, .{
-        .ignore_unknown_fields = true,
-    });
-    defer parsed.deinit();
-
-    const json_out = try std.json.Stringify.valueAlloc(client.allocator, parsed.value, .{});
-    defer client.allocator.free(json_out);
-    try writer.print("{s}\n", .{json_out});
-    logger.info("listed {d} image(s) as JSON", .{parsed.value.len});
 }
 
 pub fn pullImage(client: *const http.Client, logger: *log.Logger, image: []const u8, writer: anytype) !void {
