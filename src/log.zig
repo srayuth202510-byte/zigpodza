@@ -329,8 +329,9 @@ const AuditEvaluation = struct {
 };
 
 fn evaluateAuditContent(
+    allocator: std.mem.Allocator,
     content: []const u8,
-    deny_list: ?*std.array_list.Managed(AuditDenyRecord),
+    deny_list: ?*std.ArrayList(AuditDenyRecord),
 ) !AuditEvaluation {
     var out = AuditEvaluation{};
     if (content.len == 0) return out;
@@ -355,7 +356,7 @@ fn evaluateAuditContent(
         if (std.mem.eql(u8, fields.level, "ERROR")) out.error_events += 1;
         if (deny_list) |list| {
             if (parseDenyMessage(fields.msg)) |d| {
-                try list.append(.{
+                try list.append(allocator, .{
                     .timestamp = fields.ts,
                     .rule = d.rule,
                     .detail = d.detail,
@@ -373,7 +374,7 @@ fn evaluateAuditContent(
 pub fn verifyAuditFile(io: Io, allocator: std.mem.Allocator, path: []const u8) !usize {
     const content = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024 + 1));
     defer allocator.free(content);
-    const eval = try evaluateAuditContent(content, null);
+    const eval = try evaluateAuditContent(allocator, content, null);
     if (eval.failure) |err| return err;
     return eval.entries;
 }
@@ -418,10 +419,10 @@ pub fn writeAuditJson(io: Io, allocator: std.mem.Allocator, path: []const u8, wr
     const content = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024 + 1));
     defer allocator.free(content);
 
-    var deny_list = std.array_list.Managed(AuditDenyRecord).init(allocator);
-    defer deny_list.deinit();
+    var deny_list: std.ArrayList(AuditDenyRecord) = .empty;
+    defer deny_list.deinit(allocator);
 
-    const eval = try evaluateAuditContent(content, &deny_list);
+    const eval = try evaluateAuditContent(allocator, content, &deny_list);
     const valid = eval.failure == null;
     const failure_reason: ?[]const u8 = if (eval.failure) |err| switch (err) {
         AuditError.AuditTampered => "AuditTampered",

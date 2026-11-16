@@ -209,11 +209,11 @@ flowchart LR
 | [compose.zig](../../src/compose.zig) | 1852 | 14 | 9 | `std.testing.allocator` |
 | [config.zig](../../src/config.zig) | 352 | 9 | 6 | `std.testing.allocator` |
 | [demo.zig](../../src/demo.zig) | 495 | 6 | 2 | `std.testing.allocator` |
-| [http.zig](../../src/http.zig) | 823 | 25 | 6 | `std.testing.allocator` |
+| [http.zig](../../src/http.zig) | 822 | 25 | 6 | `std.testing.allocator` |
 | [http_parser.zig](../../src/http_parser.zig) | 303 | 2 | 10 | `std.testing.allocator` |
 | [http_socket.zig](../../src/http_socket.zig) | 157 | 14 | 0 | `MISSING` |
 | [http_types.zig](../../src/http_types.zig) | 284 | 22 | 11 | `std.testing.allocator` |
-| [log.zig](../../src/log.zig) | 902 | 22 | 12 | `std.testing.allocator` |
+| [log.zig](../../src/log.zig) | 903 | 22 | 12 | `std.testing.allocator` |
 | [main.zig](../../src/main.zig) | 1134 | 2 | 4 | `missing gpa check` |
 | [podman_api.zig](../../src/podman_api.zig) | 1940 | 118 | 15 | `std.testing.allocator` |
 | [podman_build.zig](../../src/podman_build.zig) | 614 | 8 | 6 | `std.testing.allocator` |

@@ -205,7 +205,6 @@ pub const Client = struct {
             error.FileNotFound => Error.SocketNotFound,
             error.ConnectionRefused => Error.DaemonNotRunning,
             error.PermissionDenied, error.AccessDenied => Error.PermissionDenied,
-            error.Canceled => Error.Timeout,
             else => e,
         };
         errdefer stream.close(self.io);
