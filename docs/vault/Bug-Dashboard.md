@@ -19,9 +19,9 @@ status: active
 
 | Metric | Value |
 | :--- | :--- |
-| Tracked Bug Patterns | **50** (50 Guarded) |
+| Tracked Bug Patterns | **51** (51 Guarded) |
 | Zig Source Modules | **26** |
-| Unit & Integration Tests | **284** |
+| Unit & Integration Tests | **285** |
 | Static Security & Memory Gates | **7/9 PASS** |
 
 ## Guard Coverage Map
@@ -154,6 +154,9 @@ flowchart LR
     BUG049 --> scripts_podman_e2e_sh["scripts/podman-e2e.sh"]
     BUG050["BUG-050"] --> SEC["[[Security-And-Memory-Checklist]]"]
     BUG050 --> src_podman_api_zig["src/podman_api.zig"]
+    BUG051["BUG-051"] --> SEC["[[Security-And-Memory-Checklist]]"]
+    BUG051 --> src_podman_registry_zig["src/podman_registry.zig"]
+    BUG051 --> src_http_zig["src/http.zig"]
 ```
 
 ## Bug Pattern Registry
@@ -210,6 +213,7 @@ flowchart LR
 | [BUG-048](../../docs/vault/Bug-Playbook.md#L529) | FIFO Planted as `system.log` / `error.log` Hangs the CLI in `open()` | `#bug-pattern` `#security-gate` | [log.zig](../../src/log.zig) | **Guarded** |
 | [BUG-049](../../docs/vault/Bug-Playbook.md#L536) | E2E Script Pipes Multi-Line CLI Output Straight Into `grep -q` | `#bug-pattern` `#reliability` | [podman-e2e.sh](../../scripts/podman-e2e.sh) | **Guarded** |
 | [BUG-050](../../docs/vault/Bug-Playbook.md#L543) | Podman Compat `update` Silently Ignores `NanoCpus` | `#bug-pattern` `#api-contract` | [podman_api.zig](../../src/podman_api.zig) | **Guarded** |
+| [BUG-051](../../docs/vault/Bug-Playbook.md#L550) | Credential Copies Survive in Transient Buffers | `#bug-pattern` `#secrets` | [podman_registry.zig](../../src/podman_registry.zig), [http.zig](../../src/http.zig) | **Guarded** |
 
 ## Module Test & Allocator Coverage
 
@@ -222,7 +226,7 @@ flowchart LR
 | [compose.zig](../../src/compose.zig) | 2087 | 14 | 10 | `std.testing.allocator` |
 | [config.zig](../../src/config.zig) | 352 | 9 | 6 | `std.testing.allocator` |
 | [demo.zig](../../src/demo.zig) | 495 | 6 | 2 | `std.testing.allocator` |
-| [http.zig](../../src/http.zig) | 822 | 25 | 6 | `std.testing.allocator` |
+| [http.zig](../../src/http.zig) | 832 | 25 | 6 | `std.testing.allocator` |
 | [http_parser.zig](../../src/http_parser.zig) | 303 | 2 | 10 | `std.testing.allocator` |
 | [http_socket.zig](../../src/http_socket.zig) | 157 | 14 | 0 | `MISSING` |
 | [http_types.zig](../../src/http_types.zig) | 284 | 22 | 11 | `std.testing.allocator` |
@@ -233,7 +237,7 @@ flowchart LR
 | [podman_images.zig](../../src/podman_images.zig) | 819 | 11 | 8 | `std.testing.allocator` |
 | [podman_logs.zig](../../src/podman_logs.zig) | 841 | 10 | 8 | `std.testing.allocator` |
 | [podman_pods.zig](../../src/podman_pods.zig) | 337 | 4 | 4 | `std.testing.allocator` |
-| [podman_registry.zig](../../src/podman_registry.zig) | 742 | 12 | 9 | `std.testing.allocator` |
+| [podman_registry.zig](../../src/podman_registry.zig) | 814 | 15 | 10 | `std.testing.allocator` |
 | [podman_system.zig](../../src/podman_system.zig) | 1665 | 21 | 10 | `std.testing.allocator` |
 | [podman_test_helpers.zig](../../src/podman_test_helpers.zig) | 365 | 4 | 7 | `std.testing.allocator` |
 | [podman_transfer.zig](../../src/podman_transfer.zig) | 1584 | 9 | 10 | `std.testing.allocator` |
@@ -607,3 +611,10 @@ flowchart LR
 - **Root Cause**: handler `POST /containers/{id}/update` แบบ Docker-compat ของ Podman อ่าน `CpuQuota`/`CpuPeriod` แต่ไม่แปลง `NanoCpus` และไม่คืน error สำหรับ field ที่ไม่รองรับ
 - **Fix**: `updateContainer` ใน `src/podman_api.zig` ส่ง `--cpus` เป็น `CpuPeriod=100000` + `CpuQuota=nano*period/1e9` (`cpuQuotaFor`) และ `validateUpdate` ปฏิเสธ quota < 1 ms (`InvalidCpuLimit`); mock test ตรวจ body ว่าไม่มี `NanoCpus`
 - **Prevention**: endpoint ที่ "สำเร็จ" ได้โดยไม่เปลี่ยนสถานะ ต้องตรวจผลจริงกับ daemon (inspect + cgroup) อย่างน้อยหนึ่งครั้งก่อน merge และ field ที่ daemon เมินเงียบต้องถูกแปลงหรือปฏิเสธ ห้ามส่งต่อเฉย ๆ
+
+### BUG-051 — Credential Copies Survive in Transient Buffers
+- **Source**: [docs/vault/Bug-Playbook.md:550](../../docs/vault/Bug-Playbook.md#L550) · **Status**: `Guarded`
+- **Symptom**: หลัง `login` แม้ buffer ใน `podman_registry.zig` ถูก `secureZero` แล้ว ยังมีสำเนา password/`auth` ค้างใน heap: (1) `http.Client.connectAndSend` copy body ทั้งก้อนลง `Io.Writer.Allocating` แล้ว free โดยไม่ล้าง, (2) writer ที่ render `auth.json` ขยาย buffer กลางทาง ทิ้ง block เก่าที่มี base64, (3) arena ของ `std.json` ที่ parse auth file เดิม และ stack buffer ของ `readFileToEndAlloc`
+- **Root Cause**: การล้างทำที่ "ปลายทาง" (buffer ที่เราถือ) แต่ allocator/writer ระหว่างทางทำสำเนาโดยที่ caller ไม่เห็น; `realloc`/growth คืน block เก่าโดยไม่ zero
+- **Fix**: `ZeroingAllocator` ใน `src/podman_registry.zig` (zero ทุก block ตอน free, `resize`/`remap` คืน false/null เพื่อให้ growth ผ่าน alloc+copy+zeroing free) ใช้กับ login/logout/password ทั้งหมด; `readExisting` ใช้ stack buffer ที่ zero เอง; `connectAndSend` ใน `src/http.zig` เขียน body ตรงจาก buffer ผู้เรียก และ zero header buffer ที่จองขนาดไว้แล้ว
+- **Prevention**: ข้อมูลลับต้องผ่าน allocator ที่ zero-on-free ตั้งแต่ต้นทาง ไม่ใช่ zero เฉพาะ buffer ปลายทาง; ห้ามอ้างว่า "ล้างแล้ว" จนกว่าจะไล่ทุกสำเนา (writer growth, HTTP request, JSON arena, stack staging buffer)

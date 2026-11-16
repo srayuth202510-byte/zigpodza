@@ -229,14 +229,14 @@ fn runRegistryAuth(
             // Validate cheap inputs before prompting for a secret.
             try registry.validateRegistry(opts.registry);
             const stdin = std.Io.File.stdin();
+            // Zeroes the password and any outgrown read buffer on free.
+            var zeroing = registry.ZeroingAllocator.init(client.allocator);
+            const zalloc = zeroing.allocator();
             const password = if (opts.password_stdin)
-                try registry.readPassword(client.io, client.allocator, stdin)
+                try registry.readPassword(client.io, zalloc, stdin)
             else
-                try registry.promptPassword(client.allocator, stdin.handle, stderr);
-            defer {
-                std.crypto.secureZero(u8, password);
-                client.allocator.free(password);
-            }
+                try registry.promptPassword(zalloc, stdin.handle, stderr);
+            defer zalloc.free(password);
             try registry.login(client, logger, loc, opts.registry, opts.username, password, stdout);
         },
         .logout => |opts| try registry.logout(client.io, client.allocator, logger, loc, opts.registry, stdout),

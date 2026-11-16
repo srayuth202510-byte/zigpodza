@@ -321,10 +321,12 @@ if has_match 'InvalidUpdate' "src/podman_types.zig" && has_match 'InvalidRegistr
     && has_match 'api\.validateUpdate' "src/main.zig" && has_match 'registry\.validateRegistry' "src/main.zig" \
     && has_match 'registry\.validateCredentials' "src/main.zig" && has_match 'registry\.resolveAuthFile' "src/main.zig" \
     && has_match 'CpuQuota' "src/podman_api.zig" && has_match 'secureZero' "src/podman_registry.zig" \
+    && has_match 'ZeroingAllocator\.init' "src/podman_registry.zig" && has_match 'ZeroingAllocator\.init' "src/main.zig" \
+    && has_match 'secureZero\(u8, req\.writer\.buffer\)' "src/http.zig" && ! has_match 'w\.writeAll\(b\)' "src/http.zig" \
     && has_match '\.NOFOLLOW = true' "src/podman_registry.zig" && has_match '\.exclusive = true' "src/podman_registry.zig" \
     && has_match '"--password"' "src/cli.zig" \
     && ! has_match 'logger\.[a-z]+\(.*password' "src/podman_registry.zig"; then
-    pass "update/login/logout/push use dedicated deny telemetry, translate --cpus to CFS quota, and keep credentials off argv and out of logs (BUG-016/BUG-024/BUG-050)."
+    pass "update/login/logout/push use dedicated deny telemetry, translate --cpus to CFS quota, keep credentials off argv/logs, and zero every credential copy (BUG-016/BUG-024/BUG-050/BUG-051)."
 else
     fail "update/registry validation, auth-file hardening, or credential hygiene missing (see BUG-016, BUG-024, BUG-050)."
 fi

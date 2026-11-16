@@ -26,6 +26,47 @@ pub const max_username_bytes = 256;
 pub const max_password_bytes = 4096;
 pub const max_auth_file_bytes = 1024 * 1024;
 
+/// Allocator wrapper for buffers that may hold secrets: every freed block is
+/// zeroed first, and in-place resize/remap is refused so growth always goes
+/// through alloc + copy + (zeroing) free instead of abandoning an old copy.
+pub const ZeroingAllocator = struct {
+    child: std.mem.Allocator,
+
+    pub fn init(child: std.mem.Allocator) ZeroingAllocator {
+        return .{ .child = child };
+    }
+
+    pub fn allocator(self: *ZeroingAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *ZeroingAllocator = @ptrCast(@alignCast(ctx));
+        return self.child.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+        return false;
+    }
+
+    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+        return null;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *ZeroingAllocator = @ptrCast(@alignCast(ctx));
+        std.crypto.secureZero(u8, memory);
+        self.child.rawFree(memory, alignment, ret_addr);
+    }
+};
+
 /// Validates a registry as `HOST[:PORT]`: RFC-1123 labels, optional decimal
 /// port 1-65535. Schemes, paths, userinfo, and whitespace are rejected so the
 /// value can be used verbatim as an auth-file key.
@@ -162,10 +203,19 @@ fn readExisting(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, base:
     defer file.close(io);
     const st = log.statxFd(fd) orelse return ApiError.InvalidAuthFile;
     if (!std.posix.S.ISREG(st.mode) or st.uid != std.os.linux.getuid()) return ApiError.InvalidAuthFile;
-    return utils.readFileToEndAlloc(io, file, allocator, max_auth_file_bytes) catch |e| switch (e) {
+    // Own reader so the stack staging buffer (credentials) is zeroed too.
+    var buf: [4096]u8 = undefined;
+    defer std.crypto.secureZero(u8, &buf);
+    var r = file.reader(io, &buf);
+    const data = r.interface.allocRemaining(allocator, .limited(max_auth_file_bytes + 1)) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return ApiError.InvalidAuthFile,
     };
+    if (data.len > max_auth_file_bytes) {
+        secureFree(allocator, data);
+        return ApiError.InvalidAuthFile;
+    }
+    return data;
 }
 
 /// Writes the auth document. Every top-level key other than `auths` and every
@@ -331,7 +381,10 @@ pub fn login(
     writer: anytype,
 ) !void {
     const io = client.io;
-    const alloc = client.allocator;
+    // Every buffer below may hold credentials (existing auth file, request
+    // body, `user:pass`, base64, rendered file): zero them all on free.
+    var zeroing = ZeroingAllocator.init(client.allocator);
+    const alloc = zeroing.allocator();
     try validateRegistry(registry);
     try validateCredentials(username, password);
 
@@ -370,10 +423,7 @@ pub fn login(
     _ = encoder.encode(encoded, plain);
 
     var out: std.Io.Writer.Allocating = .init(alloc);
-    defer {
-        std.crypto.secureZero(u8, out.writer.buffer);
-        out.deinit();
-    }
+    defer out.deinit();
     _ = try renderAuthFile(alloc, existing, registry, encoded, &out.writer);
     try writeAuthFile(io, dir, base, out.written());
 
@@ -391,6 +441,8 @@ pub fn logout(
     writer: anytype,
 ) !void {
     if (registry) |r| try validateRegistry(r);
+    var zeroing = ZeroingAllocator.init(allocator);
+    const zalloc = zeroing.allocator();
 
     var dir = openParentDir(io, loc, false) catch |e| switch (e) {
         error.FileNotFound => return notLoggedIn(logger, registry, writer),
@@ -398,16 +450,13 @@ pub fn logout(
     };
     defer dir.close(io);
     const base = std.fs.path.basename(loc.path);
-    const existing = (try readExisting(io, allocator, dir, base)) orelse
+    const existing = (try readExisting(io, zalloc, dir, base)) orelse
         return notLoggedIn(logger, registry, writer);
-    defer secureFree(allocator, existing);
+    defer zalloc.free(existing);
 
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    defer {
-        std.crypto.secureZero(u8, out.writer.buffer);
-        out.deinit();
-    }
-    const found = try renderAuthFile(allocator, existing, registry, null, &out.writer);
+    var out: std.Io.Writer.Allocating = .init(zalloc);
+    defer out.deinit();
+    const found = try renderAuthFile(zalloc, existing, registry, null, &out.writer);
     if (!found) return notLoggedIn(logger, registry, writer);
     try writeAuthFile(io, dir, base, out.written());
 
@@ -739,4 +788,27 @@ test "login and logout refuse an unsafe or malformed auth file before network I/
     defer alloc.free(gone.path);
     try std.testing.expectError(ApiError.NotLoggedIn, logout(io, alloc, &logger, gone, "docker.io", &out.writer));
     try logout(io, alloc, &logger, gone, null, &out.writer);
+}
+
+test "ZeroingAllocator zeroes freed and outgrown blocks" {
+    // A FixedBufferAllocator lets the test look at memory after free.
+    var backing: [256]u8 = @splat(0xAA);
+    var fba = std.heap.FixedBufferAllocator.init(&backing);
+    var zeroing = ZeroingAllocator.init(fba.allocator());
+    const a = zeroing.allocator();
+
+    const first = try a.alloc(u8, 10);
+    @memcpy(first, "secret-one");
+    // Growth must move (resize/remap refused) and zero the old block.
+    const grown = try a.realloc(first, 40);
+    try std.testing.expect(grown.ptr != first.ptr);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, &backing, "secret-one"));
+    try std.testing.expectEqualStrings("secret-one", grown[0..10]);
+    a.free(grown);
+    try std.testing.expect(std.mem.indexOf(u8, &backing, "secret") == null);
+
+    // Works with the leak-checking allocator too.
+    var z2 = ZeroingAllocator.init(std.testing.allocator);
+    const b = try z2.allocator().dupe(u8, "pw");
+    z2.allocator().free(b);
 }

@@ -546,3 +546,11 @@ status: active
 - **Root Cause**: handler `POST /containers/{id}/update` แบบ Docker-compat ของ Podman อ่าน `CpuQuota`/`CpuPeriod` แต่ไม่แปลง `NanoCpus` และไม่คืน error สำหรับ field ที่ไม่รองรับ
 - **Fix**: `updateContainer` ใน [src/podman_api.zig](../../src/podman_api.zig) ส่ง `--cpus` เป็น `CpuPeriod=100000` + `CpuQuota=nano*period/1e9` (`cpuQuotaFor`) และ `validateUpdate` ปฏิเสธ quota < 1 ms (`InvalidCpuLimit`); mock test ตรวจ body ว่าไม่มี `NanoCpus`
 - **Prevention Rule**: endpoint ที่ "สำเร็จ" ได้โดยไม่เปลี่ยนสถานะ ต้องตรวจผลจริงกับ daemon (inspect + cgroup) อย่างน้อยหนึ่งครั้งก่อน merge และ field ที่ daemon เมินเงียบต้องถูกแปลงหรือปฏิเสธ ห้ามส่งต่อเฉย ๆ
+
+## BUG-051: Credential Copies Survive in Transient Buffers `#bug-pattern` `#secrets`
+
+- **Symptom**: หลัง `login` แม้ buffer ใน `podman_registry.zig` ถูก `secureZero` แล้ว ยังมีสำเนา password/`auth` ค้างใน heap: (1) `http.Client.connectAndSend` copy body ทั้งก้อนลง `Io.Writer.Allocating` แล้ว free โดยไม่ล้าง, (2) writer ที่ render `auth.json` ขยาย buffer กลางทาง ทิ้ง block เก่าที่มี base64, (3) arena ของ `std.json` ที่ parse auth file เดิม และ stack buffer ของ `readFileToEndAlloc`
+- **Root Cause**: การล้างทำที่ "ปลายทาง" (buffer ที่เราถือ) แต่ allocator/writer ระหว่างทางทำสำเนาโดยที่ caller ไม่เห็น; `realloc`/growth คืน block เก่าโดยไม่ zero
+- **Fix**: `ZeroingAllocator` ใน [src/podman_registry.zig](../../src/podman_registry.zig) (zero ทุก block ตอน free, `resize`/`remap` คืน false/null เพื่อให้ growth ผ่าน alloc+copy+zeroing free) ใช้กับ login/logout/password ทั้งหมด; `readExisting` ใช้ stack buffer ที่ zero เอง; `connectAndSend` ใน [src/http.zig](../../src/http.zig) เขียน body ตรงจาก buffer ผู้เรียก และ zero header buffer ที่จองขนาดไว้แล้ว
+- **Prevention Rule**: ข้อมูลลับต้องผ่าน allocator ที่ zero-on-free ตั้งแต่ต้นทาง ไม่ใช่ zero เฉพาะ buffer ปลายทาง; ห้ามอ้างว่า "ล้างแล้ว" จนกว่าจะไล่ทุกสำเนา (writer growth, HTTP request, JSON arena, stack staging buffer)
+

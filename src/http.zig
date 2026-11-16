@@ -210,8 +210,15 @@ pub const Client = struct {
         errdefer stream.close(self.io);
         socket.setNonBlocking(stream.socket.handle);
 
-        var req: Io.Writer.Allocating = .init(self.allocator);
-        defer req.deinit();
+        // The request line may carry sensitive query values (build args) and
+        // the body may carry credentials (`POST /auth`). The body is written
+        // straight from the caller's buffer (no copy), and the header buffer is
+        // pre-sized so it never reallocates, then zeroed before it is freed.
+        var req: Io.Writer.Allocating = try .initCapacity(self.allocator, method.len + path.len + content_type.len + 256);
+        defer {
+            std.crypto.secureZero(u8, req.writer.buffer);
+            req.deinit();
+        }
         const w = &req.writer;
         try w.print("{s} {s} HTTP/1.1\r\n", .{ method, path });
         if (is_upgrade) {
@@ -221,11 +228,14 @@ pub const Client = struct {
         }
         if (body) |b| {
             try w.print("Content-Type: {s}\r\nContent-Length: {d}\r\n\r\n", .{ content_type, b.len });
-            try w.writeAll(b);
         } else {
             try w.writeAll("Content-Length: 0\r\n\r\n");
         }
-        try socket.socketWriteAll(self.io, stream.socket.handle, req.written(), Deadline.fromMs(self.io, timeout_ms));
+        const deadline = Deadline.fromMs(self.io, timeout_ms);
+        try socket.socketWriteAll(self.io, stream.socket.handle, req.written(), deadline);
+        if (body) |b| {
+            if (b.len > 0) try socket.socketWriteAll(self.io, stream.socket.handle, b, deadline);
+        }
         return stream;
     }
 };
