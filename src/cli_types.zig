@@ -45,14 +45,15 @@ pub const usage =
     \\  pull IMAGE                     Pull an image from a registry
     \\  rmi [-f] IMAGE                 Remove a local image (-f: force)
     \\  start CONTAINER                Start a created or stopped container
-    \\  stop CONTAINER                 Stop a running container
+    \\  stop [-t SECS] CONTAINER       Stop a running container (-t: stop timeout seconds)
     \\  restart [-t SECS] CONTAINER    Restart a container (-t: stop timeout seconds)
     \\  pause CONTAINER                Pause all processes inside a container
     \\  unpause CONTAINER              Unpause a paused container
     \\  rename CONTAINER NEW_NAME      Rename an existing container
     \\  kill [-s SIGNAL] CONTAINER     Send a signal to a running container (default: SIGTERM)
     \\  rm [-f] CONTAINER              Remove a container (-f: force)
-    \\  logs [-f] CONTAINER            Print a container's logs (-f: follow live output)
+    \\  logs [-f] [-t] [--tail N|all] [--since UNIX_TS] CONTAINER  Print a container's logs
+    \\                                 (-f: follow, -t: timestamps)
     \\  top CONTAINER                  Display the running processes of a container
     \\  exec [OPTIONS] CONTAINER CMD...  Run a command in a running container
     \\      -i, --interactive          Keep STDIN open
@@ -185,6 +186,11 @@ pub const RmOpts = struct {
 pub const LogsOpts = struct {
     container: []const u8,
     follow: bool = false,
+    timestamps: bool = false,
+    /// null = all lines.
+    tail: ?u32 = null,
+    /// Unix timestamp (seconds); only logs at or after it are returned.
+    since: ?u64 = null,
 };
 
 pub const ExecOpts = struct {
@@ -412,7 +418,7 @@ pub const Command = union(enum) {
     rmi: RmiOpts,
     run: RunOpts,
     start: []const u8,
-    stop: []const u8,
+    stop: RestartOpts,
     restart: RestartOpts,
     pause: []const u8,
     unpause: []const u8,

@@ -221,14 +221,19 @@ fn dispatch(
         .pull => |image| try pod.pullImage(client, logger, image, stdout),
         .rmi => |opts| try pod.removeImage(client, logger, opts.image, opts.force, stdout),
         .start => |container| try pod.startContainer(client, logger, container),
-        .stop => |container| try pod.stopContainer(client, logger, container),
+        .stop => |opts| try pod.stopContainer(client, logger, opts.container, opts.timeout_secs),
         .restart => |opts| try pod.restartContainer(client, logger, opts.container, opts.timeout_secs),
         .pause => |container| try pod.pauseContainer(client, logger, container),
         .unpause => |container| try pod.unpauseContainer(client, logger, container),
         .rename => |opts| try pod.renameContainer(client, logger, opts.container, opts.new_name),
         .kill => |opts| try pod.killContainer(client, logger, opts.container, opts.signal),
         .rm => |opts| try pod.removeContainer(client, logger, opts.container, opts.force),
-        .logs => |opts| try pod.fetchLogs(client, logger, opts.container, opts.follow, stdout),
+        .logs => |opts| try pod.fetchLogsWithOptions(client, logger, opts.container, .{
+            .follow = opts.follow,
+            .timestamps = opts.timestamps,
+            .tail = opts.tail,
+            .since = opts.since,
+        }, stdout),
         .top => |container| try pod.topContainer(client, logger, container, stdout),
         .inspect => |opts| if (opts.json)
             try pod.inspectJson(client, logger, opts.target, stdout)

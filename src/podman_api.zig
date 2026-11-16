@@ -223,10 +223,17 @@ pub fn startContainer(client: *const http.Client, logger: *log.Logger, id: []con
     logger.info("started container {s}", .{utils.shortId(id)});
 }
 
-pub fn stopContainer(client: *const http.Client, logger: *log.Logger, id: []const u8) !void {
+/// Stops a container (`POST /containers/{id}/stop[?t={secs}]`).
+pub fn stopContainer(client: *const http.Client, logger: *log.Logger, id: []const u8, timeout_secs: ?u32) !void {
     try validateIdentifier(id);
+    if (timeout_secs) |t| {
+        if (t > 3600) return ApiError.InvalidTimeout;
+    }
 
-    const path = try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/stop", .{ api_prefix, id });
+    const path = if (timeout_secs) |t|
+        try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/stop?t={d}", .{ api_prefix, id, t })
+    else
+        try std.fmt.allocPrint(client.allocator, "{s}/containers/{s}/stop", .{ api_prefix, id });
     defer client.allocator.free(path);
 
     logger.debug("POST {s}", .{path});
@@ -422,13 +429,33 @@ pub fn waitContainer(client: *const http.Client, logger: *log.Logger, id: []cons
     return parsed.value.StatusCode;
 }
 
+pub const LogOptions = struct {
+    follow: bool = false,
+    timestamps: bool = false,
+    tail: ?u32 = null,
+    since: ?u64 = null,
+};
+
 pub fn fetchLogs(client: *const http.Client, logger: *log.Logger, id: []const u8, follow: bool, writer: anytype) !void {
+    return fetchLogsWithOptions(client, logger, id, .{ .follow = follow }, writer);
+}
+
+pub fn fetchLogsWithOptions(client: *const http.Client, logger: *log.Logger, id: []const u8, opts: LogOptions, writer: anytype) !void {
     try validateIdentifier(id);
+    const follow = opts.follow;
+
+    var query: std.ArrayList(u8) = .empty;
+    defer query.deinit(client.allocator);
+    try query.appendSlice(client.allocator, "stdout=1&stderr=1");
+    if (follow) try query.appendSlice(client.allocator, "&follow=1");
+    if (opts.timestamps) try query.appendSlice(client.allocator, "&timestamps=1");
+    if (opts.tail) |n| try query.print(client.allocator, "&tail={d}", .{n});
+    if (opts.since) |ts| try query.print(client.allocator, "&since={d}", .{ts});
 
     const path = try std.fmt.allocPrint(
         client.allocator,
-        "{s}/containers/{s}/logs?stdout=1&stderr=1{s}",
-        .{ api_prefix, id, if (follow) "&follow=1" else "" },
+        "{s}/containers/{s}/logs?{s}",
+        .{ api_prefix, id, query.items },
     );
     defer client.allocator.free(path);
 
@@ -1565,6 +1592,56 @@ test "restart, pause, unpause, rename, and removeImage endpoints + validation" {
     try renameContainer(&client, &logger, "web", "web2");
     try removeImage(&client, &logger, "alpine:3.20", true, &out.writer);
     try std.testing.expectEqualStrings("Removed alpine:3.20\n", out.written());
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(replies.len, ctx.matched);
+}
+
+test "stopContainer timeout and fetchLogsWithOptions query parameters" {
+    const alloc = std.testing.allocator;
+    const sock_path = try std.fmt.allocPrint(
+        alloc,
+        "/tmp/zp-stop-logs-{d}.sock",
+        .{std.Io.Clock.awake.now(std.testing.io).nanoseconds},
+    );
+    defer alloc.free(sock_path);
+    std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, sock_path) catch {};
+
+    var server = try (try std.Io.net.UnixAddress.init(sock_path)).listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
+
+    const frame = "\x01\x00\x00\x00\x00\x00\x00\x03hi\n";
+    const log_resp = "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n" ++ frame;
+    const replies = [_]ScriptedReply{
+        .{ .expected_prefix = "POST /v1.40/containers/web/stop?t=7 HTTP/1.1\r\n", .raw_response = "HTTP/1.1 204 No Content\r\n\r\n" },
+        .{ .expected_prefix = "POST /v1.40/containers/web/stop HTTP/1.1\r\n", .raw_response = "HTTP/1.1 204 No Content\r\n\r\n" },
+        .{ .expected_prefix = "GET /v1.40/containers/web/logs?stdout=1&stderr=1&timestamps=1&tail=20&since=1700000000 HTTP/1.1\r\n", .raw_response = log_resp },
+        .{ .expected_prefix = "GET /v1.40/containers/web/logs?stdout=1&stderr=1&tail=0 HTTP/1.1\r\n", .raw_response = log_resp },
+    };
+
+    var ctx = MockApiCtx{ .io = std.testing.io, .server = &server, .replies = &replies };
+    const thread = try std.Thread.spawn(.{}, runMockPodmanServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = http.Client{ .allocator = alloc, .socket_path = sock_path, .io = std.testing.io };
+    var logger = log.Logger{ .io = std.testing.io, .echo_stderr = false };
+    defer logger.deinit();
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+
+    // Validation happens before any socket traffic.
+    try std.testing.expectError(ApiError.InvalidIdentifier, stopContainer(&client, &logger, "../bad", 5));
+    try std.testing.expectError(ApiError.InvalidTimeout, stopContainer(&client, &logger, "web", 3601));
+    try std.testing.expectError(ApiError.InvalidIdentifier, fetchLogsWithOptions(&client, &logger, "a?b=1", .{}, &out.writer));
+
+    try stopContainer(&client, &logger, "web", 7);
+    try stopContainer(&client, &logger, "web", null);
+    try fetchLogsWithOptions(&client, &logger, "web", .{ .timestamps = true, .tail = 20, .since = 1700000000 }, &out.writer);
+    try fetchLogsWithOptions(&client, &logger, "web", .{ .tail = 0 }, &out.writer);
+    try std.testing.expectEqualStrings("hi\nhi\n", out.written());
 
     thread.join();
     joined = true;

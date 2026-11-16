@@ -117,9 +117,9 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
     else if (eql(name, "start"))
         .{ .start = try single(rest) }
     else if (eql(name, "stop"))
-        .{ .stop = try single(rest) }
+        .{ .stop = try parseTimeoutArgs(rest) }
     else if (eql(name, "restart"))
-        try parseRestart(rest)
+        .{ .restart = try parseTimeoutArgs(rest) }
     else if (eql(name, "pause"))
         .{ .pause = try single(rest) }
     else if (eql(name, "unpause"))
@@ -433,9 +433,21 @@ fn parseRm(args: []const []const u8) ParseError!Command {
 
 fn parseLogs(args: []const []const u8) ParseError!Command {
     var opts = LogsOpts{ .container = "" };
-    for (args) |a| {
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
         if (eql(a, "-f") or eql(a, "--follow")) {
             opts.follow = true;
+        } else if (eql(a, "-t") or eql(a, "--timestamps")) {
+            opts.timestamps = true;
+        } else if (eql(a, "--tail") or eql(a, "-n")) {
+            opts.tail = try parseTail(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--tail=")) {
+            opts.tail = try parseTail(a["--tail=".len..]);
+        } else if (eql(a, "--since")) {
+            opts.since = try parseSince(try takeValue(args, &i));
+        } else if (std.mem.startsWith(u8, a, "--since=")) {
+            opts.since = try parseSince(a["--since=".len..]);
         } else if (isFlag(a)) {
             return error.UnknownFlag;
         } else if (opts.container.len == 0) {
@@ -444,6 +456,17 @@ fn parseLogs(args: []const []const u8) ParseError!Command {
     }
     if (opts.container.len == 0) return error.MissingArgument;
     return .{ .logs = opts };
+}
+
+/// `--tail N|all`; "all" means no limit (null).
+fn parseTail(raw: []const u8) ParseError!?u32 {
+    if (eql(raw, "all")) return null;
+    return std.fmt.parseInt(u32, raw, 10) catch return error.InvalidValue;
+}
+
+/// `--since UNIX_SECONDS` (digits only; relative durations are rejected fail-closed).
+fn parseSince(raw: []const u8) ParseError!u64 {
+    return std.fmt.parseInt(u64, raw, 10) catch return error.InvalidValue;
 }
 
 fn parseRun(allocator: std.mem.Allocator, args: []const []const u8) ParseError!RunOpts {
@@ -828,23 +851,17 @@ fn parseNetwork(args: []const []const u8) ParseError!Command {
     }
 }
 
-/// Parses `restart [-t|--time SECONDS] CONTAINER`.
-fn parseRestart(args: []const []const u8) ParseError!Command {
+/// Parses `[-t|--time SECONDS] CONTAINER` shared by `stop` and `restart`.
+fn parseTimeoutArgs(args: []const []const u8) ParseError!RestartOpts {
     var timeout_secs: ?u32 = null;
     var container: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const a = args[i];
         if (eql(a, "-t") or eql(a, "--time")) {
-            const raw = try takeValue(args, &i);
-            const secs = std.fmt.parseInt(u32, raw, 10) catch return error.InvalidValue;
-            if (secs > 3600) return error.InvalidValue;
-            timeout_secs = secs;
+            timeout_secs = try parseTimeoutSecs(try takeValue(args, &i));
         } else if (std.mem.startsWith(u8, a, "--time=")) {
-            const raw = a["--time=".len..];
-            const secs = std.fmt.parseInt(u32, raw, 10) catch return error.InvalidValue;
-            if (secs > 3600) return error.InvalidValue;
-            timeout_secs = secs;
+            timeout_secs = try parseTimeoutSecs(a["--time=".len..]);
         } else if (isFlag(a)) {
             return error.UnknownFlag;
         } else if (container == null) {
@@ -853,10 +870,16 @@ fn parseRestart(args: []const []const u8) ParseError!Command {
             return error.TooManyArguments;
         }
     }
-    return .{ .restart = .{
+    return .{
         .container = container orelse return error.MissingArgument,
         .timeout_secs = timeout_secs,
-    } };
+    };
+}
+
+fn parseTimeoutSecs(raw: []const u8) ParseError!u32 {
+    const secs = std.fmt.parseInt(u32, raw, 10) catch return error.InvalidValue;
+    if (secs > 3600) return error.InvalidValue;
+    return secs;
 }
 
 /// Parses `rename CONTAINER NEW_NAME`.
@@ -1232,7 +1255,7 @@ test "simple commands" {
     try std.testing.expect((try testParse(&.{ "ps", "-a" })).command.ps.all);
     try std.testing.expect((try testParse(&.{ "ps", "--all" })).command.ps.all);
     try std.testing.expectEqualStrings("alpine", (try testParse(&.{ "pull", "alpine" })).command.pull);
-    try std.testing.expectEqualStrings("web", (try testParse(&.{ "stop", "web" })).command.stop);
+    try std.testing.expectEqualStrings("web", (try testParse(&.{ "stop", "web" })).command.stop.container);
     try std.testing.expectEqualStrings("web", (try testParse(&.{ "logs", "web" })).command.logs.container);
     try std.testing.expect(!(try testParse(&.{ "logs", "web" })).command.logs.follow);
     try std.testing.expect((try testParse(&.{ "logs", "-f", "web" })).command.logs.follow);
@@ -1296,6 +1319,29 @@ test "search, save, load, export, and import parsers" {
     try std.testing.expectError(error.MissingArgument, testParse(&.{ "import", "/a.tar" }));
     try std.testing.expectError(error.TooManyArguments, testParse(&.{ "import", "/a.tar", "repo", "extra" }));
     try std.testing.expectError(error.UnknownFlag, testParse(&.{ "import", "--bad", "/a.tar" }));
+}
+
+test "parse stop -t and logs --tail/--since/--timestamps" {
+    const st = (try testParse(&.{ "stop", "-t", "5", "web" })).command.stop;
+    try std.testing.expectEqualStrings("web", st.container);
+    try std.testing.expectEqual(@as(?u32, 5), st.timeout_secs);
+    try std.testing.expectEqual(@as(?u32, 9), (try testParse(&.{ "stop", "--time=9", "web" })).command.stop.timeout_secs);
+    try std.testing.expectEqual(@as(?u32, null), (try testParse(&.{ "stop", "web" })).command.stop.timeout_secs);
+    try std.testing.expectError(error.InvalidValue, testParse(&.{ "stop", "-t", "3601", "web" }));
+    try std.testing.expectError(error.InvalidValue, testParse(&.{ "stop", "-t", "x", "web" }));
+    try std.testing.expectError(error.MissingValue, testParse(&.{ "stop", "-t" }));
+    try std.testing.expectError(error.MissingArgument, testParse(&.{ "stop", "-t", "5" }));
+    try std.testing.expectError(error.TooManyArguments, testParse(&.{ "stop", "a", "b" }));
+    try std.testing.expectError(error.UnknownFlag, testParse(&.{ "stop", "--bad", "web" }));
+
+    const lg = (try testParse(&.{ "logs", "-f", "-t", "--tail", "20", "--since=1700000000", "web" })).command.logs;
+    try std.testing.expect(lg.follow and lg.timestamps);
+    try std.testing.expectEqual(@as(?u32, 20), lg.tail);
+    try std.testing.expectEqual(@as(?u64, 1700000000), lg.since);
+    try std.testing.expectEqual(@as(?u32, null), (try testParse(&.{ "logs", "--tail", "all", "web" })).command.logs.tail);
+    try std.testing.expectError(error.InvalidValue, testParse(&.{ "logs", "--tail", "-1", "web" }));
+    try std.testing.expectError(error.InvalidValue, testParse(&.{ "logs", "--since", "10m", "web" }));
+    try std.testing.expectError(error.MissingValue, testParse(&.{ "logs", "--tail" }));
 }
 
 test "parse errors" {
