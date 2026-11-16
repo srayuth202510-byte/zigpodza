@@ -1938,3 +1938,50 @@ test "BUG-042: pumpBidirectional shuts down send half on stdin EOF" {
     try std.testing.expect(server_ctx.saw_eof);
     try std.testing.expectEqualStrings("pong\n", output.written());
 }
+
+fn pipeStream(fd: std.posix.fd_t) std.Io.net.Stream {
+    return .{ .socket = .{ .handle = fd, .address = .{ .ip4 = .unspecified(0) } } };
+}
+
+test "pumpBidirectional ends cleanly when peer closes and flushes initial data (tty)" {
+    const alloc = std.testing.allocator;
+    const fds = try utils.pipe();
+    defer utils.closeFd(fds[0]);
+    utils.closeFd(fds[1]); // peer hangs up immediately -> POLL.HUP
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try pumpBidirectional(std.testing.io, alloc, pipeStream(fds[0]), "banner\n", null, &out.writer, true, 500);
+    try std.testing.expectEqualStrings("banner\n", out.written());
+}
+
+test "pumpBidirectional demultiplexes initial data when not tty" {
+    const alloc = std.testing.allocator;
+    const fds = try utils.pipe();
+    defer utils.closeFd(fds[0]);
+    utils.closeFd(fds[1]);
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    const frame = [_]u8{ 1, 0, 0, 0, 0, 0, 0, 5 } ++ "hello".*;
+    try pumpBidirectional(std.testing.io, alloc, pipeStream(fds[0]), &frame, null, &out.writer, false, 500);
+    try std.testing.expectEqualStrings("hello", out.written());
+}
+
+test "pumpBidirectional times out on a silent peer with idle stdin" {
+    const alloc = std.testing.allocator;
+    const peer = try utils.pipe(); // write end stays open and silent
+    defer utils.closeFd(peer[0]);
+    defer utils.closeFd(peer[1]);
+    const stdin_pipe = try utils.pipe(); // idle, never written or closed
+    defer utils.closeFd(stdin_pipe[0]);
+    defer utils.closeFd(stdin_pipe[1]);
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try std.testing.expectError(
+        http.Error.Timeout,
+        pumpBidirectional(std.testing.io, alloc, pipeStream(peer[0]), "", stdin_pipe[0], &out.writer, true, 25),
+    );
+    try std.testing.expectEqualStrings("", out.written());
+}

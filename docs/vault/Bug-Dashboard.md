@@ -21,7 +21,7 @@ status: active
 | :--- | :--- |
 | Tracked Bug Patterns | **46** (46 Guarded) |
 | Zig Source Modules | **25** |
-| Unit & Integration Tests | **244** |
+| Unit & Integration Tests | **247** |
 | Static Security & Memory Gates | **7/9 PASS** |
 
 ## Guard Coverage Map
@@ -215,7 +215,7 @@ flowchart LR
 | [http_types.zig](../../src/http_types.zig) | 284 | 22 | 11 | `std.testing.allocator` |
 | [log.zig](../../src/log.zig) | 903 | 22 | 12 | `std.testing.allocator` |
 | [main.zig](../../src/main.zig) | 1134 | 2 | 4 | `missing gpa check` |
-| [podman_api.zig](../../src/podman_api.zig) | 1940 | 118 | 15 | `std.testing.allocator` |
+| [podman_api.zig](../../src/podman_api.zig) | 1987 | 118 | 18 | `std.testing.allocator` |
 | [podman_build.zig](../../src/podman_build.zig) | 614 | 8 | 6 | `std.testing.allocator` |
 | [podman_images.zig](../../src/podman_images.zig) | 672 | 7 | 7 | `std.testing.allocator` |
 | [podman_logs.zig](../../src/podman_logs.zig) | 841 | 10 | 8 | `std.testing.allocator` |
